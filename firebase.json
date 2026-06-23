@@ -1,0 +1,25 @@
+{
+  "functions": {
+    "source": "functions"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "tunga-app-2026",
+          "appId": "1:41110923671:android:f8ef175dea6399b7237cd2",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "tunga-app-2026",
+          "configurations": {
+            "android": "1:41110923671:android:f8ef175dea6399b7237cd2",
+            "ios": "1:41110923671:ios:dda5a75c8d52fd48237cd2"
+          }
+        }
+      }
+    }
+  }
+}
