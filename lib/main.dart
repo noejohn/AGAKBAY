@@ -7,16 +7,17 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
 import 'package:tunga/screens/hike_room_screen.dart';
-import 'package:tunga/screens/offline_map_example_screen.dart';
 import 'package:tunga/services/activity_sync_service.dart';
 import 'package:tunga/services/auth_database_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
@@ -1056,6 +1057,8 @@ enum _NearbyAnchorMode { nearMe, nearSearch }
 
 enum _MarkerStatusFilter { all, open, closed }
 
+enum _MyHikesView { completed, recorded, pending }
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -1082,6 +1085,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _mapsApiKey = '';
   String _weatherApiKey = '';
   String _accountType = 'hiker';
+  String _locationAccessStatus = 'Checking';
+  bool _checkingLocationAccessStatus = false;
+  bool _updatingProfile = false;
+  bool _uploadingProfilePhoto = false;
+  Map<String, dynamic> _currentUserProfile = <String, dynamic>{};
   LatLng _currentCenter = _fallbackCenter;
   LatLng? _myLocationCenter;
   _NearbyTrail? _searchedTrailAnchor;
@@ -1094,8 +1102,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   _MarkerStatusFilter _markerStatusFilter = _MarkerStatusFilter.all;
   int _selectedNavIndex = 0;
   int _communityFeedFilterIndex = 0;
+  _MyHikesView _myHikesView = _MyHikesView.completed;
   Marker? _searchMarker;
   List<_NearbyTrail> _nearbyTrails = const [];
+  List<PendingTrailSubmission> _pendingTrailSubmissions =
+      const <PendingTrailSubmission>[];
+  bool _loadingPendingTrailSubmissions = false;
   final Map<String, _NearbyTrail> _trailLibrary = <String, _NearbyTrail>{};
   final Set<String> _completedTrailIds = <String>{};
   final List<_CompletedHikeSession> _completedHikeSessions =
@@ -1127,12 +1139,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final profile = await _hikeRoomService.getCurrentUserProfile();
       final accountType = _hikeRoomService.accountTypeFromProfile(profile);
       if (mounted) {
-        setState(() => _accountType = accountType);
+        setState(() {
+          _accountType = accountType;
+          _currentUserProfile = profile;
+        });
       }
     } catch (_) {
       _accountType = 'hiker';
     }
     await _loadMapsApiKey();
+    unawaited(_ensureDefaultAppContent());
+    unawaited(_refreshLocationAccessStatus());
     await _loadCurrentLocation();
     if (_nearbyTrails.isEmpty) {
       await _refreshNearbyTrailsForActiveAnchor();
@@ -2458,7 +2475,106 @@ class _DashboardScreenState extends State<DashboardScreen> {
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> _refreshPendingTrailSubmissions() async {
+    if (_loadingPendingTrailSubmissions) {
+      return;
+    }
+    setState(() => _loadingPendingTrailSubmissions = true);
+    try {
+      final submissions = await OfflineActivityDatabase.instance
+          .getPendingTrailSubmissions();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _pendingTrailSubmissions = submissions;
+        _loadingPendingTrailSubmissions = false;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _loadingPendingTrailSubmissions = false);
+      }
+    }
+  }
+
+  Stream<QuerySnapshot<Map<String, dynamic>>>? _trailSubmissionsStream() {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return null;
+    }
+    return _firestore
+        .collection('trail_submissions')
+        .where('submittedBy', isEqualTo: user.uid)
+        .snapshots();
+  }
+
+  Future<void> _ensureDefaultAppContent() async {
+    final defaults = <String, Map<String, dynamic>>{
+      'safety_guide': {
+        'body':
+            'Use Agakbay as a planning and tracking aid. Always follow local rules, weather advisories, and your guide.',
+        'sections': [
+          {
+            'title': 'Before the hike',
+            'body':
+                'Check weather, tell someone your route, charge your phone, bring water, food, a light, and first-aid basics.',
+          },
+          {
+            'title': 'During the hike',
+            'body':
+                'Stay on the trail, keep your group together, watch for sudden weather changes, and save battery for navigation and SOS.',
+          },
+          {
+            'title': 'Emergency',
+            'body':
+                'Use the Hike SOS Room when hiking with a guide. Share your GPS location and wait for instructions if injured or lost.',
+          },
+        ],
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      'about_agakbay': {
+        'body':
+            'Agakbay is a hiking companion for exploring mountains, tracking hikes, recording missing trails, and supporting guide-led SOS rooms.',
+        'sections': [
+          {
+            'title': 'Trail recording',
+            'body':
+                'When a mountain has no mapped trail, hikers can record the real route. Agakbay checks the recording before showing it as a community route.',
+          },
+          {
+            'title': 'Community routes',
+            'body':
+                'Community recorded trails are useful guides, but hikers should still follow local guides, signs, and safety rules.',
+          },
+        ],
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+    };
+
+    for (final entry in defaults.entries) {
+      try {
+        final ref = _firestore.collection('app_content').doc(entry.key);
+        final snapshot = await ref.get();
+        if (!snapshot.exists) {
+          await ref.set({
+            ...entry.value,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        }
+      } catch (_) {
+        // Keep the UI usable even if Firestore rules block app content writes.
+      }
+    }
+  }
+
   String _communityDisplayName() {
+    final profileName =
+        _currentUserProfile['fullName']?.toString().trim() ??
+        _currentUserProfile['displayName']?.toString().trim() ??
+        '';
+    if (profileName.isNotEmpty) {
+      return profileName;
+    }
     final user = _firebaseAuth.currentUser;
     if (user == null) {
       return 'Guest Hiker';
@@ -2472,6 +2588,335 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return email.split('@').first;
     }
     return 'Hiker';
+  }
+
+  String _accountTypeLabel() {
+    return _accountType == 'tour_guide' ? 'Tour Guide' : 'Hiker';
+  }
+
+  String _profilePhotoUrl() {
+    final profileUrl = _currentUserProfile['profilePhotoUrl']?.toString() ?? '';
+    if (profileUrl.trim().isNotEmpty) {
+      return profileUrl.trim();
+    }
+    return _firebaseAuth.currentUser?.photoURL?.trim() ?? '';
+  }
+
+  Future<void> _openEditProfileDialog() async {
+    final controller = TextEditingController(text: _communityDisplayName());
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF072117),
+          title: const Text('Edit Name', style: TextStyle(color: Colors.white)),
+          content: TextField(
+            controller: controller,
+            textCapitalization: TextCapitalization.words,
+            textInputAction: TextInputAction.done,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              labelText: 'Display name',
+              labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
+              prefixIcon: const Icon(Icons.person_outline_rounded),
+            ),
+            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    if (result == null || !mounted) {
+      return;
+    }
+    final name = result.trim();
+    if (name.length < 2) {
+      _showDashboardSnackBar('Enter a valid display name.');
+      return;
+    }
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      _showDashboardSnackBar('Sign in to update your profile.');
+      return;
+    }
+    setState(() => _updatingProfile = true);
+    try {
+      await user.updateDisplayName(name);
+      setState(() {
+        _currentUserProfile = {
+          ..._currentUserProfile,
+          'fullName': name,
+          'displayName': name,
+        };
+      });
+      try {
+        await _firestore.collection('users').doc(user.uid).set({
+          'fullName': name,
+          'displayName': name,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        _showDashboardSnackBar('Profile name updated.');
+      } on FirebaseException catch (error) {
+        _showDashboardSnackBar(
+          'Name updated, but database save failed: ${_firebaseErrorText(error)}',
+        );
+      }
+    } on FirebaseException catch (error) {
+      _showDashboardSnackBar(
+        'Unable to update profile name: ${_firebaseErrorText(error)}',
+      );
+    } catch (error) {
+      _showDashboardSnackBar('Unable to update profile name: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _updatingProfile = false);
+      }
+    }
+  }
+
+  Future<void> _pickAndUploadProfilePhoto() async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      _showDashboardSnackBar('Sign in to upload a profile photo.');
+      return;
+    }
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 82,
+        maxWidth: 900,
+        maxHeight: 900,
+      );
+      if (picked == null || !mounted) {
+        return;
+      }
+      setState(() => _uploadingProfilePhoto = true);
+      final ref = FirebaseStorage.instance
+          .ref()
+          .child('profile_photos')
+          .child(user.uid)
+          .child('avatar.jpg');
+      final bytes = await picked.readAsBytes();
+      await ref.putData(
+        bytes,
+        SettableMetadata(contentType: picked.mimeType ?? 'image/jpeg'),
+      );
+      final url = await ref.getDownloadURL();
+      await user.updatePhotoURL(url);
+      setState(() {
+        _currentUserProfile = {..._currentUserProfile, 'profilePhotoUrl': url};
+      });
+      try {
+        await _firestore.collection('users').doc(user.uid).set({
+          'profilePhotoUrl': url,
+          'updatedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+        _showDashboardSnackBar('Profile photo updated.');
+      } on FirebaseException catch (error) {
+        _showDashboardSnackBar(
+          'Photo uploaded, but database save failed: ${_firebaseErrorText(error)}',
+        );
+      }
+    } on FirebaseException catch (error) {
+      _showDashboardSnackBar(
+        'Photo upload failed: ${_firebaseErrorText(error)}',
+      );
+    } on PlatformException catch (error) {
+      _showDashboardSnackBar(
+        'Photo picker failed: ${error.message ?? error.code}',
+      );
+    } catch (error) {
+      _showDashboardSnackBar('Unable to upload profile photo: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _uploadingProfilePhoto = false);
+      }
+    }
+  }
+
+  String _firebaseErrorText(FirebaseException error) {
+    final message = error.message?.trim();
+    if (message != null && message.isNotEmpty) {
+      return message;
+    }
+    return error.code;
+  }
+
+  String _emergencyContactName() {
+    return _currentUserProfile['emergencyContactName']?.toString().trim() ?? '';
+  }
+
+  String _emergencyContactPhone() {
+    return _currentUserProfile['emergencyContactPhone']?.toString().trim() ??
+        '';
+  }
+
+  String _emergencyContactSummary() {
+    final name = _emergencyContactName();
+    final phone = _emergencyContactPhone();
+    if (name.isEmpty && phone.isEmpty) {
+      return 'Not set';
+    }
+    if (name.isNotEmpty && phone.isNotEmpty) {
+      return '$name - $phone';
+    }
+    return name.isNotEmpty ? name : phone;
+  }
+
+  Future<void> _refreshLocationAccessStatus() async {
+    if (_checkingLocationAccessStatus) {
+      return;
+    }
+    if (mounted) {
+      setState(() => _checkingLocationAccessStatus = true);
+    }
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      var status = 'Service off';
+      if (serviceEnabled) {
+        final permission = await Geolocator.checkPermission();
+        status = switch (permission) {
+          LocationPermission.always => 'Always allowed',
+          LocationPermission.whileInUse => 'Allowed while using',
+          LocationPermission.denied => 'Permission needed',
+          LocationPermission.deniedForever => 'Permission blocked',
+          LocationPermission.unableToDetermine => 'Unknown',
+        };
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _locationAccessStatus = status;
+        _checkingLocationAccessStatus = false;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _locationAccessStatus = 'Unknown';
+        _checkingLocationAccessStatus = false;
+      });
+    }
+  }
+
+  Future<void> _openEmergencyContactDialog() async {
+    final nameController = TextEditingController(text: _emergencyContactName());
+    final phoneController = TextEditingController(
+      text: _emergencyContactPhone(),
+    );
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF072117),
+          title: const Text(
+            'Emergency Contact',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                textInputAction: TextInputAction.next,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  labelText: 'Name',
+                  labelStyle: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.7),
+                  ),
+                  prefixIcon: const Icon(Icons.person_outline_rounded),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: phoneController,
+                keyboardType: TextInputType.phone,
+                textInputAction: TextInputAction.done,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  labelText: 'Phone number',
+                  labelStyle: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.7),
+                  ),
+                  prefixIcon: const Icon(Icons.phone_rounded),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop({
+                  'name': nameController.text.trim(),
+                  'phone': phoneController.text.trim(),
+                });
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    nameController.dispose();
+    phoneController.dispose();
+    if (result == null || !mounted) {
+      return;
+    }
+    final name = result['name'] ?? '';
+    final phone = result['phone'] ?? '';
+    if (name.isEmpty && phone.isEmpty) {
+      _showDashboardSnackBar('Enter a name or phone number.');
+      return;
+    }
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      _showDashboardSnackBar('Sign in to save an emergency contact.');
+      return;
+    }
+    try {
+      await _firestore.collection('users').doc(user.uid).set({
+        'emergencyContactName': name,
+        'emergencyContactPhone': phone,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      setState(() {
+        _currentUserProfile = {
+          ..._currentUserProfile,
+          'emergencyContactName': name,
+          'emergencyContactPhone': phone,
+        };
+      });
+      _showDashboardSnackBar('Emergency contact saved.');
+    } catch (_) {
+      _showDashboardSnackBar('Unable to save emergency contact.');
+    }
+  }
+
+  void _openMyHikesView(_MyHikesView view) {
+    setState(() {
+      _selectedNavIndex = 1;
+      _myHikesView = view;
+    });
+    if (view != _MyHikesView.completed) {
+      unawaited(_refreshPendingTrailSubmissions());
+    }
   }
 
   String _communityAvatarSeed(String name) {
@@ -3242,7 +3687,87 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
     });
     _showDashboardSnackBar('${room.mountainName} hike saved to My Hikes.');
+    unawaited(_updateLeaderboardStats(trail, session));
     unawaited(_submitTrailRouteIfAccepted(trail, session));
+  }
+
+  Future<void> _startTrailRecordingForMountain(_NearbyTrail trail) async {
+    if (_firebaseAuth.currentUser == null) {
+      _showDashboardSnackBar('Sign in before recording a trail route.');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF072117),
+          title: const Text(
+            'Record Trail Route?',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            'Keep GPS tracking active while you follow the real trail. '
+            'After the hike, Agakbay will run an automatic quality check. '
+            'If the route passes, future hikers can see it as a community recorded trail.',
+            style: TextStyle(color: Colors.white.withValues(alpha: 0.86)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              icon: const Icon(Icons.route_rounded),
+              label: const Text('Start Recording'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    final communityTrail = await _fetchCommunityTrail(trail);
+    if (!mounted) {
+      return;
+    }
+    final session = await Navigator.of(context).push<_LiveHikeResult>(
+      MaterialPageRoute<_LiveHikeResult>(
+        builder: (_) => _HikingModeScreen(
+          trail: trail,
+          mapsApiKey: _mapsApiKey,
+          communityTrail: communityTrail,
+          recordingNewTrail: true,
+        ),
+      ),
+    );
+    if (!mounted || session == null) {
+      return;
+    }
+    setState(() {
+      _rememberTrail(trail);
+      _completedTrailIds.add(trail.placeId);
+      _completedHikeSessions.insert(
+        0,
+        _CompletedHikeSession(
+          trail: trail,
+          completedAt: DateTime.now(),
+          distanceKm: session.distanceKm,
+          duration: session.duration,
+          elevationGainMasl: session.elevationGainMasl,
+          maxElevationMasl: session.maxElevationMasl,
+          checkpointsReached: session.checkpointsReached,
+          totalCheckpoints: session.totalCheckpoints,
+          reachedSummit: session.reachedSummit,
+        ),
+      );
+    });
+    unawaited(_updateLeaderboardStats(trail, session));
+    await _submitTrailRouteIfAccepted(trail, session, askFirst: false);
+    await _fetchCommunityTrail(trail, forceRefresh: true);
   }
 
   List<Map<String, double>> _encodeRoutePoints(List<LatLng> points) {
@@ -3269,6 +3794,42 @@ class _DashboardScreenState extends State<DashboardScreen> {
           },
         )
         .toList();
+  }
+
+  List<LatLng> _downsampleRoutePoints(
+    List<LatLng> points, {
+    int maxPoints = 600,
+  }) {
+    if (points.length <= maxPoints) {
+      return List<LatLng>.from(points);
+    }
+    final step = (points.length - 1) / (maxPoints - 1);
+    final sampled = <LatLng>[];
+    for (var i = 0; i < maxPoints; i++) {
+      final index = (i * step).round().clamp(0, points.length - 1).toInt();
+      sampled.add(points[index]);
+    }
+    sampled[0] = points.first;
+    sampled[sampled.length - 1] = points.last;
+    return sampled;
+  }
+
+  List<_TrailTrackPoint> _downsampleTrackPoints(
+    List<_TrailTrackPoint> points, {
+    int maxPoints = 900,
+  }) {
+    if (points.length <= maxPoints) {
+      return List<_TrailTrackPoint>.from(points);
+    }
+    final step = (points.length - 1) / (maxPoints - 1);
+    final sampled = <_TrailTrackPoint>[];
+    for (var i = 0; i < maxPoints; i++) {
+      final index = (i * step).round().clamp(0, points.length - 1).toInt();
+      sampled.add(points[index]);
+    }
+    sampled[0] = points.first;
+    sampled[sampled.length - 1] = points.last;
+    return sampled;
   }
 
   List<LatLng> _decodeLatLngList(dynamic raw) {
@@ -3373,19 +3934,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Future<void> _submitTrailRouteIfAccepted(
     _NearbyTrail trail,
-    _LiveHikeResult hikeResult,
-  ) async {
+    _LiveHikeResult hikeResult, {
+    bool askFirst = true,
+  }) async {
     if (_firebaseAuth.currentUser == null) {
       return;
     }
-    final shouldSubmit = await _askSubmitTrailRoute(trail);
-    if (!shouldSubmit || !mounted) {
-      return;
+    if (askFirst) {
+      final shouldSubmit = await _askSubmitTrailRoute(trail);
+      if (!shouldSubmit || !mounted) {
+        return;
+      }
     }
     try {
       final mountainKey = _mountainKeyForTrail(trail);
-      final routePoints = hikeResult.routePoints;
-      final trackPoints = hikeResult.trackPoints;
+      final routePoints = _downsampleRoutePoints(hikeResult.routePoints);
+      final trackPoints = _downsampleTrackPoints(hikeResult.trackPoints);
       if (routePoints.length < 2 || trackPoints.length < 2) {
         _showDashboardSnackBar('Route too short to submit.');
         return;
@@ -3414,13 +3978,78 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'startedAt': hikeResult.startedAt.toUtc().toIso8601String(),
         'endedAt': hikeResult.endedAt.toUtc().toIso8601String(),
       });
-      _showDashboardSnackBar(
-        'Trail route saved. It will upload automatically when online.',
+      _communityTrailCache[mountainKey] = _CommunityTrailData(
+        mountainKey: mountainKey,
+        status: 'pending',
+        points: routePoints,
+        qualityScore: estimatedQuality,
+        submissionCount: 1,
+        source: 'local_pending_recording',
+        updatedAt: DateTime.now(),
       );
+      _showDashboardSnackBar(
+        askFirst
+            ? 'Trail route saved. It will upload automatically when online.'
+            : 'Trail recording submitted. Agakbay will check it automatically.',
+      );
+      unawaited(
+        _createUserNotification(
+          type: 'trail',
+          title: 'Trail Recording Saved',
+          body:
+              '${trail.name} was saved for upload and automatic quality checking.',
+        ),
+      );
+      unawaited(_refreshPendingTrailSubmissions());
       unawaited(ActivitySyncService.shared.syncPendingActivities());
     } catch (_) {
       _showDashboardSnackBar('Unable to save the trail submission locally.');
     }
+  }
+
+  Future<void> _updateLeaderboardStats(
+    _NearbyTrail trail,
+    _LiveHikeResult hikeResult,
+  ) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return;
+    }
+    final mountainKey = _mountainKeyForTrail(trail);
+    await _firestore.collection('leaderboard').doc(user.uid).set({
+      'userId': user.uid,
+      'displayName': _communityDisplayName(),
+      'accountType': _accountType,
+      'completedMountains': FieldValue.increment(1),
+      'summitsReached': FieldValue.increment(hikeResult.reachedSummit ? 1 : 0),
+      'totalDistanceKm': FieldValue.increment(hikeResult.distanceKm),
+      'lastMountainName': trail.name,
+      'lastMountainKey': mountainKey,
+      'completedTrailKeys': FieldValue.arrayUnion([mountainKey]),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> _createUserNotification({
+    required String type,
+    required String title,
+    required String body,
+  }) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return;
+    }
+    await _firestore
+        .collection('users')
+        .doc(user.uid)
+        .collection('notifications')
+        .add({
+          'type': type,
+          'title': title,
+          'body': body,
+          'read': false,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
   }
 
   double _estimateSubmissionQuality(_LiveHikeResult hikeResult) {
@@ -4251,6 +4880,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         setState(() {
           _selectedNavIndex = index;
         });
+        if (index == 1) {
+          unawaited(_refreshPendingTrailSubmissions());
+        }
       },
       type: BottomNavigationBarType.fixed,
       backgroundColor: const Color(0xFF02130E),
@@ -4324,6 +4956,702 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  Future<void> _openAppMenuSheet() async {
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close menu',
+      barrierColor: Colors.black.withValues(alpha: 0.48),
+      transitionDuration: const Duration(milliseconds: 260),
+      pageBuilder: (dialogContext, animation, secondaryAnimation) {
+        final width = MediaQuery.of(dialogContext).size.width;
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: Material(
+            color: Colors.transparent,
+            child: SafeArea(
+              child: Container(
+                width: math.min(width * 0.82, 340),
+                height: double.infinity,
+                margin: const EdgeInsets.fromLTRB(10, 10, 0, 10),
+                padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF02130E),
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.12),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.35),
+                      blurRadius: 28,
+                      offset: const Offset(12, 0),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          'Menu',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: 'Close menu',
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    _menuUserHeader(),
+                    const SizedBox(height: 28),
+                    _appMenuItem(
+                      icon: Icons.leaderboard_rounded,
+                      iconColor: const Color(0xFFFFD76A),
+                      title: 'Leaderboard',
+                      subtitle: 'Top hikers from database stats',
+                      onTap: () {
+                        Navigator.of(dialogContext).pop();
+                        _openLeaderboardSheet();
+                      },
+                    ),
+                    _appMenuItem(
+                      icon: Icons.health_and_safety_rounded,
+                      iconColor: const Color(0xFFFF7A7A),
+                      title: 'Safety Guide',
+                      subtitle: 'Hiking safety content from Firestore',
+                      onTap: () {
+                        Navigator.of(dialogContext).pop();
+                        _openSafetyGuideSheet();
+                      },
+                    ),
+                    _appMenuItem(
+                      icon: Icons.info_outline_rounded,
+                      iconColor: const Color(0xFF48D1FF),
+                      title: 'About Agakbay',
+                      subtitle: 'App information from Firestore',
+                      onTap: () {
+                        Navigator.of(dialogContext).pop();
+                        _openAboutAgakbaySheet();
+                      },
+                    ),
+                    const Spacer(),
+                    Divider(color: Colors.white.withValues(alpha: 0.1)),
+                    _appMenuItem(
+                      icon: Icons.person_outline_rounded,
+                      iconColor: const Color(0xFF7CF9A2),
+                      title: 'Profile',
+                      subtitle: 'Account, safety, and trail activity',
+                      onTap: () {
+                        Navigator.of(dialogContext).pop();
+                        setState(() => _selectedNavIndex = 3);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOut,
+        );
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(-1, 0),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        );
+      },
+    );
+  }
+
+  Widget _menuUserHeader() {
+    final displayName = _communityDisplayName();
+    final photoUrl = _profilePhotoUrl();
+    return Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            width: 56,
+            height: 56,
+            color: const Color(0xFF0F2A1E),
+            child: photoUrl.isEmpty
+                ? Center(
+                    child: Text(
+                      _communityAvatarSeed(displayName),
+                      style: const TextStyle(
+                        color: Color(0xFF7CF9A2),
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  )
+                : Image.network(photoUrl, fit: BoxFit.cover),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                displayName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                _firebaseAuth.currentUser?.email ?? 'No email',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.58),
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _appMenuItem({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: iconColor),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.62),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: Colors.white54),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openLeaderboardSheet() {
+    return _openDatabaseSheet(
+      title: 'Leaderboard',
+      icon: Icons.leaderboard_rounded,
+      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: _firestore
+            .collection('leaderboard')
+            .orderBy('completedMountains', descending: true)
+            .limit(50)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const _SheetLoading();
+          }
+          final docs = snapshot.data?.docs ?? const [];
+          if (docs.isEmpty) {
+            return _sheetEmptyState(
+              icon: Icons.leaderboard_rounded,
+              title: 'No rankings yet',
+              message: 'Leaderboard records appear after users finish hikes.',
+            );
+          }
+          return Column(
+            children: [
+              for (var index = 0; index < docs.length; index++) ...[
+                _leaderboardRow(index + 1, docs[index].data()),
+                if (index != docs.length - 1)
+                  Divider(color: Colors.white.withValues(alpha: 0.08)),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _leaderboardRow(int rank, Map<String, dynamic> data) {
+    final name = data['displayName']?.toString() ?? 'Hiker';
+    final role = data['accountType']?.toString() == 'tour_guide'
+        ? 'Tour Guide'
+        : 'Hiker';
+    final completed = (data['completedMountains'] as num?)?.toInt() ?? 0;
+    final summits = (data['summitsReached'] as num?)?.toInt() ?? 0;
+    final distance = (data['totalDistanceKm'] as num?)?.toDouble() ?? 0;
+    final color = rank == 1
+        ? const Color(0xFFFFD76A)
+        : rank == 2
+        ? const Color(0xFFBBD2E8)
+        : rank == 3
+        ? const Color(0xFFD9A066)
+        : const Color(0xFF7CF9A2);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.16),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: Text(
+              '#$rank',
+              style: TextStyle(color: color, fontWeight: FontWeight.w900),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$role - ${distance.toStringAsFixed(1)} km - $summits summits',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.62),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '$completed',
+            style: const TextStyle(
+              color: Color(0xFF7CF9A2),
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openSafetyGuideSheet() {
+    return _openDatabaseContentSheet(
+      title: 'Safety Guide',
+      icon: Icons.health_and_safety_rounded,
+      docId: 'safety_guide',
+      emptyTitle: 'No safety guide yet',
+      emptyMessage:
+          'Add app_content/safety_guide in Firestore with sections to show it here.',
+    );
+  }
+
+  Future<void> _openAboutAgakbaySheet() {
+    return _openDatabaseContentSheet(
+      title: 'About Agakbay',
+      icon: Icons.info_outline_rounded,
+      docId: 'about_agakbay',
+      emptyTitle: 'No about content yet',
+      emptyMessage:
+          'Add app_content/about_agakbay in Firestore to show app information here.',
+    );
+  }
+
+  Future<void> _openDatabaseContentSheet({
+    required String title,
+    required IconData icon,
+    required String docId,
+    required String emptyTitle,
+    required String emptyMessage,
+  }) {
+    return _openDatabaseSheet(
+      title: title,
+      icon: icon,
+      child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: _firestore.collection('app_content').doc(docId).snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const _SheetLoading();
+          }
+          final data = snapshot.data?.data();
+          if (data == null) {
+            return _sheetEmptyState(
+              icon: icon,
+              title: emptyTitle,
+              message: emptyMessage,
+            );
+          }
+          final body = data['body']?.toString() ?? '';
+          final sections = data['sections'];
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (body.trim().isNotEmpty) ...[
+                Text(
+                  body,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.82),
+                    height: 1.38,
+                  ),
+                ),
+                const SizedBox(height: 14),
+              ],
+              if (sections is List)
+                for (final section in sections)
+                  if (section is Map)
+                    _contentSectionCard(
+                      title: section['title']?.toString() ?? 'Section',
+                      body: section['body']?.toString() ?? '',
+                    ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _contentSectionCard({required String title, required String body}) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(13),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.055),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          if (body.trim().isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Text(
+              body,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.74),
+                height: 1.32,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openNotificationsSheet() {
+    final user = _firebaseAuth.currentUser;
+    return _openDatabaseSheet(
+      title: 'Notifications',
+      icon: Icons.notifications_none_rounded,
+      child: user == null
+          ? _sheetEmptyState(
+              icon: Icons.login_rounded,
+              title: 'Sign in required',
+              message: 'Sign in to see trail, SOS, and safety notifications.',
+            )
+          : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: _firestore
+                  .collection('users')
+                  .doc(user.uid)
+                  .collection('notifications')
+                  .orderBy('createdAt', descending: true)
+                  .limit(50)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const _SheetLoading();
+                }
+                final docs = snapshot.data?.docs ?? const [];
+                if (docs.isEmpty) {
+                  return _sheetEmptyState(
+                    icon: Icons.notifications_none_rounded,
+                    title: 'No notifications yet',
+                    message:
+                        'Trail checks, SOS room updates, and safety alerts will appear here.',
+                  );
+                }
+                return Column(
+                  children: [
+                    for (var index = 0; index < docs.length; index++) ...[
+                      _notificationRow(docs[index].data()),
+                      if (index != docs.length - 1)
+                        Divider(color: Colors.white.withValues(alpha: 0.08)),
+                    ],
+                  ],
+                );
+              },
+            ),
+    );
+  }
+
+  Widget _notificationRow(Map<String, dynamic> data) {
+    final title = data['title']?.toString() ?? 'Notification';
+    final body = data['body']?.toString() ?? '';
+    final type = data['type']?.toString() ?? 'info';
+    final createdAt = data['createdAt'];
+    final color = switch (type) {
+      'sos' => const Color(0xFFFF7A7A),
+      'trail' => const Color(0xFF7CF9A2),
+      'safety' => const Color(0xFFFFD76A),
+      _ => const Color(0xFF48D1FF),
+    };
+    final icon = switch (type) {
+      'sos' => Icons.sos_rounded,
+      'trail' => Icons.route_rounded,
+      'safety' => Icons.health_and_safety_rounded,
+      _ => Icons.notifications_none_rounded,
+    };
+    DateTime? date;
+    if (createdAt is Timestamp) {
+      date = createdAt.toDate();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: color, size: 21),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                if (body.trim().isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    body,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.7),
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+                if (date != null) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    _formatDate(date),
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.48),
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openDatabaseSheet({
+    required String title,
+    required IconData icon,
+    required Widget child,
+  }) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.72,
+          minChildSize: 0.45,
+          maxChildSize: 0.92,
+          expand: false,
+          builder: (context, scrollController) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFF02130E),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              child: Column(
+                children: [
+                  const SizedBox(height: 10),
+                  Container(
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                    child: Row(
+                      children: [
+                        Icon(icon, color: const Color(0xFF7CF9A2)),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.of(sheetContext).pop(),
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      controller: scrollController,
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+                      children: [child],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _sheetEmptyState({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.055),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: const Color(0xFF7CF9A2), size: 42),
+          const SizedBox(height: 10),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.68),
+              height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildExploreTab(bool keyboardOpen) {
     return Stack(
       children: [
@@ -4373,7 +5701,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               children: [
                 Row(
                   children: [
-                    _circleButton(icon: Icons.menu),
+                    _circleButton(icon: Icons.menu, onTap: _openAppMenuSheet),
                     const SizedBox(width: 10),
                     const Text(
                       'Agakbay',
@@ -4384,7 +5712,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     ),
                     const Spacer(),
-                    _circleButton(icon: Icons.notifications_none_rounded),
+                    _circleButton(
+                      icon: Icons.notifications_none_rounded,
+                      onTap: _openNotificationsSheet,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -4879,38 +6210,57 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Column(
           children: [
             const SizedBox(height: 14),
-            const Text(
-              'My Hikes',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 28,
-                fontWeight: FontWeight.w800,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'My Hikes',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Refresh trail recordings',
+                    onPressed: _refreshPendingTrailSubmissions,
+                    icon: _loadingPendingTrailSubmissions
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFF7CF9A2),
+                            ),
+                          )
+                        : const Icon(
+                            Icons.sync_rounded,
+                            color: Color(0xFF7CF9A2),
+                          ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _myHikesSummaryHeader(),
+            ),
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: _myHikesViewSelector(),
+            ),
+            const SizedBox(height: 12),
             Expanded(
-              child: _completedHikeSessions.isEmpty
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: Text(
-                          'No completed hikes yet. Start a hike from Explore.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.75),
-                          ),
-                        ),
-                      ),
-                    )
-                  : ListView.separated(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
-                      itemCount: _completedHikeSessions.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 10),
-                      itemBuilder: (_, index) {
-                        final session = _completedHikeSessions[index];
-                        return _completedHikeCard(session);
-                      },
-                    ),
+              child: switch (_myHikesView) {
+                _MyHikesView.completed => _completedHikesList(),
+                _MyHikesView.recorded => _recordedTrailSubmissionsList(),
+                _MyHikesView.pending => _trailCheckingList(),
+              },
             ),
           ],
         ),
@@ -4918,8 +6268,787 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  Widget _myHikesSummaryHeader() {
+    final hikeCount = _completedHikeSessions.length;
+    final totalDistanceKm = _completedHikeSessions.fold<double>(
+      0,
+      (total, session) => total + session.distanceKm,
+    );
+    final summitCount = _completedHikeSessions
+        .where((session) => session.reachedSummit)
+        .length;
+    final pendingCount = _pendingTrailSubmissions.length;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF061F16),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF53D97A).withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.landscape_rounded,
+                  color: Color(0xFF7CF9A2),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Trail Log',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      pendingCount > 0
+                          ? '$pendingCount trail recording waiting to upload/check'
+                          : 'Your hikes and trail contributions',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.68),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              _myHikesSummaryStat(
+                label: 'Hikes',
+                value: hikeCount.toString(),
+                color: const Color(0xFF7CF9A2),
+              ),
+              const SizedBox(width: 8),
+              _myHikesSummaryStat(
+                label: 'Distance',
+                value: '${totalDistanceKm.toStringAsFixed(1)} km',
+                color: const Color(0xFF48D1FF),
+              ),
+              const SizedBox(width: 8),
+              _myHikesSummaryStat(
+                label: 'Summits',
+                value: summitCount.toString(),
+                color: const Color(0xFFFFD76A),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _myHikesSummaryStat({
+    required String label,
+    required String value,
+    required Color color,
+  }) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.055),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withValues(alpha: 0.18)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.62),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontSize: 16,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _myHikesViewSelector() {
+    Widget item(_MyHikesView view, String label, IconData icon, int count) {
+      final selected = _myHikesView == view;
+      return Expanded(
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () {
+              setState(() => _myHikesView = view);
+              if (view != _MyHikesView.completed) {
+                unawaited(_refreshPendingTrailSubmissions());
+              }
+            },
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              height: 48,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected
+                    ? const Color(0xFF53D97A)
+                    : Colors.white.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: selected
+                      ? Colors.transparent
+                      : Colors.white.withValues(alpha: 0.12),
+                ),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    icon,
+                    size: 17,
+                    color: selected ? const Color(0xFF03150E) : Colors.white70,
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: selected
+                            ? const Color(0xFF03150E)
+                            : Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  if (count > 0) ...[
+                    const SizedBox(width: 5),
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 18),
+                      height: 18,
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.symmetric(horizontal: 5),
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? const Color(0xFF03150E).withValues(alpha: 0.12)
+                            : const Color(0xFF7CF9A2).withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        count.toString(),
+                        style: TextStyle(
+                          color: selected
+                              ? const Color(0xFF03150E)
+                              : const Color(0xFF7CF9A2),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      children: [
+        item(
+          _MyHikesView.completed,
+          'Completed',
+          Icons.hiking_rounded,
+          _completedHikeSessions.length,
+        ),
+        const SizedBox(width: 8),
+        item(
+          _MyHikesView.recorded,
+          'Recorded',
+          Icons.route_rounded,
+          _pendingTrailSubmissions.length,
+        ),
+        const SizedBox(width: 8),
+        item(
+          _MyHikesView.pending,
+          'Checking',
+          Icons.pending_actions_rounded,
+          _pendingTrailSubmissions.length,
+        ),
+      ],
+    );
+  }
+
+  Widget _completedHikesList() {
+    if (_completedHikeSessions.isEmpty) {
+      return _myHikesEmptyState(
+        icon: Icons.hiking_rounded,
+        title: 'No completed hikes yet',
+        message: 'Start a hike from Explore. Finished hikes will appear here.',
+        actionLabel: 'Open Explore',
+        onAction: () {
+          setState(() => _selectedNavIndex = 0);
+        },
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+      itemCount: _completedHikeSessions.length,
+      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      itemBuilder: (_, index) {
+        final session = _completedHikeSessions[index];
+        return _completedHikeCard(session);
+      },
+    );
+  }
+
+  Widget _recordedTrailSubmissionsList() {
+    final stream = _trailSubmissionsStream();
+    if (stream == null) {
+      return _myHikesEmptyState(
+        icon: Icons.login_rounded,
+        title: 'Sign in required',
+        message: 'Sign in to see trail recordings and automatic check status.',
+      );
+    }
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (context, snapshot) {
+        final remoteDocs = _sortedTrailSubmissionDocs(snapshot.data?.docs);
+        final hasLocal = _pendingTrailSubmissions.isNotEmpty;
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            remoteDocs.isEmpty &&
+            !hasLocal) {
+          return const Center(
+            child: CircularProgressIndicator(
+              strokeWidth: 2.4,
+              color: Color(0xFF7CF9A2),
+            ),
+          );
+        }
+        if (remoteDocs.isEmpty && !hasLocal) {
+          return _myHikesEmptyState(
+            icon: Icons.route_rounded,
+            title: 'No recorded trails yet',
+            message:
+                'When you record a missing mountain trail, its status appears here.',
+            actionLabel: 'Find a Mountain',
+            onAction: () {
+              setState(() => _selectedNavIndex = 0);
+            },
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+          children: [
+            if (hasLocal) ...[
+              _myHikesSectionLabel('Saved on this device'),
+              for (final submission in _pendingTrailSubmissions) ...[
+                _localTrailSubmissionCard(submission),
+                const SizedBox(height: 10),
+              ],
+              const SizedBox(height: 8),
+            ],
+            if (remoteDocs.isNotEmpty) ...[
+              _myHikesSectionLabel('Uploaded recordings'),
+              for (final doc in remoteDocs) ...[
+                _remoteTrailSubmissionCard(doc),
+                const SizedBox(height: 10),
+              ],
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _trailCheckingList() {
+    final stream = _trailSubmissionsStream();
+    if (stream == null) {
+      return _myHikesEmptyState(
+        icon: Icons.login_rounded,
+        title: 'Sign in required',
+        message: 'Sign in to see trails waiting for upload or system check.',
+      );
+    }
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: stream,
+      builder: (context, snapshot) {
+        final pendingRemote = _sortedTrailSubmissionDocs(
+          snapshot.data?.docs,
+        ).where((doc) => _isPendingSubmissionStatus(doc.data())).toList();
+        final hasLocal = _pendingTrailSubmissions.isNotEmpty;
+        if (pendingRemote.isEmpty && !hasLocal) {
+          return _myHikesEmptyState(
+            icon: Icons.verified_rounded,
+            title: 'No trails checking',
+            message:
+                'Submitted trails that still need upload or automatic checking will appear here.',
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+          children: [
+            if (hasLocal) ...[
+              _myHikesSectionLabel('Waiting for upload'),
+              for (final submission in _pendingTrailSubmissions) ...[
+                _localTrailSubmissionCard(submission),
+                const SizedBox(height: 10),
+              ],
+            ],
+            if (pendingRemote.isNotEmpty) ...[
+              _myHikesSectionLabel('Waiting for system check'),
+              for (final doc in pendingRemote) ...[
+                _remoteTrailSubmissionCard(doc),
+                const SizedBox(height: 10),
+              ],
+            ],
+          ],
+        );
+      },
+    );
+  }
+
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _sortedTrailSubmissionDocs(
+    List<QueryDocumentSnapshot<Map<String, dynamic>>>? docs,
+  ) {
+    final sorted = List<QueryDocumentSnapshot<Map<String, dynamic>>>.from(
+      docs ?? const <QueryDocumentSnapshot<Map<String, dynamic>>>[],
+    );
+    sorted.sort((a, b) {
+      final aTime =
+          _submissionDate(a.data()) ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bTime =
+          _submissionDate(b.data()) ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return bTime.compareTo(aTime);
+    });
+    return sorted;
+  }
+
+  bool _isPendingSubmissionStatus(Map<String, dynamic> data) {
+    final status = (data['status']?.toString() ?? 'pending').toLowerCase();
+    return status == 'pending' || status == 'checked' || status == 'accepted';
+  }
+
+  DateTime? _submissionDate(Map<String, dynamic> data) {
+    final raw = data['createdAt'] ?? data['startedAt'] ?? data['endedAt'];
+    if (raw is Timestamp) {
+      return raw.toDate();
+    }
+    if (raw is String) {
+      return DateTime.tryParse(raw)?.toLocal();
+    }
+    return null;
+  }
+
+  Widget _myHikesSectionLabel(String label) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: 0.72),
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.4,
+        ),
+      ),
+    );
+  }
+
+  Widget _myHikesEmptyState({
+    required IconData icon,
+    required String title,
+    required String message,
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
+          decoration: BoxDecoration(
+            color: const Color(0xFF061F16),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.11)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 70,
+                height: 70,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF53D97A).withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: const Color(0xFF53D97A).withValues(alpha: 0.22),
+                  ),
+                ),
+                child: Icon(icon, size: 36, color: const Color(0xFF7CF9A2)),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 19,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.72),
+                  height: 1.35,
+                ),
+              ),
+              if (actionLabel != null && onAction != null) ...[
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: onAction,
+                    icon: const Icon(Icons.explore_rounded),
+                    label: Text(actionLabel),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF53D97A),
+                      foregroundColor: const Color(0xFF03150E),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _localTrailSubmissionCard(PendingTrailSubmission submission) {
+    final payload = submission.payload;
+    final mountainName =
+        payload['mountainName']?.toString() ?? 'Recorded trail';
+    final province = payload['provinceOrCity']?.toString() ?? '';
+    final distanceKm = (payload['distanceKm'] as num?)?.toDouble();
+    final durationSeconds = (payload['durationSeconds'] as num?)?.toInt();
+    final routePoints = payload['routePoints'] is List
+        ? (payload['routePoints'] as List).length
+        : 0;
+    return _trailSubmissionCardShell(
+      title: mountainName,
+      subtitle: province.isEmpty ? 'Saved locally' : province,
+      statusLabel: 'Waiting Upload',
+      statusColor: const Color(0xFFFFD76A),
+      statusIcon: Icons.cloud_off_rounded,
+      dateText: _formatDate(submission.createdAt),
+      metrics: [
+        if (distanceKm != null) '${distanceKm.toStringAsFixed(2)} km',
+        if (durationSeconds != null)
+          _formatDuration(Duration(seconds: durationSeconds)),
+        '$routePoints points',
+      ],
+      footer:
+          'This recording will upload automatically, then Agakbay will check its quality.',
+    );
+  }
+
+  Widget _remoteTrailSubmissionCard(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    final mountainName = data['mountainName']?.toString() ?? 'Recorded trail';
+    final province = data['provinceOrCity']?.toString() ?? '';
+    final status = (data['status']?.toString() ?? 'pending').toLowerCase();
+    final distanceKm = (data['distanceKm'] as num?)?.toDouble();
+    final durationSeconds = (data['durationSeconds'] as num?)?.toInt();
+    final routePoints = data['routePoints'] is List
+        ? (data['routePoints'] as List).length
+        : 0;
+    final score =
+        (data['normalizedScore'] as num?)?.toDouble() ??
+        (data['qualityScore'] as num?)?.toDouble();
+    final date = _submissionDate(data);
+    final rejection = data['rejectionReason']?.toString();
+
+    return _trailSubmissionCardShell(
+      title: mountainName,
+      subtitle: province.isEmpty ? 'Uploaded trail recording' : province,
+      statusLabel: _submissionStatusLabel(status),
+      statusColor: _submissionStatusColor(status),
+      statusIcon: _submissionStatusIcon(status),
+      dateText: date == null ? 'Date unavailable' : _formatDate(date),
+      metrics: [
+        if (distanceKm != null) '${distanceKm.toStringAsFixed(2)} km',
+        if (durationSeconds != null)
+          _formatDuration(Duration(seconds: durationSeconds)),
+        '$routePoints points',
+        if (score != null) '${(score * 100).round()}% quality',
+      ],
+      footer: rejection == null || rejection.isEmpty
+          ? _submissionStatusDescription(status)
+          : 'Rejected: ${rejection.replaceAll('_', ' ')}',
+    );
+  }
+
+  Widget _trailSubmissionCardShell({
+    required String title,
+    required String subtitle,
+    required String statusLabel,
+    required Color statusColor,
+    required IconData statusIcon,
+    required String dateText,
+    required List<String> metrics,
+    required String footer,
+  }) {
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: const Color(0xFF061F16),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: statusColor.withValues(alpha: 0.28)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.2),
+            blurRadius: 14,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(height: 4, color: statusColor.withValues(alpha: 0.82)),
+          Padding(
+            padding: const EdgeInsets.all(13),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Icon(statusIcon, color: statusColor, size: 24),
+                    ),
+                    const SizedBox(width: 11),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.68),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 5,
+                      ),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        statusLabel,
+                        style: TextStyle(
+                          color: statusColor,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.calendar_month_rounded,
+                      color: Colors.white54,
+                      size: 15,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      dateText,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.64),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                if (metrics.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 7,
+                    runSpacing: 7,
+                    children: metrics
+                        .map(
+                          (metric) => _myHikesChip(
+                            label: metric,
+                            color: Colors.white.withValues(alpha: 0.78),
+                          ),
+                        )
+                        .toList(growable: false),
+                  ),
+                ],
+                const SizedBox(height: 11),
+                Text(
+                  footer,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.72),
+                    height: 1.32,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _myHikesChip({required String label, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+
+  String _submissionStatusLabel(String status) {
+    return switch (status) {
+      'included' => 'Community',
+      'checked' => 'Passed Check',
+      'accepted' => 'Passed Check',
+      'rejected' => 'Rejected',
+      _ => 'Checking',
+    };
+  }
+
+  String _submissionStatusDescription(String status) {
+    return switch (status) {
+      'included' => 'This recording is now used as a community trail route.',
+      'checked' => 'The route passed quality checks and is being prepared.',
+      'accepted' => 'The route passed quality checks and is being prepared.',
+      'rejected' => 'This recording did not pass the automatic quality check.',
+      _ => 'Uploaded and waiting for automatic quality checks.',
+    };
+  }
+
+  Color _submissionStatusColor(String status) {
+    return switch (status) {
+      'included' => const Color(0xFF53D97A),
+      'checked' => const Color(0xFF7CF9A2),
+      'accepted' => const Color(0xFF7CF9A2),
+      'rejected' => const Color(0xFFFF7A7A),
+      _ => const Color(0xFFFFD76A),
+    };
+  }
+
+  IconData _submissionStatusIcon(String status) {
+    return switch (status) {
+      'included' => Icons.route_rounded,
+      'checked' => Icons.check_circle_rounded,
+      'accepted' => Icons.check_circle_rounded,
+      'rejected' => Icons.cancel_rounded,
+      _ => Icons.pending_actions_rounded,
+    };
+  }
+
   Widget _buildProfileTab() {
     final user = _firebaseAuth.currentUser;
+    final pendingCount = _pendingTrailSubmissions.length;
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -4929,41 +7058,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
       ),
       child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Profile',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 30,
-                  fontWeight: FontWeight.w800,
-                ),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+          children: [
+            const Text(
+              'Profile',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 30,
+                fontWeight: FontWeight.w900,
               ),
-              const SizedBox(height: 16),
-              Text(
-                _communityDisplayName(),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                user?.email ?? 'No email',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.72),
-                  fontSize: 14,
-                ),
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () async {
+            ),
+            const SizedBox(height: 14),
+            _profileUserCard(user),
+            const SizedBox(height: 18),
+            _profileSection(
+              title: 'Safety',
+              children: [
+                _profileActionTile(
+                  icon: Icons.groups_rounded,
+                  iconColor: const Color(0xFFFFD76A),
+                  title: 'Hike SOS Room',
+                  subtitle: 'Join or manage an active guide room',
+                  trailing: Icons.chevron_right_rounded,
+                  onTap: () async {
                     await Navigator.of(context).push(
                       MaterialPageRoute<void>(
                         builder: (context) =>
@@ -4971,57 +7089,353 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     );
                   },
-                  icon: const Icon(Icons.groups_rounded),
-                  label: const Text('Hike SOS Room'),
-                  style: ElevatedButton.styleFrom(
-                    foregroundColor: const Color(0xFF03150E),
-                    backgroundColor: const Color(0xFFFFD76A),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (context) => const OfflineMapExampleScreen(),
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.map_rounded),
-                  label: const Text('Offline Maps'),
-                  style: ElevatedButton.styleFrom(
-                    foregroundColor: const Color(0xFF03150E),
-                    backgroundColor: const Color(0xFF53D97A),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
+                _profileActionTile(
+                  icon: Icons.contact_emergency_rounded,
+                  iconColor: const Color(0xFFFF7A7A),
+                  title: 'Emergency Contact',
+                  subtitle: _emergencyContactSummary(),
+                  trailing: Icons.edit_rounded,
+                  onTap: _openEmergencyContactDialog,
                 ),
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () async {
+                _profileActionTile(
+                  icon: Icons.location_on_rounded,
+                  iconColor: const Color(0xFF48D1FF),
+                  title: 'Location Access',
+                  subtitle: _checkingLocationAccessStatus
+                      ? 'Checking...'
+                      : _locationAccessStatus,
+                  trailing: Icons.refresh_rounded,
+                  onTap: _refreshLocationAccessStatus,
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _profileSection(
+              title: 'Trail Activity',
+              children: [
+                Row(
+                  children: [
+                    _profileStatTile(
+                      label: 'Completed',
+                      value: _completedHikeSessions.length.toString(),
+                      color: const Color(0xFF7CF9A2),
+                      onTap: () => _openMyHikesView(_MyHikesView.completed),
+                    ),
+                    const SizedBox(width: 10),
+                    _profileStatTile(
+                      label: 'Checking',
+                      value: pendingCount.toString(),
+                      color: const Color(0xFFFFD76A),
+                      onTap: () => _openMyHikesView(_MyHikesView.pending),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                _profileActionTile(
+                  icon: Icons.route_rounded,
+                  iconColor: const Color(0xFF7CF9A2),
+                  title: 'Recorded Trails',
+                  subtitle: 'View uploaded and saved trail recordings',
+                  trailing: Icons.chevron_right_rounded,
+                  onTap: () => _openMyHikesView(_MyHikesView.recorded),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _profileSection(
+              title: 'Account',
+              children: [
+                _profileActionTile(
+                  icon: Icons.logout_rounded,
+                  iconColor: const Color(0xFFFF7A7A),
+                  title: 'Sign Out',
+                  subtitle: user?.email ?? 'No email',
+                  trailing: Icons.chevron_right_rounded,
+                  onTap: () async {
                     await _firebaseAuth.signOut();
                   },
-                  icon: const Icon(Icons.logout_rounded),
-                  label: const Text('Sign Out'),
-                  style: ElevatedButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    backgroundColor: const Color(0xFF3A1515),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _profileUserCard(User? user) {
+    final displayName = _communityDisplayName();
+    final photoUrl = _profilePhotoUrl();
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF061F16),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: _uploadingProfilePhoto ? null : _pickAndUploadProfilePhoto,
+            child: Stack(
+              children: [
+                ClipOval(
+                  child: Container(
+                    width: 66,
+                    height: 66,
+                    alignment: Alignment.center,
+                    color: const Color(0xFF0F2A1E),
+                    child: photoUrl.isEmpty
+                        ? Text(
+                            _communityAvatarSeed(displayName),
+                            style: const TextStyle(
+                              color: Color(0xFF7CF9A2),
+                              fontSize: 24,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          )
+                        : Image.network(
+                            photoUrl,
+                            width: 66,
+                            height: 66,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) {
+                              return Text(
+                                _communityAvatarSeed(displayName),
+                                style: const TextStyle(
+                                  color: Color(0xFF7CF9A2),
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              );
+                            },
+                          ),
                   ),
                 ),
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF53D97A),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: const Color(0xFF061F16),
+                        width: 2,
+                      ),
+                    ),
+                    child: _uploadingProfilePhoto
+                        ? const Padding(
+                            padding: EdgeInsets.all(5),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFF03150E),
+                            ),
+                          )
+                        : const Icon(
+                            Icons.camera_alt_rounded,
+                            color: Color(0xFF03150E),
+                            size: 14,
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Edit name',
+                      onPressed: _updatingProfile
+                          ? null
+                          : _openEditProfileDialog,
+                      icon: _updatingProfile
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Color(0xFF7CF9A2),
+                              ),
+                            )
+                          : const Icon(
+                              Icons.edit_rounded,
+                              color: Color(0xFF7CF9A2),
+                              size: 19,
+                            ),
+                    ),
+                  ],
+                ),
+                Text(
+                  user?.email ?? 'No email',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.66),
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _profileBadge(_accountTypeLabel(), const Color(0xFF7CF9A2)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _profileBadge(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.13),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+
+  Widget _profileSection({
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 8),
+          child: Text(
+            title,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.74),
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ),
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF061F16),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+          ),
+          child: Column(
+            children: [
+              for (var i = 0; i < children.length; i++) ...[
+                children[i],
+                if (i != children.length - 1)
+                  Divider(
+                    height: 1,
+                    color: Colors.white.withValues(alpha: 0.08),
+                    indent: 58,
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _profileActionTile({
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required IconData trailing,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 13),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: 0.13),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: iconColor, size: 20),
               ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.62),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(trailing, color: Colors.white54, size: 21),
             ],
           ),
         ),
@@ -5029,16 +7443,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _circleButton({required IconData icon}) {
-    return Container(
-      width: 44,
-      height: 44,
-      decoration: BoxDecoration(
-        color: const Color(0xFF02150E).withValues(alpha: 0.75),
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+  Widget _profileStatTile({
+    required String label,
+    required String value,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.055),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: color.withValues(alpha: 0.18)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.64),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  value,
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
-      child: Icon(icon, color: Colors.white, size: 24),
+    );
+  }
+
+  Widget _circleButton({required IconData icon, VoidCallback? onTap}) {
+    return Material(
+      color: Colors.transparent,
+      shape: const CircleBorder(),
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(
+            color: const Color(0xFF02150E).withValues(alpha: 0.75),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+          ),
+          child: Icon(icon, color: Colors.white, size: 24),
+        ),
+      ),
     );
   }
 
@@ -5585,105 +8054,177 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _CompletedHikeSession session, {
     VoidCallback? onTap,
   }) {
+    final statusColor = session.reachedSummit
+        ? const Color(0xFF7CF9A2)
+        : const Color(0xFF48D1FF);
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(18),
         child: Container(
-          padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.06),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+            color: const Color(0xFF061F16),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: statusColor.withValues(alpha: 0.22)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.2),
+                blurRadius: 14,
+                offset: const Offset(0, 8),
+              ),
+            ],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      session.trail.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
+              Container(
+                height: 4,
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.86),
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(18),
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: session.reachedSummit
-                          ? const Color(0xFF53D97A).withValues(alpha: 0.22)
-                          : Colors.white.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Text(
-                      session.reachedSummit ? 'Summit' : 'Ended',
-                      style: TextStyle(
-                        color: session.reachedSummit
-                            ? const Color(0xFF7CF9A2)
-                            : Colors.white70,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                _formatDate(session.completedAt),
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.65),
-                  fontSize: 12,
                 ),
               ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Distance: ${session.distanceKm.toStringAsFixed(2)} km',
-                      style: const TextStyle(color: Colors.white),
+              Padding(
+                padding: const EdgeInsets.all(13),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(14),
+                          child: Container(
+                            width: 54,
+                            height: 54,
+                            color: const Color(0xFF0F2A1E),
+                            child: _trailImage(session.trail),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                session.trail.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  const Icon(
+                                    Icons.calendar_month_rounded,
+                                    color: Colors.white54,
+                                    size: 15,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Expanded(
+                                    child: Text(
+                                      _formatDate(session.completedAt),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(
+                                          alpha: 0.65,
+                                        ),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: statusColor.withValues(alpha: 0.14),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            session.reachedSummit ? 'Summit' : 'Ended',
+                            style: TextStyle(
+                              color: statusColor,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      'Time: ${_formatDuration(session.duration)}',
-                      style: const TextStyle(color: Colors.white),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 7,
+                      runSpacing: 7,
+                      children: [
+                        _myHikesChip(
+                          label: '${session.distanceKm.toStringAsFixed(2)} km',
+                          color: const Color(0xFF48D1FF),
+                        ),
+                        _myHikesChip(
+                          label: _formatDuration(session.duration),
+                          color: Colors.white.withValues(alpha: 0.82),
+                        ),
+                        _myHikesChip(
+                          label: '+${session.elevationGainMasl} m',
+                          color: const Color(0xFFFFD76A),
+                        ),
+                        _myHikesChip(
+                          label: '${session.maxElevationMasl} MASL',
+                          color: const Color(0xFF7CF9A2),
+                        ),
+                      ],
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Gain: ${session.elevationGainMasl} m',
-                      style: const TextStyle(color: Colors.white),
+                    const SizedBox(height: 11),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(999),
+                            child: LinearProgressIndicator(
+                              value: session.totalCheckpoints <= 0
+                                  ? 0
+                                  : (session.checkpointsReached /
+                                            session.totalCheckpoints)
+                                        .clamp(0.0, 1.0),
+                              minHeight: 7,
+                              backgroundColor: Colors.white.withValues(
+                                alpha: 0.08,
+                              ),
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                statusColor,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          '${session.checkpointsReached}/${session.totalCheckpoints} checkpoints',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.68),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      'Peak: ${session.maxElevationMasl} MASL',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Checkpoints reached: ${session.checkpointsReached}/${session.totalCheckpoints}',
-                style: const TextStyle(color: Color(0xFF7CF9A2), fontSize: 12),
+                  ],
+                ),
               ),
             ],
           ),
@@ -5721,15 +8262,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final trailStatus = (communityTrail?.status ?? 'none').toLowerCase();
         final mappedRouteCount = routeOptions.length;
         final hasMappedRoutes = mappedRouteCount > 0;
+        final hasCommunityRoute =
+            (trailStatus == 'verified' || trailStatus == 'provisional') &&
+            (communityTrail?.points.length ?? 0) >= 2;
+        final hasAnyUsableRoute = hasMappedRoutes || hasCommunityRoute;
         final trailStatusLabel = switch (trailStatus) {
-          'verified' => 'Verified',
-          'provisional' => 'Provisional',
+          'verified' => 'Community Verified',
+          'provisional' => 'Community Recorded',
+          'pending' => 'Checking',
           _ =>
             hasMappedRoutes ? 'Mapped ($mappedRouteCount routes)' : 'No Data',
         };
         final trailStatusColor = switch (trailStatus) {
           'verified' => const Color(0xFF53D97A),
           'provisional' => const Color(0xFFFFD76A),
+          'pending' => const Color(0xFFFFD76A),
           _ => hasMappedRoutes ? const Color(0xFF84E6A2) : Colors.white70,
         };
         Future<void> loadHikeWeather(
@@ -5996,13 +8543,89 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
-                                'No mapped trail routes found for this mountain yet.',
+                                hasCommunityRoute
+                                    ? 'A community ${trailStatusLabel.toLowerCase()} route is available and will be used in Hiking Mode.'
+                                    : 'No mapped trail routes found for this mountain yet.',
                                 style: TextStyle(
                                   color: Colors.white.withValues(alpha: 0.82),
                                   fontSize: 12,
                                 ),
                               ),
                             ),
+                            if (!hasAnyUsableRoute) ...[
+                              const SizedBox(height: 10),
+                              Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF12301F),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: const Color(
+                                      0xFF53D97A,
+                                    ).withValues(alpha: 0.36),
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Text(
+                                      'Help Map This Trail',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 15,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 5),
+                                    Text(
+                                      'Record the real path while hiking. Agakbay checks the route automatically before other users see it as a community trail.',
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(
+                                          alpha: 0.78,
+                                        ),
+                                        height: 1.35,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    SizedBox(
+                                      width: double.infinity,
+                                      child: OutlinedButton.icon(
+                                        onPressed: () {
+                                          Navigator.of(context).pop();
+                                          unawaited(
+                                            _startTrailRecordingForMountain(
+                                              trail,
+                                            ),
+                                          );
+                                        },
+                                        icon: const Icon(Icons.route_rounded),
+                                        label: const Text(
+                                          'Record Trail Route',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: const Color(
+                                            0xFF7CF9A2,
+                                          ),
+                                          side: const BorderSide(
+                                            color: Color(0xFF7CF9A2),
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(
+                                              12,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           ],
                           const SizedBox(height: 6),
                           Container(
@@ -6232,6 +8855,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             selectedRoute?.assetPath,
                                         selectedRouteLabel:
                                             selectedRoute?.routeName,
+                                        recordingNewTrail: !hasAnyUsableRoute,
                                       ),
                                     ),
                                   );
@@ -6261,6 +8885,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               sheetSetState(() => hasCompletedBefore = true);
                               _showDashboardSnackBar(
                                 '${trail.name} hike saved to My Hikes.',
+                              );
+                              unawaited(
+                                _updateLeaderboardStats(trail, session),
                               );
                               unawaited(
                                 _submitTrailRouteIfAccepted(trail, session),
@@ -7010,6 +9637,7 @@ class _HikingModeScreen extends StatefulWidget {
     this.communityTrail,
     this.preferredGpxAssetPath,
     this.selectedRouteLabel,
+    this.recordingNewTrail = false,
   });
 
   final _NearbyTrail trail;
@@ -7017,6 +9645,7 @@ class _HikingModeScreen extends StatefulWidget {
   final _CommunityTrailData? communityTrail;
   final String? preferredGpxAssetPath;
   final String? selectedRouteLabel;
+  final bool recordingNewTrail;
 
   @override
   State<_HikingModeScreen> createState() => _HikingModeScreenState();
@@ -8512,6 +11141,19 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     return polylines;
   }
 
+  List<LatLng> _recordedRoutePointsForSubmission() {
+    if (_trackPoints.length >= 2) {
+      return List<LatLng>.from(_trackPoints);
+    }
+    final fromRawTrack = _rawTrackPoints
+        .map((point) => LatLng(point.lat, point.lon))
+        .toList(growable: false);
+    if (fromRawTrack.length >= 2) {
+      return fromRawTrack;
+    }
+    return List<LatLng>.from(_plannedRoutePoints);
+  }
+
   Future<void> _endHike() async {
     if (_ending) {
       return;
@@ -8543,7 +11185,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       totalCheckpoints: _checkpoints.length,
       reachedSummit: _reachedCheckpoints.contains('Peak'),
       trackPoints: List<_TrailTrackPoint>.from(_rawTrackPoints),
-      routePoints: List<LatLng>.from(_plannedRoutePoints),
+      routePoints: _recordedRoutePointsForSubmission(),
       peakLocation: _hikeTarget ?? widget.trail.location,
       startedAt: _startedAt,
       endedAt: endedAt,
@@ -8622,9 +11264,11 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          'Hiking Mode',
-                          style: TextStyle(
+                        Text(
+                          widget.recordingNewTrail
+                              ? 'Trail Recording'
+                              : 'Hiking Mode',
+                          style: const TextStyle(
                             color: Color(0xFF7CF9A2),
                             fontSize: 12,
                             fontWeight: FontWeight.w700,
@@ -8642,7 +11286,9 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                           ),
                         ),
                         Text(
-                          _usingCommunityTrail
+                          widget.recordingNewTrail
+                              ? 'Recording your walked GPS trail for automatic check'
+                              : _usingCommunityTrail
                               ? 'Trail source: Community (${widget.communityTrail?.status ?? 'unknown'})'
                               : _usingGpxTrail
                               ? () {
@@ -9763,6 +12409,23 @@ class _InfoChip extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _SheetLoading extends StatelessWidget {
+  const _SheetLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 28),
+      child: Center(
+        child: CircularProgressIndicator(
+          strokeWidth: 2.4,
+          color: Color(0xFF7CF9A2),
+        ),
       ),
     );
   }

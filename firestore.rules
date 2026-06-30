@@ -1,0 +1,82 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId);
+
+      match /notifications/{notificationId} {
+        allow read, update, delete: if isOwner(userId);
+        allow create: if isOwner(userId);
+      }
+    }
+
+    match /leaderboard/{userId} {
+      allow read: if true;
+      allow create, update: if isOwner(userId);
+    }
+
+    match /app_content/{documentId} {
+      allow read: if true;
+      allow create: if signedIn();
+      allow update, delete: if false;
+    }
+
+    match /community_posts/{postId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.authorId == request.auth.uid;
+      allow update, delete: if signedIn()
+        && resource.data.authorId == request.auth.uid;
+
+      match /comments/{commentId} {
+        allow read: if signedIn();
+        allow create: if signedIn()
+          && request.resource.data.authorId == request.auth.uid;
+        allow update, delete: if signedIn()
+          && resource.data.authorId == request.auth.uid;
+      }
+
+      match /likes/{userId} {
+        allow read: if signedIn();
+        allow create, update, delete: if isOwner(userId);
+      }
+    }
+
+    match /hike_rooms/{roomId} {
+      allow read, create, update: if signedIn();
+
+      match /participants/{participantId} {
+        allow read, create, update: if signedIn();
+      }
+
+      match /sos_events/{eventId} {
+        allow read, create, update: if signedIn();
+      }
+    }
+
+    match /trail_submissions/{submissionId} {
+      allow read: if signedIn() && resource.data.submittedBy == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.submittedBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /mountain_trails/{trailId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

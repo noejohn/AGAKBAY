@@ -133,7 +133,7 @@ function deriveTrailStatus({ submissionCount, avgScore }) {
   if (submissionCount >= 8 && avgScore >= 0.72) {
     return "verified";
   }
-  if (submissionCount >= 3 && avgScore >= 0.55) {
+  if (submissionCount >= 1 && avgScore >= 0.45) {
     return "provisional";
   }
   return "none";
@@ -343,7 +343,7 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
 
     await snapshot.ref.set(
       {
-        status: "accepted",
+        status: "checked",
         normalizedScore: evaluation.score,
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -361,7 +361,7 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
     submissionsSnap.forEach((doc) => {
       const item = doc.data();
       const status = String(item.status || "").toLowerCase();
-      if (status !== "accepted" && status !== "included") {
+      if (status !== "checked" && status !== "accepted" && status !== "included") {
         return;
       }
       const scored = scoreSubmission(item);
