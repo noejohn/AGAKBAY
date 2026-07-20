@@ -50,3 +50,39 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Secrets & credentials
+*.env
+.env
+.env.*
+**/local.properties
+android/key.properties
+**/key.properties
+
+# Firebase config/service accounts
+android/app/google-services.json
+**/GoogleService-Info.plist
+.firebase/
+firebase-debug.log
+*firebase-adminsdk*.json
+*service-account*.json
+*serviceAccountKey*.json
+
+# Signing keys & certificates
+*.jks
+*.keystore
+*.p12
+*.pem
+*.pfx
+*.cer
+*.crt
+*.p8
+*.mobileprovision
+id_rsa
+id_rsa.pub
+*.pub
+
+# Local scratch / design notes (not part of source)
+/ERD.txt
+/DATA_FLOW_DIAGRAM.md
+/terminal-test.txt
