@@ -18,6 +18,15 @@
         <meta-data
             android:name="com.example.tunga.WEATHER_API_KEY"
             android:value="${WEATHER_API_KEY}" />
+        <meta-data
+            android:name="com.example.tunga.CUSTOM_SEARCH_API_KEY"
+            android:value="${CUSTOM_SEARCH_API_KEY}" />
+        <meta-data
+            android:name="com.example.tunga.CUSTOM_SEARCH_ENGINE_ID"
+            android:value="${CUSTOM_SEARCH_ENGINE_ID}" />
+        <meta-data
+            android:name="com.example.tunga.AI_API_KEY"
+            android:value="${AI_API_KEY}" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

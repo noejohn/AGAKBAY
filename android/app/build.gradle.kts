@@ -17,6 +17,9 @@ if (localPropertiesFile.exists()) {
 }
 val mapsApiKey = localProperties.getProperty("MAPS_API_KEY", "")
 val weatherApiKey = localProperties.getProperty("WEATHER_API_KEY", mapsApiKey)
+val customSearchApiKey = localProperties.getProperty("CUSTOM_SEARCH_API_KEY", "")
+val customSearchEngineId = localProperties.getProperty("CUSTOM_SEARCH_ENGINE_ID", "")
+val aiApiKey = localProperties.getProperty("AI_API_KEY", "")
 
 android {
     namespace = "com.example.tunga"
@@ -39,6 +42,9 @@ android {
         versionName = flutter.versionName
         manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
         manifestPlaceholders["WEATHER_API_KEY"] = weatherApiKey
+        manifestPlaceholders["CUSTOM_SEARCH_API_KEY"] = customSearchApiKey
+        manifestPlaceholders["CUSTOM_SEARCH_ENGINE_ID"] = customSearchEngineId
+        manifestPlaceholders["AI_API_KEY"] = aiApiKey
     }
 
     buildTypes {

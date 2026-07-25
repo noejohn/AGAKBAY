@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -12,6 +12,7 @@ import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
@@ -34,15 +35,18 @@ class TunGaApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final baseTheme = ThemeData(
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: const Color(0xFF0F5A3D),
+        brightness: Brightness.dark,
+      ),
+      useMaterial3: true,
+    );
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Agakbay',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0F5A3D),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
+      theme: baseTheme.copyWith(
+        textTheme: GoogleFonts.manropeTextTheme(baseTheme.textTheme),
       ),
       home: const SplashScreen(),
     );
@@ -916,6 +920,18 @@ class _CommunityTrailData {
   final DateTime? updatedAt;
 }
 
+class _TrailRecordingDetails {
+  const _TrailRecordingDetails({
+    required this.trailName,
+    required this.stationNames,
+    required this.recordedAt,
+  });
+
+  final String trailName;
+  final List<String> stationNames;
+  final DateTime recordedAt;
+}
+
 class _MountainRouteOption {
   const _MountainRouteOption({
     required this.assetPath,
@@ -928,6 +944,441 @@ class _MountainRouteOption {
   final String routeName;
   final String jumpOffLabel;
   final LatLng startPoint;
+}
+
+class _MountainOrganizer {
+  const _MountainOrganizer({
+    required this.id,
+    required this.name,
+    required this.contact,
+    required this.description,
+    required this.source,
+    required this.verified,
+    this.isExternalSuggestion = false,
+  });
+
+  final String id;
+  final String name;
+  final String contact;
+  final String description;
+  final String source;
+  final bool verified;
+  final bool isExternalSuggestion;
+}
+
+class _AssistantMessage {
+  const _AssistantMessage({
+    required this.role,
+    required this.text,
+  });
+
+  final String role;
+  final String text;
+}
+
+class _HikeAssistantScreen extends StatefulWidget {
+  const _HikeAssistantScreen({
+    Key? key,
+    this.initialTrail,
+    required this.searchMountainInMindanao,
+    required this.fetchMountainOrganizers,
+  }) : super(key: key);
+
+  final _NearbyTrail? initialTrail;
+  final Future<_NearbyTrail?> Function(String query) searchMountainInMindanao;
+  final Future<List<_MountainOrganizer>> Function(_NearbyTrail trail)
+      fetchMountainOrganizers;
+
+  @override
+  State<_HikeAssistantScreen> createState() => _HikeAssistantScreenState();
+}
+
+class _HikeAssistantScreenState extends State<_HikeAssistantScreen> {
+  static const MethodChannel _configChannel = MethodChannel(
+    'com.example.tunga/config',
+  );
+
+  final TextEditingController _questionController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final List<_AssistantMessage> _messages = [];
+  bool _isSearching = false;
+  String _aiApiKey = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAiApiKey();
+    _addAssistantMessage(
+      'Hi! Ask me anything about a hike — elevation, difficulty, weather, '
+      'gear, or organizers for a specific mountain.',
+    );
+  }
+
+  @override
+  void dispose() {
+    _questionController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _addAssistantMessage(String text) {
+    _messages.add(const _AssistantMessage(role: 'assistant', text: ''));
+    final lastIndex = _messages.length - 1;
+    _messages[lastIndex] = _AssistantMessage(role: 'assistant', text: text);
+  }
+
+  Future<void> _sendQuestion() async {
+    final question = _questionController.text.trim();
+    if (question.isEmpty) {
+      return;
+    }
+
+    await _loadAiApiKey();
+
+    setState(() {
+      _messages.add(_AssistantMessage(role: 'user', text: question));
+      _questionController.clear();
+      _isSearching = true;
+    });
+    _scrollToBottom();
+
+    final answer = await _buildAssistantResponse(question);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _messages.add(_AssistantMessage(role: 'assistant', text: answer));
+      _isSearching = false;
+    });
+    _scrollToBottom();
+  }
+
+  Future<String> _buildAssistantResponse(String question) async {
+    final normalized = question.toLowerCase();
+    if (normalized.contains('what to bring') ||
+        normalized.contains('what i need to bring') ||
+        normalized.contains('what should i bring') ||
+        normalized.contains('what do i bring') ||
+        normalized.contains('what should i pack') ||
+        normalized.contains('need to bring') ||
+        normalized.contains('packing list') ||
+        normalized.contains('gear') ||
+        normalized.contains('pack') ||
+        normalized.contains('prepare') ||
+        normalized.contains('what do i need') ||
+        normalized.contains('what do i need for') ||
+        normalized.contains('what is needed') ||
+        normalized.contains('what should i wear') ||
+        normalized.contains('what is the gear')) {
+      return 'For a hike, bring plenty of water, snacks, weather-proof layers, a first-aid kit, a flashlight, and a charged phone. If you want, ask me next for organizers for a specific mountain or request a trail packing list for Mt. Apo.';
+    }
+
+    _NearbyTrail? trail = widget.initialTrail;
+    if (trail == null || !_matchesTrailInQuestion(trail, normalized)) {
+      trail = await widget.searchMountainInMindanao(question);
+    }
+
+    final organizers = trail == null
+        ? const <_MountainOrganizer>[]
+        : await widget.fetchMountainOrganizers(trail);
+
+    if (_aiApiKey.isNotEmpty) {
+      final contextBuffer = StringBuffer();
+      if (trail != null) {
+        contextBuffer.writeln(
+          'Matched trail: ${trail.name}, ${trail.provinceOrCity}.',
+        );
+        if (organizers.isNotEmpty) {
+          final organizerList = organizers.take(5).map((organizer) {
+            return '${organizer.name} — ${organizer.contact} (${organizer.source})${organizer.verified ? ' ✓ verified' : ''}';
+          }).join('\n');
+          contextBuffer.writeln(
+            'Known organizer contacts for this trail:\n$organizerList',
+          );
+        } else {
+          contextBuffer.writeln(
+            'No organizer contacts are on file for this trail in the app.',
+          );
+        }
+      } else {
+        contextBuffer.writeln(
+          'No specific trail was matched in the app database for this question.',
+        );
+      }
+      final prompt =
+          '''
+The user asked: "$question"
+$contextBuffer
+You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user's actual question directly and helpfully, using your general knowledge (e.g. elevation, difficulty, weather, best season) whenever the app data above doesn't cover it. Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
+''';
+      final aiAnswer = await _fetchAiAssistantResponse(prompt);
+      if (aiAnswer.isNotEmpty) {
+        return aiAnswer;
+      }
+    }
+
+    if (trail == null) {
+      return 'I could not find a mountain matching that query. Try asking with a more exact name, such as "Mt. Apo" or "Mount Matutum."';
+    }
+
+    if (organizers.isEmpty) {
+      return 'I found ${trail.name}, but I could not find any matching organizers right now. You can still search again with another mountain name, or use the Explore map to browse nearby trails.';
+    }
+
+    final buffer = StringBuffer();
+    buffer.writeln('I found ${organizers.length} organizer suggestions for ${trail.name}:');
+    final displayedOrganizers = organizers.take(3);
+    var index = 1;
+    for (final organizer in displayedOrganizers) {
+      buffer.writeln(
+        '${index++}. ${organizer.name} — ${organizer.contact} (${organizer.source})${organizer.verified ? ' ✓ verified' : ''}',
+      );
+    }
+    if (organizers.length > 3) {
+      buffer.writeln('And ${organizers.length - 3} more results are available.');
+    }
+    buffer.writeln('You can ask me to search another mountain or request more details.');
+    return buffer.toString();
+  }
+
+  bool _matchesTrailInQuestion(_NearbyTrail trail, String normalizedQuestion) {
+    final normalizedName = trail.name.toLowerCase();
+    return normalizedQuestion.contains(normalizedName) ||
+        normalizedQuestion.contains('this mountain') ||
+        normalizedQuestion.contains('this hike') ||
+        normalizedQuestion.contains('the hike');
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) {
+        return;
+      }
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  Future<void> _loadAiApiKey() async {
+    if (_aiApiKey.isNotEmpty) {
+      return;
+    }
+
+    try {
+      final apiKey = await _configChannel.invokeMethod<String>('getAiApiKey');
+      if (apiKey != null && apiKey.trim().isNotEmpty) {
+        _aiApiKey = apiKey.trim();
+      }
+    } catch (_) {
+      // Ignore missing AI config.
+    }
+  }
+
+  Future<String> _fetchAiAssistantResponse(String prompt) async {
+    if (_aiApiKey.isEmpty) {
+      return '';
+    }
+
+    try {
+      final uri = Uri.https(
+        'generativelanguage.googleapis.com',
+        '/v1beta/models/gemini-flash-lite-latest:generateContent',
+        {'key': _aiApiKey},
+      );
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode({
+              'systemInstruction': {
+                'parts': [
+                  {
+                    'text':
+                        'You are a friendly, knowledgeable hiking assistant '
+                        'for hikers in Mindanao, Philippines. Answer '
+                        'whatever the user actually asks — trail '
+                        'difficulty, elevation, weather, safety, gear, or '
+                        'general hiking advice — using your own knowledge. '
+                        'Only talk about organizers/guides when the user '
+                        'asks about finding one or contact info is provided '
+                        'to you.',
+                  },
+                ],
+              },
+              'contents': [
+                {
+                  'role': 'user',
+                  'parts': [
+                    {'text': prompt},
+                  ],
+                },
+              ],
+              'generationConfig': {
+                'temperature': 0.7,
+                'maxOutputTokens': 260,
+              },
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (response.statusCode != 200) {
+        debugPrint(
+          'Hike Assistant AI request failed: ${response.statusCode} '
+          '${response.body}',
+        );
+        return '';
+      }
+
+      final body = json.decode(response.body);
+      final candidates = body['candidates'];
+      if (candidates is List && candidates.isNotEmpty) {
+        final content = candidates.first['content'];
+        if (content is Map<String, dynamic>) {
+          final parts = content['parts'];
+          if (parts is List && parts.isNotEmpty) {
+            return parts.first['text']?.toString().trim() ?? '';
+          }
+        }
+      }
+    } catch (error) {
+      debugPrint('Hike Assistant AI request threw: $error');
+    }
+
+    return '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Hike Assistant'),
+        backgroundColor: const Color(0xFF02130E),
+      ),
+      backgroundColor: const Color(0xFF02130E),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.all(16),
+                itemCount: _messages.length,
+                itemBuilder: (context, index) {
+                  final message = _messages[index];
+                  final isUser = message.role == 'user';
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    alignment:
+                        isUser ? Alignment.centerRight : Alignment.centerLeft,
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: isUser
+                            ? const Color(0xFF53D97A)
+                            : const Color(0xFF041B13).withValues(alpha: 0.95),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: isUser
+                              ? const Color(0xFF53D97A)
+                              : Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      child: Text(
+                        message.text,
+                        style: TextStyle(
+                          color: isUser ? Colors.black : Colors.white,
+                          height: 1.4,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            if (_isSearching)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: CircularProgressIndicator(
+                  color: Color(0xFF7CF9A2),
+                ),
+              ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF02130E),
+                border: Border(
+                  top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _questionController,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) => _sendQuestion(),
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText:
+                            'Ask about organizers, trails, or this mountain...',
+                        hintStyle: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.55),
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.14),
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.14),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          borderSide: const BorderSide(
+                            color: Color(0xFF53D97A),
+                          ),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Material(
+                    color: const Color(0xFF53D97A),
+                    borderRadius: BorderRadius.circular(16),
+                    child: InkWell(
+                      onTap: _isSearching ? null : _sendQuestion,
+                      borderRadius: BorderRadius.circular(16),
+                      child: const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: Icon(
+                          Icons.send_rounded,
+                          color: Colors.black,
+                          size: 22,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _GpxRoutePreview {
@@ -943,6 +1394,7 @@ class _CommunityPost {
     required this.authorName,
     required this.content,
     required this.mountainName,
+    required this.imageUrl,
     required this.likeCount,
     required this.commentCount,
     required this.createdAt,
@@ -953,6 +1405,7 @@ class _CommunityPost {
   final String authorName;
   final String content;
   final String mountainName;
+  final String imageUrl;
   final int likeCount;
   final int commentCount;
   final DateTime? createdAt;
@@ -1057,7 +1510,7 @@ enum _NearbyAnchorMode { nearMe, nearSearch }
 
 enum _MarkerStatusFilter { all, open, closed }
 
-enum _MyHikesView { completed, recorded, pending }
+enum _MyHikesView { completed, recorded }
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -1082,8 +1535,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final TextEditingController _searchController = TextEditingController();
   final TextEditingController _communityComposerController =
       TextEditingController();
+  XFile? _communityComposerImage;
+  bool _postingCommunityPost = false;
   String _mapsApiKey = '';
   String _weatherApiKey = '';
+  String _customSearchApiKey = '';
+  String _customSearchEngineId = '';
   String _accountType = 'hiker';
   String _locationAccessStatus = 'Checking';
   bool _checkingLocationAccessStatus = false;
@@ -1094,6 +1551,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   LatLng? _myLocationCenter;
   _NearbyTrail? _searchedTrailAnchor;
   _NearbyAnchorMode _nearbyAnchorMode = _NearbyAnchorMode.nearMe;
+  bool _nearbyCardCollapsed = false;
   String? _locationMessage;
   String? _nearbyTrailsMessage;
   bool _locationGranted = false;
@@ -1148,6 +1606,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _accountType = 'hiker';
     }
     await _loadMapsApiKey();
+    await _loadSearchProviderConfig();
     unawaited(_ensureDefaultAppContent());
     unawaited(_refreshLocationAccessStatus());
     await _loadCurrentLocation();
@@ -1185,6 +1644,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
     await _loadMapsApiKey();
     _weatherApiKey = _mapsApiKey;
+  }
+
+  Future<void> _loadSearchProviderConfig() async {
+    if (_customSearchApiKey.isNotEmpty && _customSearchEngineId.isNotEmpty) {
+      return;
+    }
+
+    try {
+      final apiKey = await _configChannel.invokeMethod<String>('getCustomSearchApiKey');
+      final searchEngineId = await _configChannel.invokeMethod<String>('getCustomSearchEngineId');
+      if (apiKey != null && apiKey.trim().isNotEmpty) {
+        _customSearchApiKey = apiKey.trim();
+      }
+      if (searchEngineId != null && searchEngineId.trim().isNotEmpty) {
+        _customSearchEngineId = searchEngineId.trim();
+      }
+    } catch (_) {
+      // Ignore missing provider config.
+    }
   }
 
   Future<void> _loadCurrentLocation() async {
@@ -2420,6 +2898,381 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'This trail is rated $difficulty and is popular for hiking adventures.';
   }
 
+  Future<List<_MountainOrganizer>> _fetchMountainOrganizers(
+    _NearbyTrail trail,
+  ) async {
+    const maxTokens = 10;
+    final foundOrganizers = <_MountainOrganizer>[];
+    final mountainKey = _mountainKeyForTrail(trail);
+    final nameKey = _normalizeTokenString(trail.name);
+    final searchTokens = _mountainTokens(trail.name).take(maxTokens).toList();
+
+    try {
+      final primaryResult = await _firestore
+          .collection('mountain_organizers')
+          .where('mountainKey', isEqualTo: mountainKey)
+          .get();
+      var docs = primaryResult.docs;
+      if (docs.isEmpty && mountainKey.contains('__')) {
+        final fallbackResult = await _firestore
+            .collection('mountain_organizers')
+            .where('mountainKey', isEqualTo: nameKey)
+            .get();
+        docs = fallbackResult.docs;
+      }
+      for (final doc in docs) {
+        final data = doc.data();
+        final name = data['organizerName']?.toString().trim() ?? 'Organizer';
+        final contact = data['contact']?.toString().trim() ?? 'Contact not available';
+        final description = data['description']?.toString().trim() ?? '';
+        final source = data['source']?.toString().trim() ?? 'App listing';
+        final verified = data['verified'] == true;
+        foundOrganizers.add(
+          _MountainOrganizer(
+            id: doc.id,
+            name: name,
+            contact: contact,
+            description: description,
+            source: source,
+            verified: verified,
+          ),
+        );
+      }
+    } catch (_) {
+      // Ignore missing organizer collection.
+    }
+
+    if (searchTokens.isEmpty) {
+      return foundOrganizers;
+    }
+
+    try {
+      final usersQuery = _firestore
+          .collection('users')
+          .where('accountType', isEqualTo: 'tour_guide');
+
+      List<QueryDocumentSnapshot<Map<String, dynamic>>> userDocs;
+
+      if (searchTokens.isNotEmpty) {
+        final matchingGuides = await usersQuery
+            .where('serviceMountains', arrayContainsAny: searchTokens)
+            .get();
+
+        if (matchingGuides.docs.isNotEmpty) {
+          userDocs = matchingGuides.docs;
+        } else {
+          final allGuides = await usersQuery.get();
+          userDocs = allGuides.docs.where((doc) {
+            final data = doc.data();
+            final serviceMountains = <String>[];
+            if (data['serviceMountains'] is List) {
+              serviceMountains.addAll(
+                (data['serviceMountains'] as List)
+                    .map((item) => item?.toString().trim() ?? '')
+                    .where((item) => item.isNotEmpty),
+              );
+            } else if (data['serviceMountains'] is String) {
+              serviceMountains.addAll(
+                data['serviceMountains']
+                    .toString()
+                    .split(RegExp(r'[;,]'))
+                    .map((item) => item.trim())
+                    .where((item) => item.isNotEmpty),
+              );
+            }
+
+            final normalizedServiceMountains = serviceMountains
+                .map(_normalizeTokenWords)
+                .where((item) => item.isNotEmpty)
+                .toList();
+            final normalizedBio = _normalizeTokenWords(
+              data['bio']?.toString() ?? '',
+            );
+
+            return searchTokens.any((token) {
+              return normalizedServiceMountains.any(
+                    (entry) => entry.contains(token),
+                  ) ||
+                  normalizedBio.contains(token);
+            });
+          }).toList();
+        }
+      } else {
+        final allGuides = await usersQuery.get();
+        userDocs = allGuides.docs;
+      }
+
+      for (final doc in userDocs) {
+        final data = doc.data();
+        final displayName = data['fullName']?.toString().trim() ??
+            data['displayName']?.toString().trim() ??
+            'Tour Guide';
+        final contact = data['phoneNumber']?.toString().trim() ??
+            data['contactNumber']?.toString().trim() ??
+            data['phone']?.toString().trim() ??
+            data['email']?.toString().trim() ??
+            'Contact not available';
+        final serviceMountains = <String>[];
+        if (data['serviceMountains'] is List) {
+          serviceMountains.addAll(
+            (data['serviceMountains'] as List)
+                .map((item) => item?.toString().trim() ?? '')
+                .where((item) => item.isNotEmpty),
+          );
+        } else if (data['serviceMountains'] is String) {
+          serviceMountains.addAll(
+            data['serviceMountains']
+                .toString()
+                .split(RegExp(r'[;,]'))
+                .map((item) => item.trim())
+                .where((item) => item.isNotEmpty),
+          );
+        }
+
+        final normalizedBio = _normalizeTokenWords(data['bio']?.toString() ?? '');
+        if (serviceMountains.isEmpty && searchTokens.isNotEmpty) {
+          for (final token in searchTokens) {
+            if (normalizedBio.contains(token)) {
+              serviceMountains.add(token);
+              break;
+            }
+          }
+        }
+
+        final description = serviceMountains.isNotEmpty
+            ? 'Offers hikes for ${serviceMountains.join(', ')}.'
+            : data['bio']?.toString().trim() ?? '';
+        final source = 'Guide account';
+        final verified = data['guideVerified'] == true;
+        final organizer = _MountainOrganizer(
+          id: doc.id,
+          name: displayName,
+          contact: contact,
+          description: description,
+          source: source,
+          verified: verified,
+        );
+        if (!foundOrganizers.any((item) => item.id == organizer.id)) {
+          foundOrganizers.add(organizer);
+        }
+      }
+    } catch (_) {
+      // If token-based query is unavailable, ignore.
+    }
+
+    try {
+      final externalOrganizers = await _fetchExternalOrganizerSuggestions(trail);
+      for (final organizer in externalOrganizers) {
+        if (!foundOrganizers.any((item) => item.id == organizer.id)) {
+          foundOrganizers.add(organizer);
+        }
+      }
+    } catch (_) {
+      // Ignore external search failures.
+    }
+
+    return foundOrganizers;
+  }
+
+  Future<List<_MountainOrganizer>> _fetchExternalOrganizerSuggestions(
+    _NearbyTrail trail,
+  ) async {
+    if (_customSearchApiKey.isNotEmpty && _customSearchEngineId.isNotEmpty) {
+      try {
+        final customSearchResults = await _fetchGoogleCustomSearchSuggestions(trail);
+        if (customSearchResults.isNotEmpty) {
+          return customSearchResults;
+        }
+      } catch (error) {
+        debugPrint('Google Custom Search failed: $error');
+      }
+    }
+
+    try {
+      return await _fetchDuckDuckGoOrganizerSuggestions(trail);
+    } catch (error) {
+      debugPrint('DuckDuckGo search failed: $error');
+      return const <_MountainOrganizer>[];
+    }
+  }
+
+  Future<List<_MountainOrganizer>> _fetchGoogleCustomSearchSuggestions(
+    _NearbyTrail trail,
+  ) async {
+    final query = <String>[
+      trail.name,
+      trail.provinceOrCity,
+      _provinceOrCityFromAddress(trail.address),
+      'mountain guide',
+      'tour guide',
+    ].where((part) => part.isNotEmpty).join(' ');
+
+    final uri = Uri.https('www.googleapis.com', '/customsearch/v1', {
+      'key': _customSearchApiKey,
+      'cx': _customSearchEngineId,
+      'q': query,
+      'num': '5',
+      'safe': 'off',
+    });
+
+    final response = await http.get(uri).timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      return const <_MountainOrganizer>[];
+    }
+
+    final body = json.decode(response.body);
+    if (body is! Map<String, dynamic>) {
+      return const <_MountainOrganizer>[];
+    }
+
+    final items = body['items'];
+    if (items is! List || items.isEmpty) {
+      return const <_MountainOrganizer>[];
+    }
+
+    final suggestions = <_MountainOrganizer>[];
+    for (var index = 0; index < items.length; index++) {
+      final item = items[index];
+      if (item is! Map<String, dynamic>) {
+        continue;
+      }
+      final title = item['title']?.toString().trim() ?? 'Search result';
+      final link = item['link']?.toString().trim() ?? '';
+      final snippet = item['snippet']?.toString().trim() ?? '';
+      if (title.isEmpty && link.isEmpty) {
+        continue;
+      }
+      suggestions.add(
+        _MountainOrganizer(
+          id: 'google_custom_search_${trail.placeId}_$index',
+          name: title,
+          contact: link.isNotEmpty ? link : 'Search result',
+          description: snippet,
+          source: 'Google Custom Search',
+          verified: false,
+          isExternalSuggestion: true,
+        ),
+      );
+    }
+    return suggestions;
+  }
+
+  Future<List<_MountainOrganizer>> _fetchDuckDuckGoOrganizerSuggestions(
+    _NearbyTrail trail,
+  ) async {
+    final cityOrProvince = _provinceOrCityFromAddress(trail.address);
+    final queries = <String>{
+      [trail.name, 'mountain guide contact', cityOrProvince]
+          .where((part) => part.isNotEmpty)
+          .join(' '),
+      [trail.name, 'hiking guide', cityOrProvince]
+          .where((part) => part.isNotEmpty)
+          .join(' '),
+      [trail.name, 'tour guide', cityOrProvince]
+          .where((part) => part.isNotEmpty)
+          .join(' '),
+      [trail.name, 'mountain guide Philippines']
+          .where((part) => part.isNotEmpty)
+          .join(' '),
+      ['Mount ${trail.name}', 'guide', cityOrProvince]
+          .where((part) => part.isNotEmpty)
+          .join(' '),
+    };
+
+    for (final query in queries) {
+      final uri = Uri.https('api.duckduckgo.com', '/', {
+        'q': query,
+        'format': 'json',
+        'no_redirect': '1',
+        'no_html': '1',
+      });
+
+      try {
+        final response = await http
+            .get(uri)
+            .timeout(const Duration(seconds: 10));
+        if (response.statusCode != 200) {
+          continue;
+        }
+
+        final body = json.decode(response.body);
+        if (body is! Map<String, dynamic>) {
+          continue;
+        }
+
+        final suggestions = <_MountainOrganizer>[];
+        final abstractText = body['AbstractText']?.toString().trim() ?? '';
+        final abstractSource = body['AbstractSource']?.toString().trim();
+        if (abstractText.isNotEmpty) {
+          suggestions.add(
+            _MountainOrganizer(
+              id: 'web_${trail.placeId}_abstract_$query',
+              name: 'Search suggestion',
+              contact: abstractSource?.isNotEmpty == true
+                  ? abstractSource!
+                  : 'Web search result',
+              description: abstractText,
+              source: 'DuckDuckGo',
+              verified: false,
+              isExternalSuggestion: true,
+            ),
+          );
+        }
+
+        if (body['RelatedTopics'] is List) {
+          for (final topic in _extractDuckDuckGoTopics(body['RelatedTopics'] as List)) {
+            final text = topic['Text']?.toString().trim() ?? '';
+            if (text.isEmpty) {
+              continue;
+            }
+
+            final firstUrl = topic['FirstURL']?.toString().trim();
+            final title = topic['Name']?.toString().trim() ??
+                'Web search recommendation';
+            final id = 'web_${trail.placeId}_${suggestions.length}_${text.hashCode}';
+
+            suggestions.add(
+              _MountainOrganizer(
+                id: id,
+                name: title,
+                contact: firstUrl?.isNotEmpty == true
+                    ? firstUrl!
+                    : 'Search provider result',
+                description: text,
+                source: 'DuckDuckGo',
+                verified: false,
+                isExternalSuggestion: true,
+              ),
+            );
+          }
+        }
+
+        if (suggestions.isNotEmpty) {
+          return suggestions;
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+
+    return const <_MountainOrganizer>[];
+  }
+
+  Iterable<Map<String, dynamic>> _extractDuckDuckGoTopics(
+    List<dynamic> items,
+  ) sync* {
+    for (final item in items) {
+      if (item is Map<String, dynamic>) {
+        if (item.containsKey('Text')) {
+          yield item;
+        }
+        if (item['Topics'] is List) {
+          yield* _extractDuckDuckGoTopics(item['Topics'] as List<dynamic>);
+        }
+      }
+    }
+  }
+
   Future<void> _focusTrail(_NearbyTrail trail) async {
     setState(() {
       _searchMarker = Marker(
@@ -2473,6 +3326,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  // Popping a dialog route immediately after unfocusing a still-focused
+  // TextField can hit a Flutter framework race (`_dependents.isEmpty`
+  // assertion in framework.dart) because the keyboard/IME teardown hasn't
+  // finished when the route's Element tree is torn down. Giving it one
+  // extra frame before popping avoids it.
+  void _unfocusThenPop<T>(BuildContext dialogContext, [T? result]) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    Future.delayed(const Duration(milliseconds: 80), () {
+      if (dialogContext.mounted) {
+        Navigator.of(dialogContext).pop(result);
+      }
+    });
   }
 
   Future<void> _refreshPendingTrailSubmissions() async {
@@ -2620,15 +3487,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
               labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
               prefixIcon: const Icon(Icons.person_outline_rounded),
             ),
-            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+            onSubmitted: (value) =>
+                _unfocusThenPop<String>(dialogContext, value),
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
+              onPressed: () => _unfocusThenPop<String>(dialogContext),
               child: const Text('Cancel'),
             ),
             ElevatedButton(
-              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+              onPressed: () {
+                final value = controller.text;
+                _unfocusThenPop<String>(dialogContext, value);
+              },
               child: const Text('Save'),
             ),
           ],
@@ -2858,12 +3729,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
+              onPressed: () => _unfocusThenPop(dialogContext),
               child: const Text('Cancel'),
             ),
             ElevatedButton(
               onPressed: () {
-                Navigator.of(dialogContext).pop({
+                _unfocusThenPop(dialogContext, {
                   'name': nameController.text.trim(),
                   'phone': phoneController.text.trim(),
                 });
@@ -2927,6 +3798,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return trimmed[0].toUpperCase();
   }
 
+  static const List<List<Color>> _avatarGradientPalette = [
+    [Color(0xFF53D97A), Color(0xFF0F5A3D)],
+    [Color(0xFF48D1FF), Color(0xFF0E5A73)],
+    [Color(0xFFFFD76A), Color(0xFFB2600C)],
+    [Color(0xFFFF9D7A), Color(0xFFB23A2E)],
+    [Color(0xFFB79CFF), Color(0xFF5A3EA6)],
+    [Color(0xFF7CF9A2), Color(0xFF1B6E4C)],
+  ];
+
+  LinearGradient _avatarGradient(String name) {
+    final trimmed = name.trim();
+    final hash = trimmed.isEmpty
+        ? 0
+        : trimmed.codeUnits.fold<int>(0, (total, code) => total + code);
+    final colors = _avatarGradientPalette[hash % _avatarGradientPalette.length];
+    return LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: colors,
+    );
+  }
+
   _CommunityPost _communityPostFromSnapshot(
     DocumentSnapshot<Map<String, dynamic>> snapshot,
   ) {
@@ -2944,6 +3837,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           : 'Hiker',
       content: data['content']?.toString() ?? '',
       mountainName: data['mountainName']?.toString() ?? '',
+      imageUrl: data['imageUrl']?.toString() ?? '',
       likeCount: data['likeCount'] is num
           ? (data['likeCount'] as num).toInt()
           : 0,
@@ -2962,23 +3856,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .snapshots();
   }
 
-  Future<void> _createCommunityPost(String content) async {
+  Future<void> _createCommunityPost(String content, {XFile? image}) async {
     final user = _firebaseAuth.currentUser;
     if (user == null) {
       _showDashboardSnackBar('Please sign in to create a post.');
       return;
     }
     final text = content.trim();
-    if (text.isEmpty) {
-      _showDashboardSnackBar('Write something before posting.');
+    if (text.isEmpty && image == null) {
+      _showDashboardSnackBar('Write something or add a photo before posting.');
       return;
     }
     try {
+      var imageUrl = '';
+      if (image != null) {
+        final ref = FirebaseStorage.instance
+            .ref()
+            .child('community_post_photos')
+            .child(user.uid)
+            .child('${DateTime.now().microsecondsSinceEpoch}.jpg');
+        final bytes = await image.readAsBytes();
+        await ref.putData(
+          bytes,
+          SettableMetadata(contentType: image.mimeType ?? 'image/jpeg'),
+        );
+        imageUrl = await ref.getDownloadURL();
+      }
       await _firestore.collection('community_posts').add({
         'authorId': user.uid,
         'authorName': _communityDisplayName(),
         'content': text,
         'mountainName': _searchedTrailAnchor?.name ?? '',
+        'imageUrl': imageUrl,
         'likeCount': 0,
         'commentCount': 0,
         'createdAt': FieldValue.serverTimestamp(),
@@ -2986,6 +3895,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
     } catch (_) {
       _showDashboardSnackBar('Failed to publish post.');
+    }
+  }
+
+  Future<void> _pickCommunityComposerImage() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 82,
+        maxWidth: 1600,
+        maxHeight: 1600,
+      );
+      if (picked == null || !mounted) {
+        return;
+      }
+      setState(() => _communityComposerImage = picked);
+    } catch (error) {
+      _showDashboardSnackBar('Unable to select photo: $error');
     }
   }
 
@@ -3063,6 +3990,152 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
     } catch (_) {
       _showDashboardSnackBar('Unable to post comment.');
+    }
+  }
+
+  Future<void> _deleteCommunityComment(String postId, String commentId) async {
+    final postRef = _firestore.collection('community_posts').doc(postId);
+    final commentRef = postRef.collection('comments').doc(commentId);
+    try {
+      await _firestore.runTransaction((tx) async {
+        final postSnap = await tx.get(postRef);
+        if (!postSnap.exists) {
+          return;
+        }
+        final current = (postSnap.data()?['commentCount'] is num)
+            ? (postSnap.data()!['commentCount'] as num).toInt()
+            : 0;
+        tx.delete(commentRef);
+        tx.update(postRef, {
+          'commentCount': current > 0 ? current - 1 : 0,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      });
+    } catch (_) {
+      _showDashboardSnackBar('Unable to delete comment.');
+    }
+  }
+
+  Future<void> _editCommunityPost(_CommunityPost post) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null || user.uid != post.authorId) {
+      return;
+    }
+    final controller = TextEditingController(text: post.content);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF072117),
+          title: const Text('Edit Post', style: TextStyle(color: Colors.white)),
+          content: TextField(
+            controller: controller,
+            minLines: 1,
+            maxLines: 5,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: "What's on your trail today?",
+              hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.6)),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide(
+                  color: Colors.white.withValues(alpha: 0.2),
+                ),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: Color(0xFF53D97A)),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => _unfocusThenPop<String>(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final text = controller.text.trim();
+                _unfocusThenPop<String>(dialogContext, text);
+              },
+              style: ElevatedButton.styleFrom(
+                foregroundColor: Colors.black,
+                backgroundColor: const Color(0xFF53D97A),
+              ),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+    if (result == null || !mounted) {
+      return;
+    }
+    if (result.isEmpty && post.imageUrl.trim().isEmpty) {
+      _showDashboardSnackBar('Post cannot be empty.');
+      return;
+    }
+    try {
+      await _firestore.collection('community_posts').doc(post.id).update({
+        'content': result,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {
+      _showDashboardSnackBar('Unable to update post.');
+    }
+  }
+
+  Future<void> _deleteCommunityPost(_CommunityPost post) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null || user.uid != post.authorId) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF072117),
+          title: const Text(
+            'Delete Post?',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: Text(
+            'This will permanently remove your post.',
+            style: TextStyle(color: Colors.white.withValues(alpha: 0.86)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              style: ElevatedButton.styleFrom(
+                foregroundColor: Colors.white,
+                backgroundColor: const Color(0xFFE05555),
+              ),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) {
+      return;
+    }
+    try {
+      await _firestore.collection('community_posts').doc(post.id).delete();
+      if (post.imageUrl.trim().isNotEmpty) {
+        try {
+          await FirebaseStorage.instance.refFromURL(post.imageUrl).delete();
+        } catch (_) {
+          // Photo may already be gone; ignore.
+        }
+      }
+      _showDashboardSnackBar('Post deleted.');
+    } catch (_) {
+      _showDashboardSnackBar('Unable to delete post.');
     }
   }
 
@@ -3159,12 +4232,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               ),
                             );
                           }
+                          final currentUid = _firebaseAuth.currentUser?.uid;
                           return Column(
                             children: docs.map((doc) {
                               final data = doc.data();
                               final author =
                                   data['authorName']?.toString() ?? 'Hiker';
                               final content = data['content']?.toString() ?? '';
+                              final isOwnComment =
+                                  currentUid != null &&
+                                  data['authorId']?.toString() == currentUid;
                               DateTime? createdAt;
                               if (data['createdAt'] is Timestamp) {
                                 createdAt = (data['createdAt'] as Timestamp)
@@ -3181,12 +4258,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(
-                                      author,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w700,
-                                      ),
+                                    Row(
+                                      children: [
+                                        Expanded(
+                                          child: Text(
+                                            author,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                        if (isOwnComment)
+                                          GestureDetector(
+                                            onTap: () => unawaited(
+                                              _deleteCommunityComment(
+                                                post.id,
+                                                doc.id,
+                                              ),
+                                            ),
+                                            child: Icon(
+                                              Icons.delete_outline_rounded,
+                                              size: 16,
+                                              color: Colors.white.withValues(
+                                                alpha: 0.5,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
                                     ),
                                     const SizedBox(height: 4),
                                     Text(
@@ -3251,6 +4350,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             if (text.isEmpty) {
                               return;
                             }
+                            FocusManager.instance.primaryFocus?.unfocus();
                             commentController.clear();
                             await _addCommunityComment(post.id, text);
                           },
@@ -3313,6 +4413,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .split(' ')
         .where((token) => token.length >= 3 && !ignoredTokens.contains(token))
         .toSet();
+  }
+
+  String _provinceOrCityFromAddress(String address) {
+    final parts = address
+        .split(RegExp(r'[,\n]'))
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .toList();
+    final filtered = parts
+        .where((part) => !RegExp(r'^(philippines|ph|usa|united states|united states of america)',
+                caseSensitive: false)
+            .hasMatch(part))
+        .toList();
+    if (filtered.isEmpty) {
+      return parts.isNotEmpty ? parts.last : '';
+    }
+    return filtered.last;
   }
 
   double _scoreGpxAssetForMountain(
@@ -3691,42 +4808,213 @@ class _DashboardScreenState extends State<DashboardScreen> {
     unawaited(_submitTrailRouteIfAccepted(trail, session));
   }
 
+  Future<_TrailRecordingDetails?> _askTrailRecordingDetails(
+    _NearbyTrail trail,
+  ) async {
+    final nameController = TextEditingController(text: trail.name);
+    final stationControllers = <TextEditingController>[];
+    final recordedAt = DateTime.now();
+
+    InputDecoration fieldDecoration(String hint) {
+      return InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: Colors.white38),
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.06),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 10,
+        ),
+      );
+    }
+
+    final result = await showDialog<_TrailRecordingDetails>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void setStationCount(int next) {
+              final clamped = next.clamp(0, 20);
+              setDialogState(() {
+                if (clamped > stationControllers.length) {
+                  for (var i = stationControllers.length; i < clamped; i++) {
+                    stationControllers.add(TextEditingController());
+                  }
+                } else {
+                  while (stationControllers.length > clamped) {
+                    stationControllers.removeLast().dispose();
+                  }
+                }
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF072117),
+              title: const Text(
+                'Record Trail Route?',
+                style: TextStyle(color: Colors.white),
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Keep GPS tracking active while you follow the real '
+                      'trail. When you end the hike, this route is '
+                      'automatically saved as a community recorded trail '
+                      'that future hikers can see.',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.86),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Trail Name',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: nameController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: fieldDecoration('e.g. Mt Apo via Kapatagan'),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Stations',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: stationControllers.isEmpty
+                              ? null
+                              : () =>
+                                    setStationCount(
+                                      stationControllers.length - 1,
+                                    ),
+                          icon: const Icon(
+                            Icons.remove_circle_outline,
+                            color: Colors.white70,
+                          ),
+                        ),
+                        Text(
+                          stationControllers.length.toString(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: stationControllers.length >= 20
+                              ? null
+                              : () =>
+                                    setStationCount(
+                                      stationControllers.length + 1,
+                                    ),
+                          icon: const Icon(
+                            Icons.add_circle_outline,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                    for (var i = 0; i < stationControllers.length; i++) ...[
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: stationControllers[i],
+                        style: const TextStyle(color: Colors.white),
+                        decoration: fieldDecoration('Station ${i + 1} name'),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.event_rounded,
+                          size: 16,
+                          color: Colors.white54,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Date recorded: ${_formatDate(recordedAt)}',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.7),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () =>
+                      _unfocusThenPop<_TrailRecordingDetails>(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    final trailName = nameController.text.trim();
+                    if (trailName.isEmpty) {
+                      _showDashboardSnackBar('Enter a trail name to continue.');
+                      return;
+                    }
+                    final stationNames = <String>[
+                      for (var i = 0; i < stationControllers.length; i++)
+                        stationControllers[i].text.trim().isEmpty
+                            ? 'Station ${i + 1}'
+                            : stationControllers[i].text.trim(),
+                    ];
+                    _unfocusThenPop<_TrailRecordingDetails>(
+                      dialogContext,
+                      _TrailRecordingDetails(
+                        trailName: trailName,
+                        stationNames: stationNames,
+                        recordedAt: recordedAt,
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.route_rounded),
+                  label: const Text('Start Recording'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    nameController.dispose();
+    for (final controller in stationControllers) {
+      controller.dispose();
+    }
+    return result;
+  }
+
   Future<void> _startTrailRecordingForMountain(_NearbyTrail trail) async {
     if (_firebaseAuth.currentUser == null) {
       _showDashboardSnackBar('Sign in before recording a trail route.');
       return;
     }
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF072117),
-          title: const Text(
-            'Record Trail Route?',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: Text(
-            'Keep GPS tracking active while you follow the real trail. '
-            'After the hike, Agakbay will run an automatic quality check. '
-            'If the route passes, future hikers can see it as a community recorded trail.',
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.86)),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              icon: const Icon(Icons.route_rounded),
-              label: const Text('Start Recording'),
-            ),
-          ],
-        );
-      },
-    );
-    if (confirmed != true || !mounted) {
+    final details = await _askTrailRecordingDetails(trail);
+    if (details == null || !mounted) {
       return;
     }
 
@@ -3766,7 +5054,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
     });
     unawaited(_updateLeaderboardStats(trail, session));
-    await _submitTrailRouteIfAccepted(trail, session, askFirst: false);
+    await _submitTrailRouteIfAccepted(
+      trail,
+      session,
+      askFirst: false,
+      recordingDetails: details,
+    );
     await _fetchCommunityTrail(trail, forceRefresh: true);
   }
 
@@ -3936,6 +5229,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _NearbyTrail trail,
     _LiveHikeResult hikeResult, {
     bool askFirst = true,
+    _TrailRecordingDetails? recordingDetails,
   }) async {
     if (_firebaseAuth.currentUser == null) {
       return;
@@ -3959,6 +5253,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await OfflineActivityDatabase.instance.queueTrailSubmission({
         'mountainKey': mountainKey,
         'mountainName': trail.name,
+        'trailName': recordingDetails?.trailName ?? trail.name,
+        'stations': recordingDetails?.stationNames ?? const <String>[],
         'provinceOrCity': trail.provinceOrCity,
         'submittedBy': _firebaseAuth.currentUser!.uid,
         'status': 'pending',
@@ -3975,6 +5271,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         },
         'routePoints': _encodeRoutePoints(routePoints),
         'trackPoints': _encodeTrackPoints(trackPoints),
+        'recordedAt':
+            (recordingDetails?.recordedAt ?? DateTime.now())
+                .toUtc()
+                .toIso8601String(),
         'startedAt': hikeResult.startedAt.toUtc().toIso8601String(),
         'endedAt': hikeResult.endedAt.toUtc().toIso8601String(),
       });
@@ -3990,14 +5290,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _showDashboardSnackBar(
         askFirst
             ? 'Trail route saved. It will upload automatically when online.'
-            : 'Trail recording submitted. Agakbay will check it automatically.',
+            : 'Trail recording submitted. It will become a trail automatically.',
       );
       unawaited(
         _createUserNotification(
           type: 'trail',
           title: 'Trail Recording Saved',
-          body:
-              '${trail.name} was saved for upload and automatic quality checking.',
+          body: '${trail.name} was saved and will upload automatically.',
         ),
       );
       unawaited(_refreshPendingTrailSubmissions());
@@ -4864,7 +6163,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       case 1:
         return _buildMyHikesTab();
       case 2:
-        return _buildCommunityPlaceholderTab();
+        return _buildCommunityTab();
       case 3:
         return _buildProfileTab();
       case 0:
@@ -4906,53 +6205,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           label: 'Profile',
         ),
       ],
-    );
-  }
-
-  Widget _buildCommunityPlaceholderTab() {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF041A12), Color(0xFF032418), Color(0xFF00130D)],
-        ),
-      ),
-      child: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.forum_outlined,
-                  size: 54,
-                  color: Color(0xFF53D97A),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Community',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Coming soon. You can tell me what to put inside next.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.75),
-                    fontSize: 14,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -5019,7 +6271,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       icon: Icons.leaderboard_rounded,
                       iconColor: const Color(0xFFFFD76A),
                       title: 'Leaderboard',
-                      subtitle: 'Top hikers from database stats',
+                      subtitle: 'Top hikers',
                       onTap: () {
                         Navigator.of(dialogContext).pop();
                         _openLeaderboardSheet();
@@ -5029,7 +6281,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       icon: Icons.health_and_safety_rounded,
                       iconColor: const Color(0xFFFF7A7A),
                       title: 'Safety Guide',
-                      subtitle: 'Hiking safety content from Firestore',
+                      subtitle: 'Hiking safety content',
                       onTap: () {
                         Navigator.of(dialogContext).pop();
                         _openSafetyGuideSheet();
@@ -5039,7 +6291,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       icon: Icons.info_outline_rounded,
                       iconColor: const Color(0xFF48D1FF),
                       title: 'About Agakbay',
-                      subtitle: 'App information from Firestore',
+                      subtitle: 'App information',
                       onTap: () {
                         Navigator.of(dialogContext).pop();
                         _openAboutAgakbaySheet();
@@ -5090,13 +6342,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Container(
             width: 56,
             height: 56,
-            color: const Color(0xFF0F2A1E),
+            decoration: BoxDecoration(gradient: _avatarGradient(displayName)),
             child: photoUrl.isEmpty
                 ? Center(
                     child: Text(
                       _communityAvatarSeed(displayName),
                       style: const TextStyle(
-                        color: Color(0xFF7CF9A2),
+                        color: Colors.white,
                         fontSize: 22,
                         fontWeight: FontWeight.w900,
                       ),
@@ -5471,11 +6723,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'sos' => const Color(0xFFFF7A7A),
       'trail' => const Color(0xFF7CF9A2),
       'safety' => const Color(0xFFFFD76A),
+      'comment' => const Color(0xFF48D1FF),
       _ => const Color(0xFF48D1FF),
     };
     final icon = switch (type) {
       'sos' => Icons.sos_rounded,
       'trail' => Icons.route_rounded,
+      'comment' => Icons.chat_bubble_rounded,
       'safety' => Icons.health_and_safety_rounded,
       _ => Icons.notifications_none_rounded,
     };
@@ -5713,6 +6967,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     const Spacer(),
                     _circleButton(
+                      icon: Icons.chat_bubble_outline_rounded,
+                      onTap: _openHikeAssistant,
+                    ),
+                    const SizedBox(width: 10),
+                    _circleButton(
                       icon: Icons.notifications_none_rounded,
                       onTap: _openNotificationsSheet,
                     ),
@@ -5887,7 +7146,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _buildNearbyBottomCard() {
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 330),
+      constraints: BoxConstraints(
+        maxHeight: _nearbyCardCollapsed ? double.infinity : 330,
+      ),
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
@@ -5895,6 +7156,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
           color: const Color(0xFF02130E).withValues(alpha: 0.9),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.32),
+              blurRadius: 22,
+              offset: const Offset(0, 12),
+            ),
+          ],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -5910,67 +7178,103 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   ),
                 ),
                 const Spacer(),
+                if (!_nearbyCardCollapsed)
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: _openNearbyTrailsSheet,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 4,
+                          vertical: 2,
+                        ),
+                        child: Text(
+                          _nearbyTrails.isEmpty
+                              ? 'View All'
+                              : 'View All (${_nearbyTrails.length})',
+                          style: const TextStyle(
+                            color: Color(0xFF7CF9A2),
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 Material(
                   color: Colors.transparent,
                   child: InkWell(
-                    onTap: _openNearbyTrailsSheet,
-                    borderRadius: BorderRadius.circular(8),
+                    onTap: () {
+                      setState(() {
+                        _nearbyCardCollapsed = !_nearbyCardCollapsed;
+                      });
+                    },
+                    borderRadius: BorderRadius.circular(20),
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 4,
-                        vertical: 2,
-                      ),
-                      child: Text(
-                        _nearbyTrails.isEmpty
-                            ? 'View All'
-                            : 'View All (${_nearbyTrails.length})',
-                        style: const TextStyle(
-                          color: Color(0xFF7CF9A2),
-                          fontWeight: FontWeight.w600,
-                        ),
+                      padding: const EdgeInsets.all(4),
+                      child: Icon(
+                        _nearbyCardCollapsed
+                            ? Icons.keyboard_arrow_up_rounded
+                            : Icons.keyboard_arrow_down_rounded,
+                        color: Colors.white70,
                       ),
                     ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 6),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _nearbyAnchorLabel(),
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.7),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
+            if (!_nearbyCardCollapsed) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _nearbyAnchorLabel(),
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.7),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                _nearbyAnchorChip(
-                  label: 'Near Me',
-                  isActive: _nearbyAnchorMode == _NearbyAnchorMode.nearMe,
-                  onTap: () {
-                    _setNearbyAnchorMode(_NearbyAnchorMode.nearMe);
-                  },
-                ),
-                const SizedBox(width: 8),
-                _nearbyAnchorChip(
-                  label: 'Near Search',
-                  isActive: _nearbyAnchorMode == _NearbyAnchorMode.nearSearch,
-                  isEnabled: _searchedTrailAnchor != null,
-                  onTap: () {
-                    _setNearbyAnchorMode(_NearbyAnchorMode.nearSearch);
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            _nearbyTrailsListContent(),
-            const SizedBox(height: 8),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _nearbyAnchorChip(
+                    label: 'Near Me',
+                    isActive: _nearbyAnchorMode == _NearbyAnchorMode.nearMe,
+                    onTap: () {
+                      _setNearbyAnchorMode(_NearbyAnchorMode.nearMe);
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  _nearbyAnchorChip(
+                    label: 'Near Search',
+                    isActive:
+                        _nearbyAnchorMode == _NearbyAnchorMode.nearSearch,
+                    isEnabled: _searchedTrailAnchor != null,
+                    onTap: () {
+                      _setNearbyAnchorMode(_NearbyAnchorMode.nearSearch);
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              _nearbyTrailsListContent(),
+              const SizedBox(height: 8),
+            ],
           ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openHikeAssistant() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _HikeAssistantScreen(
+          initialTrail: _searchedTrailAnchor,
+          searchMountainInMindanao: _searchMountainInMindanao,
+          fetchMountainOrganizers: _fetchMountainOrganizers,
         ),
       ),
     );
@@ -5983,7 +7287,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFF041A12), Color(0xFF032418), Color(0xFF00130D)],
+          colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
         ),
       ),
       child: SafeArea(
@@ -6036,8 +7340,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Row(
                   children: [
                     Expanded(child: _communityFeedChip('All Posts', 0)),
-                    Expanded(child: _communityFeedChip('Following', 1)),
-                    Expanded(child: _communityFeedChip('My Posts', 2)),
+                    Expanded(child: _communityFeedChip('My Posts', 1)),
                   ],
                 ),
               ),
@@ -6050,57 +7353,140 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.08),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.08),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (_communityComposerImage != null) ...[
+                          Stack(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: Image.file(
+                                  File(_communityComposerImage!.path),
+                                  height: 140,
+                                  width: double.infinity,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                              Positioned(
+                                top: 6,
+                                right: 6,
+                                child: GestureDetector(
+                                  onTap: () => setState(
+                                    () => _communityComposerImage = null,
+                                  ),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.6,
+                                      ),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(
+                                      Icons.close_rounded,
+                                      color: Colors.white,
+                                      size: 16,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            IconButton(
+                              onPressed: _postingCommunityPost
+                                  ? null
+                                  : _pickCommunityComposerImage,
+                              icon: const Icon(
+                                Icons.add_photo_alternate_rounded,
+                                color: Color(0xFF7CF9A2),
+                              ),
+                            ),
+                            Expanded(
+                              child: TextField(
+                                controller: _communityComposerController,
+                                minLines: 1,
+                                maxLines: 3,
+                                style: const TextStyle(color: Colors.white),
+                                decoration: InputDecoration(
+                                  hintText: "What's on your trail today?",
+                                  hintStyle: TextStyle(
+                                    color: Colors.white.withValues(
+                                      alpha: 0.62,
+                                    ),
+                                  ),
+                                  border: InputBorder.none,
+                                  isCollapsed: true,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            SizedBox(
+                              height: 42,
+                              child: ElevatedButton(
+                                onPressed: _postingCommunityPost
+                                    ? null
+                                    : () async {
+                                        final content =
+                                            _communityComposerController.text
+                                                .trim();
+                                        final image = _communityComposerImage;
+                                        if (content.isEmpty && image == null) {
+                                          return;
+                                        }
+                                        FocusManager.instance.primaryFocus
+                                            ?.unfocus();
+                                        setState(
+                                          () => _postingCommunityPost = true,
+                                        );
+                                        await _createCommunityPost(
+                                          content,
+                                          image: image,
+                                        );
+                                        _communityComposerController.clear();
+                                        setState(() {
+                                          _communityComposerImage = null;
+                                          _postingCommunityPost = false;
+                                        });
+                                      },
+                                style: ElevatedButton.styleFrom(
+                                  foregroundColor: Colors.black,
+                                  backgroundColor: const Color(0xFF53D97A),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                ),
+                                child: _postingCommunityPost
+                                    ? const SizedBox(
+                                        height: 18,
+                                        width: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.black,
+                                        ),
+                                      )
+                                    : const Text(
+                                        'Post',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _communityComposerController,
-                        minLines: 1,
-                        maxLines: 3,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
-                          hintText: "What's on your trail today?",
-                          hintStyle: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.62),
-                          ),
-                          border: InputBorder.none,
-                          isCollapsed: true,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      height: 42,
-                      child: ElevatedButton(
-                        onPressed: () async {
-                          final content = _communityComposerController.text
-                              .trim();
-                          if (content.isEmpty) {
-                            return;
-                          }
-                          _communityComposerController.clear();
-                          await _createCommunityPost(content);
-                        },
-                        style: ElevatedButton.styleFrom(
-                          foregroundColor: Colors.black,
-                          backgroundColor: const Color(0xFF53D97A),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                        child: const Text(
-                          'Post',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             ),
             const SizedBox(height: 8),
             Expanded(
@@ -6118,25 +7504,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   final docs = snapshot.data?.docs ?? const [];
                   var posts = docs
                       .map(_communityPostFromSnapshot)
-                      .where((post) => post.content.trim().isNotEmpty)
+                      .where(
+                        (post) =>
+                            post.content.trim().isNotEmpty ||
+                            post.imageUrl.trim().isNotEmpty,
+                      )
                       .toList();
-                  if (_communityFeedFilterIndex == 2) {
+                  if (_communityFeedFilterIndex == 1) {
                     final uid = _firebaseAuth.currentUser?.uid;
                     posts = uid == null
                         ? <_CommunityPost>[]
                         : posts.where((post) => post.authorId == uid).toList();
-                  } else if (_communityFeedFilterIndex == 1) {
-                    final uid = _firebaseAuth.currentUser?.uid;
-                    posts = uid == null
-                        ? posts
-                        : posts.where((post) => post.authorId != uid).toList();
                   }
 
                   if (posts.isEmpty) {
-                    final emptyText = _communityFeedFilterIndex == 2
+                    final emptyText = _communityFeedFilterIndex == 1
                         ? 'You have no posts yet.'
-                        : _communityFeedFilterIndex == 1
-                        ? 'No following feed yet.'
                         : 'No posts yet. Be the first to share.';
                     return Center(
                       child: Padding(
@@ -6203,7 +7586,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFF041A12), Color(0xFF032418), Color(0xFF00130D)],
+          colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
         ),
       ),
       child: SafeArea(
@@ -6259,7 +7642,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: switch (_myHikesView) {
                 _MyHikesView.completed => _completedHikesList(),
                 _MyHikesView.recorded => _recordedTrailSubmissionsList(),
-                _MyHikesView.pending => _trailCheckingList(),
               },
             ),
           ],
@@ -6327,7 +7709,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const SizedBox(height: 2),
                     Text(
                       pendingCount > 0
-                          ? '$pendingCount trail recording waiting to upload/check'
+                          ? '$pendingCount trail recording waiting to upload'
                           : 'Your hikes and trail contributions',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -6510,13 +7892,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Icons.route_rounded,
           _pendingTrailSubmissions.length,
         ),
-        const SizedBox(width: 8),
-        item(
-          _MyHikesView.pending,
-          'Checking',
-          Icons.pending_actions_rounded,
-          _pendingTrailSubmissions.length,
-        ),
       ],
     );
   }
@@ -6550,7 +7925,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return _myHikesEmptyState(
         icon: Icons.login_rounded,
         title: 'Sign in required',
-        message: 'Sign in to see trail recordings and automatic check status.',
+        message: 'Sign in to see your trail recordings.',
       );
     }
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
@@ -6604,53 +7979,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _trailCheckingList() {
-    final stream = _trailSubmissionsStream();
-    if (stream == null) {
-      return _myHikesEmptyState(
-        icon: Icons.login_rounded,
-        title: 'Sign in required',
-        message: 'Sign in to see trails waiting for upload or system check.',
-      );
-    }
-    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-      stream: stream,
-      builder: (context, snapshot) {
-        final pendingRemote = _sortedTrailSubmissionDocs(
-          snapshot.data?.docs,
-        ).where((doc) => _isPendingSubmissionStatus(doc.data())).toList();
-        final hasLocal = _pendingTrailSubmissions.isNotEmpty;
-        if (pendingRemote.isEmpty && !hasLocal) {
-          return _myHikesEmptyState(
-            icon: Icons.verified_rounded,
-            title: 'No trails checking',
-            message:
-                'Submitted trails that still need upload or automatic checking will appear here.',
-          );
-        }
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
-          children: [
-            if (hasLocal) ...[
-              _myHikesSectionLabel('Waiting for upload'),
-              for (final submission in _pendingTrailSubmissions) ...[
-                _localTrailSubmissionCard(submission),
-                const SizedBox(height: 10),
-              ],
-            ],
-            if (pendingRemote.isNotEmpty) ...[
-              _myHikesSectionLabel('Waiting for system check'),
-              for (final doc in pendingRemote) ...[
-                _remoteTrailSubmissionCard(doc),
-                const SizedBox(height: 10),
-              ],
-            ],
-          ],
-        );
-      },
-    );
-  }
-
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _sortedTrailSubmissionDocs(
     List<QueryDocumentSnapshot<Map<String, dynamic>>>? docs,
   ) {
@@ -6665,11 +7993,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return bTime.compareTo(aTime);
     });
     return sorted;
-  }
-
-  bool _isPendingSubmissionStatus(Map<String, dynamic> data) {
-    final status = (data['status']?.toString() ?? 'pending').toLowerCase();
-    return status == 'pending' || status == 'checked' || status == 'accepted';
   }
 
   DateTime? _submissionDate(Map<String, dynamic> data) {
@@ -6715,18 +8038,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
             color: const Color(0xFF061F16),
             borderRadius: BorderRadius.circular(20),
             border: Border.all(color: Colors.white.withValues(alpha: 0.11)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.26),
+                blurRadius: 20,
+                offset: const Offset(0, 10),
+              ),
+            ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                width: 70,
-                height: 70,
+                width: 76,
+                height: 76,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF53D97A).withValues(alpha: 0.12),
+                  gradient: RadialGradient(
+                    colors: [
+                      const Color(0xFF53D97A).withValues(alpha: 0.28),
+                      const Color(0xFF53D97A).withValues(alpha: 0.06),
+                    ],
+                  ),
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: const Color(0xFF53D97A).withValues(alpha: 0.22),
+                    color: const Color(0xFF53D97A).withValues(alpha: 0.3),
                   ),
                 ),
                 child: Icon(icon, size: 36, color: const Color(0xFF7CF9A2)),
@@ -6780,15 +8115,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final payload = submission.payload;
     final mountainName =
         payload['mountainName']?.toString() ?? 'Recorded trail';
+    final trailName = payload['trailName']?.toString() ?? mountainName;
     final province = payload['provinceOrCity']?.toString() ?? '';
     final distanceKm = (payload['distanceKm'] as num?)?.toDouble();
     final durationSeconds = (payload['durationSeconds'] as num?)?.toInt();
     final routePoints = payload['routePoints'] is List
         ? (payload['routePoints'] as List).length
         : 0;
+    final stationCount = payload['stations'] is List
+        ? (payload['stations'] as List).length
+        : 0;
     return _trailSubmissionCardShell(
-      title: mountainName,
-      subtitle: province.isEmpty ? 'Saved locally' : province,
+      title: trailName,
+      subtitle: province.isEmpty ? mountainName : '$mountainName · $province',
       statusLabel: 'Waiting Upload',
       statusColor: const Color(0xFFFFD76A),
       statusIcon: Icons.cloud_off_rounded,
@@ -6798,9 +8137,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         if (durationSeconds != null)
           _formatDuration(Duration(seconds: durationSeconds)),
         '$routePoints points',
+        if (stationCount > 0) '$stationCount stations',
       ],
-      footer:
-          'This recording will upload automatically, then Agakbay will check its quality.',
+      footer: 'This recording will upload and become a trail automatically '
+          'once you\'re back online.',
     );
   }
 
@@ -6809,6 +8149,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   ) {
     final data = doc.data();
     final mountainName = data['mountainName']?.toString() ?? 'Recorded trail';
+    final trailName = data['trailName']?.toString() ?? mountainName;
     final province = data['provinceOrCity']?.toString() ?? '';
     final status = (data['status']?.toString() ?? 'pending').toLowerCase();
     final distanceKm = (data['distanceKm'] as num?)?.toDouble();
@@ -6816,15 +8157,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final routePoints = data['routePoints'] is List
         ? (data['routePoints'] as List).length
         : 0;
-    final score =
-        (data['normalizedScore'] as num?)?.toDouble() ??
-        (data['qualityScore'] as num?)?.toDouble();
+    final stationCount = data['stations'] is List
+        ? (data['stations'] as List).length
+        : 0;
     final date = _submissionDate(data);
     final rejection = data['rejectionReason']?.toString();
 
     return _trailSubmissionCardShell(
-      title: mountainName,
-      subtitle: province.isEmpty ? 'Uploaded trail recording' : province,
+      title: trailName,
+      subtitle: province.isEmpty ? mountainName : '$mountainName · $province',
       statusLabel: _submissionStatusLabel(status),
       statusColor: _submissionStatusColor(status),
       statusIcon: _submissionStatusIcon(status),
@@ -6834,7 +8175,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         if (durationSeconds != null)
           _formatDuration(Duration(seconds: durationSeconds)),
         '$routePoints points',
-        if (score != null) '${(score * 100).round()}% quality',
+        if (stationCount > 0) '$stationCount stations',
       ],
       footer: rejection == null || rejection.isEmpty
           ? _submissionStatusDescription(status)
@@ -7008,21 +8349,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   String _submissionStatusLabel(String status) {
     return switch (status) {
-      'included' => 'Community',
-      'checked' => 'Passed Check',
-      'accepted' => 'Passed Check',
+      'included' => 'Live Trail',
+      'checked' => 'Live Trail',
+      'accepted' => 'Live Trail',
       'rejected' => 'Rejected',
-      _ => 'Checking',
+      _ => 'Processing',
     };
   }
 
   String _submissionStatusDescription(String status) {
     return switch (status) {
-      'included' => 'This recording is now used as a community trail route.',
-      'checked' => 'The route passed quality checks and is being prepared.',
-      'accepted' => 'The route passed quality checks and is being prepared.',
-      'rejected' => 'This recording did not pass the automatic quality check.',
-      _ => 'Uploaded and waiting for automatic quality checks.',
+      'included' => 'This recording is now the trail for this mountain.',
+      'checked' => 'This recording is now the trail for this mountain.',
+      'accepted' => 'This recording is now the trail for this mountain.',
+      'rejected' => 'This recording could not be used.',
+      _ => 'Uploaded and becoming a trail.',
     };
   }
 
@@ -7054,7 +8395,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFF041A12), Color(0xFF032418), Color(0xFF00130D)],
+          colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
         ),
       ),
       child: SafeArea(
@@ -7124,10 +8465,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     const SizedBox(width: 10),
                     _profileStatTile(
-                      label: 'Checking',
+                      label: 'Recorded',
                       value: pendingCount.toString(),
-                      color: const Color(0xFFFFD76A),
-                      onTap: () => _openMyHikesView(_MyHikesView.pending),
+                      color: const Color(0xFF7CF9A2),
+                      onTap: () => _openMyHikesView(_MyHikesView.recorded),
                     ),
                   ],
                 ),
@@ -7192,12 +8533,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     width: 66,
                     height: 66,
                     alignment: Alignment.center,
-                    color: const Color(0xFF0F2A1E),
+                    decoration: BoxDecoration(
+                      gradient: _avatarGradient(displayName),
+                    ),
                     child: photoUrl.isEmpty
                         ? Text(
                             _communityAvatarSeed(displayName),
                             style: const TextStyle(
-                              color: Color(0xFF7CF9A2),
+                              color: Colors.white,
                               fontSize: 24,
                               fontWeight: FontWeight.w900,
                             ),
@@ -7211,7 +8554,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               return Text(
                                 _communityAvatarSeed(displayName),
                                 style: const TextStyle(
-                                  color: Color(0xFF7CF9A2),
+                                  color: Colors.white,
                                   fontSize: 24,
                                   fontWeight: FontWeight.w900,
                                 ),
@@ -7631,21 +8974,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.24),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              CircleAvatar(
-                radius: 16,
-                backgroundColor: const Color(0xFF0A3A28),
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  gradient: _avatarGradient(post.authorName),
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
                 child: Text(
                   _communityAvatarSeed(post.authorName),
                   style: const TextStyle(
-                    color: Color(0xFF7CF9A2),
-                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
               ),
@@ -7692,14 +9047,79 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                   ),
                 ),
+              if (user != null && user.uid == post.authorId)
+                PopupMenuButton<String>(
+                  icon: const Icon(
+                    Icons.more_vert_rounded,
+                    color: Colors.white54,
+                    size: 20,
+                  ),
+                  color: const Color(0xFF0F2A1E),
+                  onSelected: (value) {
+                    if (value == 'edit') {
+                      unawaited(_editCommunityPost(post));
+                    } else if (value == 'delete') {
+                      unawaited(_deleteCommunityPost(post));
+                    }
+                  },
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 'edit',
+                      child: Text(
+                        'Edit',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text(
+                        'Delete',
+                        style: TextStyle(color: Color(0xFFE05555)),
+                      ),
+                    ),
+                  ],
+                ),
             ],
           ),
           const SizedBox(height: 10),
-          Text(
-            post.content,
-            style: const TextStyle(color: Colors.white, height: 1.35),
-          ),
-          const SizedBox(height: 10),
+          if (post.content.trim().isNotEmpty) ...[
+            Text(
+              post.content,
+              style: const TextStyle(color: Colors.white, height: 1.35),
+            ),
+            const SizedBox(height: 10),
+          ],
+          if (post.imageUrl.trim().isNotEmpty) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.network(
+                post.imageUrl,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                loadingBuilder: (context, child, progress) {
+                  if (progress == null) return child;
+                  return Container(
+                    height: 200,
+                    alignment: Alignment.center,
+                    child: const CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Color(0xFF7CF9A2),
+                    ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) => Container(
+                  height: 120,
+                  alignment: Alignment.center,
+                  color: Colors.white.withValues(alpha: 0.05),
+                  child: const Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white38,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
           Row(
             children: [
               if (likeDocStream == null)
@@ -8249,18 +9669,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _HikeWeatherForecast? hikeWeatherForecast;
     String? hikeWeatherError;
     var isHikeWeatherLoading = false;
-    var hasRequestedInitialHikeWeather = false;
+    var hasRequestedInitialDetailsLoad = false;
+    var selectedRoute = routeOptions.isNotEmpty ? routeOptions.first : null;
+    var hasCompletedBefore = _completedTrailIds.contains(trail.placeId);
+
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) {
-        var hasCompletedBefore = _completedTrailIds.contains(trail.placeId);
-        _MountainRouteOption? selectedRoute = routeOptions.isNotEmpty
-            ? routeOptions.first
-            : null;
-        final trailStatus = (communityTrail?.status ?? 'none').toLowerCase();
-        final mappedRouteCount = routeOptions.length;
+        return StatefulBuilder(
+          builder: (context, sheetSetState) {
+            final trailStatus = (communityTrail?.status ?? 'none').toLowerCase();
+            final mappedRouteCount = routeOptions.length;
         final hasMappedRoutes = mappedRouteCount > 0;
         final hasCommunityRoute =
             (trailStatus == 'verified' || trailStatus == 'provisional') &&
@@ -8338,15 +9759,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           await loadHikeWeather(sheetSetState, selectedHikeDate);
         }
 
-        return StatefulBuilder(
-          builder: (context, sheetSetState) {
-            if (!hasRequestedInitialHikeWeather) {
-              hasRequestedInitialHikeWeather = true;
-              unawaited(
-                Future<void>.microtask(
-                  () => loadHikeWeather(sheetSetState, selectedHikeDate),
-                ),
-              );
+            if (!hasRequestedInitialDetailsLoad) {
+              hasRequestedInitialDetailsLoad = true;
+              if (mounted && sheetActive) {
+                unawaited(loadHikeWeather(sheetSetState, selectedHikeDate));
+              }
             }
             return Container(
               height: MediaQuery.of(context).size.height * 0.88,
@@ -11154,11 +12571,67 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     return List<LatLng>.from(_plannedRoutePoints);
   }
 
+  bool get _hasReachedFinish {
+    if (_reachedCheckpoints.contains('Peak')) {
+      return true;
+    }
+    final currentLocation = _currentLocation;
+    final target = _hikeTarget ?? widget.trail.location;
+    if (currentLocation == null) {
+      return false;
+    }
+    final distanceToTarget = Geolocator.distanceBetween(
+      currentLocation.latitude,
+      currentLocation.longitude,
+      target.latitude,
+      target.longitude,
+    );
+    return distanceToTarget <= 160;
+  }
+
+  Future<bool> _confirmEarlyEndHike() async {
+    if (widget.recordingNewTrail || _hasReachedFinish) {
+      return true;
+    }
+    final remainingKm = _remainingRouteDistanceKm();
+    final remainingText = remainingKm == null
+        ? 'the finish'
+        : 'about ${remainingKm.toStringAsFixed(2)} km from the finish';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Finish not reached'),
+        content: Text(
+          'You are not yet at the route finish or summit. If you stop now, this hike will not be recorded as completed. You are $remainingText.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep Hiking'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Stop Anyway'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
   Future<void> _endHike() async {
     if (_ending) {
       return;
     }
     setState(() => _ending = true);
+
+    final shouldEnd = await _confirmEarlyEndHike();
+    if (!shouldEnd) {
+      if (mounted) {
+        setState(() => _ending = false);
+      }
+      return;
+    }
 
     final endedAt = DateTime.now();
     final offlineActivity = _offlineActivity;
@@ -11193,6 +12666,14 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     if (!mounted) {
       return;
     }
+
+    final shouldRecordCompletedHike =
+        widget.recordingNewTrail || _hasReachedFinish;
+    if (!shouldRecordCompletedHike) {
+      Navigator.of(context).pop(null);
+      return;
+    }
+
     Navigator.of(context).pop(result);
   }
 
@@ -11287,7 +12768,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                         ),
                         Text(
                           widget.recordingNewTrail
-                              ? 'Recording your walked GPS trail for automatic check'
+                              ? 'Recording your walked GPS trail'
                               : _usingCommunityTrail
                               ? 'Trail source: Community (${widget.communityTrail?.status ?? 'unknown'})'
                               : _usingGpxTrail

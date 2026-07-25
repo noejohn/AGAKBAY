@@ -9,7 +9,6 @@ const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;
 const CODE_EXPIRY_MINUTES = 10;
 const RESEND_COOLDOWN_SECONDS = 45;
-const EARTH_RADIUS_METERS = 6371000;
 
 function randomSixDigitCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -20,35 +19,6 @@ function hashCode({ code, uid }) {
     .createHash("sha256")
     .update(`${uid}:${code}`)
     .digest("hex");
-}
-
-function toRadians(value) {
-  return (value * Math.PI) / 180;
-}
-
-function distanceMeters(a, b) {
-  const lat1 = Number(a.lat);
-  const lon1 = Number(a.lon);
-  const lat2 = Number(b.lat);
-  const lon2 = Number(b.lon);
-  if (
-    !Number.isFinite(lat1) ||
-    !Number.isFinite(lon1) ||
-    !Number.isFinite(lat2) ||
-    !Number.isFinite(lon2)
-  ) {
-    return 0;
-  }
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
-  const x =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) *
-      Math.cos(toRadians(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-  return EARTH_RADIUS_METERS * c;
 }
 
 function sanitizeRoutePoints(points) {
@@ -78,65 +48,6 @@ function sanitizeRoutePoints(points) {
     });
   }
   return cleaned;
-}
-
-function routeLengthMeters(points) {
-  if (!Array.isArray(points) || points.length < 2) {
-    return 0;
-  }
-  let total = 0;
-  for (let i = 1; i < points.length; i++) {
-    total += distanceMeters(points[i - 1], points[i]);
-  }
-  return total;
-}
-
-function scoreSubmission(data) {
-  const routePoints = sanitizeRoutePoints(data.routePoints);
-  if (routePoints.length < 20) {
-    return { score: 0, routePoints, reason: "too_few_route_points" };
-  }
-  const trackPoints = Array.isArray(data.trackPoints) ? data.trackPoints : [];
-  const trackCount = trackPoints.length;
-  if (trackCount < 20) {
-    return { score: 0, routePoints, reason: "too_few_track_points" };
-  }
-
-  const routeMeters = routeLengthMeters(routePoints);
-  if (routeMeters < 1200) {
-    return { score: 0, routePoints, reason: "route_too_short" };
-  }
-
-  let score = 0;
-  const rawQuality = Number(data.qualityScore);
-  if (Number.isFinite(rawQuality)) {
-    score += Math.max(0, Math.min(1, rawQuality)) * 0.35;
-  }
-  if (routeMeters >= 3000) score += 0.1;
-  if (routeMeters >= 7000) score += 0.1;
-  if (Number(data.durationSeconds) >= 3600) score += 0.1;
-  if (Number(data.elevationGainMasl) >= 300) score += 0.1;
-  if (data.reachedSummit === true) score += 0.15;
-  if (trackCount >= 100) score += 0.1;
-  if (trackCount >= 250) score += 0.1;
-
-  const normalized = Math.max(0, Math.min(1, score));
-  return { score: normalized, routePoints, reason: "ok" };
-}
-
-function pickBestRoute(submissions) {
-  const sorted = [...submissions].sort((a, b) => b.score - a.score);
-  return sorted[0] || null;
-}
-
-function deriveTrailStatus({ submissionCount, avgScore }) {
-  if (submissionCount >= 8 && avgScore >= 0.72) {
-    return "verified";
-  }
-  if (submissionCount >= 1 && avgScore >= 0.45) {
-    return "provisional";
-  }
-  return "none";
 }
 
 async function sendEmailWithResend({ to, code }) {
@@ -314,93 +225,38 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
     const data = snapshot.data() || {};
     const mountainKey = String(data.mountainKey || "").trim();
     if (!mountainKey) {
-      await snapshot.ref.set(
-        {
-          status: "rejected",
-          rejectionReason: "missing_mountain_key",
-          processedAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
       return;
     }
 
-    const evaluation = scoreSubmission(data);
-    if (evaluation.score < 0.45) {
-      await snapshot.ref.set(
-        {
-          status: "rejected",
-          rejectionReason: evaluation.reason,
-          processedAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          normalizedScore: evaluation.score,
-        },
-        { merge: true },
-      );
-      return;
-    }
+    const routePoints = sanitizeRoutePoints(data.routePoints);
 
     await snapshot.ref.set(
       {
-        status: "checked",
-        normalizedScore: evaluation.score,
+        status: "included",
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
       { merge: true },
     );
 
-    const submissionsSnap = await db
-      .collection("trail_submissions")
-      .where("mountainKey", "==", mountainKey)
-      .limit(120)
-      .get();
-
-    const accepted = [];
-    submissionsSnap.forEach((doc) => {
-      const item = doc.data();
-      const status = String(item.status || "").toLowerCase();
-      if (status !== "checked" && status !== "accepted" && status !== "included") {
-        return;
-      }
-      const scored = scoreSubmission(item);
-      if (scored.score < 0.45 || scored.routePoints.length < 20) {
-        return;
-      }
-      accepted.push({
-        id: doc.id,
-        score: scored.score,
-        routePoints: scored.routePoints,
-      });
-    });
-
-    if (accepted.length === 0) {
+    if (routePoints.length < 2) {
       return;
     }
 
-    const best = pickBestRoute(accepted);
-    if (!best) {
-      return;
-    }
-
-    const avgScore =
-      accepted.reduce((sum, item) => sum + item.score, 0) / accepted.length;
-    const status = deriveTrailStatus({
-      submissionCount: accepted.length,
-      avgScore,
-    });
-
-    const sourceStatus = status === "verified" ? "community_verified" : "community_provisional";
+    const trailName = String(data.trailName || data.mountainName || "").trim();
+    const stations = Array.isArray(data.stations)
+      ? data.stations.map((name) => String(name).trim()).filter(Boolean)
+      : [];
 
     await db.collection("mountain_trails").doc(mountainKey).set(
       {
         mountainKey,
-        status,
-        qualityScore: Number(avgScore.toFixed(4)),
-        submissionCount: accepted.length,
-        routePoints: best.routePoints,
-        source: sourceStatus,
+        status: "verified",
+        routePoints,
+        trailName,
+        stations,
+        recordedAt: data.recordedAt || null,
+        source: "community_recorded",
         generatedFromSubmissionId: submissionId,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -408,20 +264,101 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
       { merge: true },
     );
 
-    const includedRefs = accepted.slice(0, 12).map((item) =>
-      db.collection("trail_submissions").doc(item.id)
-    );
-    const batch = db.batch();
-    for (const ref of includedRefs) {
-      batch.set(
-        ref,
-        {
-          status: "included",
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true },
-      );
+    await notifyHikersOfNewTrail({
+      mountainKey,
+      mountainName: trailName || String(data.mountainName || "").trim(),
+      submitterUid: String(data.submittedBy || ""),
+    });
+  },
+);
+
+async function notifyHikersOfNewTrail({ mountainKey, mountainName, submitterUid }) {
+  const displayName = mountainName || "a nearby mountain";
+  const hikersSnap = await db
+    .collection("leaderboard")
+    .where("completedTrailKeys", "array-contains", mountainKey)
+    .get();
+
+  if (hikersSnap.empty) {
+    return;
+  }
+
+  const batch = db.batch();
+  let notifyCount = 0;
+  hikersSnap.forEach((doc) => {
+    const uid = doc.id;
+    if (!uid || uid === submitterUid) {
+      return;
     }
+    const notificationRef = db
+      .collection("users")
+      .doc(uid)
+      .collection("notifications")
+      .doc();
+    batch.set(notificationRef, {
+      type: "trail",
+      title: "New trail recorded",
+      body: `Someone recorded a trail for ${displayName}. Check it out!`,
+      mountainKey,
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    notifyCount += 1;
+  });
+
+  if (notifyCount > 0) {
     await batch.commit();
+  }
+}
+
+exports.onCommunityCommentCreated = onDocumentCreated(
+  {
+    document: "community_posts/{postId}/comments/{commentId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) {
+      return;
+    }
+
+    const { postId } = event.params;
+    const comment = snapshot.data() || {};
+    const commenterUid = String(comment.authorId || "").trim();
+    if (!commenterUid) {
+      return;
+    }
+
+    const postSnap = await db.collection("community_posts").doc(postId).get();
+    if (!postSnap.exists) {
+      return;
+    }
+    const post = postSnap.data() || {};
+    const postAuthorId = String(post.authorId || "").trim();
+    if (!postAuthorId || postAuthorId === commenterUid) {
+      return;
+    }
+
+    const commenterName = String(comment.authorName || "").trim() || "Someone";
+    const preview = String(comment.content || "").trim();
+    const truncated =
+      preview.length > 80 ? `${preview.slice(0, 80)}...` : preview;
+    const body = truncated
+      ? `${commenterName} commented: "${truncated}"`
+      : `${commenterName} commented on your post.`;
+
+    await db
+      .collection("users")
+      .doc(postAuthorId)
+      .collection("notifications")
+      .add({
+        type: "comment",
+        title: "New comment on your post",
+        body,
+        postId,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
   },
 );

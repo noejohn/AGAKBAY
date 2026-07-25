@@ -20,8 +20,20 @@ class MainActivity : FlutterActivity() {
                     val apiKey = appInfo.metaData?.getString("com.google.android.geo.API_KEY") ?: ""
                     result.success(apiKey)
                 }
-                "getWeatherApiKey" -> {
+                    "getWeatherApiKey" -> {
                     val apiKey = appInfo.metaData?.getString("com.example.tunga.WEATHER_API_KEY") ?: ""
+                    result.success(apiKey)
+                }
+                "getCustomSearchApiKey" -> {
+                    val apiKey = appInfo.metaData?.getString("com.example.tunga.CUSTOM_SEARCH_API_KEY") ?: ""
+                    result.success(apiKey)
+                }
+                "getCustomSearchEngineId" -> {
+                    val engineId = appInfo.metaData?.getString("com.example.tunga.CUSTOM_SEARCH_ENGINE_ID") ?: ""
+                    result.success(engineId)
+                }
+                "getAiApiKey" -> {
+                    val apiKey = appInfo.metaData?.getString("com.example.tunga.AI_API_KEY") ?: ""
                     result.success(apiKey)
                 }
                 else -> result.notImplemented()
