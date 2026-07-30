@@ -85,8 +85,9 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/images/animal.png
+    - assets/images/
     - assets/trails/
+    - assets/agak/
 
 flutter_launcher_icons:
   android: true
