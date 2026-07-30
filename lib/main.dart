@@ -18,11 +18,22 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
+import 'package:tunga/screens/agak_companion_screen.dart';
+import 'package:tunga/screens/agak_emotion_showcase_screen.dart';
+import 'package:tunga/screens/agak_scheduled_hikes_screen.dart';
 import 'package:tunga/screens/hike_room_screen.dart';
 import 'package:tunga/services/activity_sync_service.dart';
 import 'package:tunga/services/auth_database_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
+import 'package:tunga/models/agak_mountain.dart';
+import 'package:tunga/models/agak_recommendation.dart';
+import 'package:tunga/services/agak_behavior_database.dart';
+import 'package:tunga/services/agak_controller.dart';
+import 'package:tunga/services/agak_tip_bus.dart';
+import 'package:tunga/services/agak_emotion_selector.dart';
+import 'package:tunga/services/gemini_client.dart';
 import 'package:tunga/services/offline_activity_database.dart';
+import 'package:tunga/widgets/agak_tip_popup.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
 
 Future<void> main() async {
@@ -994,10 +1005,6 @@ class _HikeAssistantScreen extends StatefulWidget {
 }
 
 class _HikeAssistantScreenState extends State<_HikeAssistantScreen> {
-  static const MethodChannel _configChannel = MethodChannel(
-    'com.example.tunga/config',
-  );
-
   final TextEditingController _questionController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<_AssistantMessage> _messages = [];
@@ -1167,88 +1174,23 @@ You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user'
     if (_aiApiKey.isNotEmpty) {
       return;
     }
-
-    try {
-      final apiKey = await _configChannel.invokeMethod<String>('getAiApiKey');
-      if (apiKey != null && apiKey.trim().isNotEmpty) {
-        _aiApiKey = apiKey.trim();
-      }
-    } catch (_) {
-      // Ignore missing AI config.
-    }
+    _aiApiKey = await loadGeminiApiKey();
   }
 
-  Future<String> _fetchAiAssistantResponse(String prompt) async {
-    if (_aiApiKey.isEmpty) {
-      return '';
-    }
-
-    try {
-      final uri = Uri.https(
-        'generativelanguage.googleapis.com',
-        '/v1beta/models/gemini-flash-lite-latest:generateContent',
-        {'key': _aiApiKey},
-      );
-      final response = await http
-          .post(
-            uri,
-            headers: {'Content-Type': 'application/json'},
-            body: json.encode({
-              'systemInstruction': {
-                'parts': [
-                  {
-                    'text':
-                        'You are a friendly, knowledgeable hiking assistant '
-                        'for hikers in Mindanao, Philippines. Answer '
-                        'whatever the user actually asks — trail '
-                        'difficulty, elevation, weather, safety, gear, or '
-                        'general hiking advice — using your own knowledge. '
-                        'Only talk about organizers/guides when the user '
-                        'asks about finding one or contact info is provided '
-                        'to you.',
-                  },
-                ],
-              },
-              'contents': [
-                {
-                  'role': 'user',
-                  'parts': [
-                    {'text': prompt},
-                  ],
-                },
-              ],
-              'generationConfig': {
-                'temperature': 0.7,
-                'maxOutputTokens': 260,
-              },
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-
-      if (response.statusCode != 200) {
-        debugPrint(
-          'Hike Assistant AI request failed: ${response.statusCode} '
-          '${response.body}',
-        );
-        return '';
-      }
-
-      final body = json.decode(response.body);
-      final candidates = body['candidates'];
-      if (candidates is List && candidates.isNotEmpty) {
-        final content = candidates.first['content'];
-        if (content is Map<String, dynamic>) {
-          final parts = content['parts'];
-          if (parts is List && parts.isNotEmpty) {
-            return parts.first['text']?.toString().trim() ?? '';
-          }
-        }
-      }
-    } catch (error) {
-      debugPrint('Hike Assistant AI request threw: $error');
-    }
-
-    return '';
+  Future<String> _fetchAiAssistantResponse(String prompt) {
+    return fetchGeminiResponse(
+      apiKey: _aiApiKey,
+      systemInstruction:
+          'You are a friendly, knowledgeable hiking assistant '
+          'for hikers in Mindanao, Philippines. Answer '
+          'whatever the user actually asks — trail '
+          'difficulty, elevation, weather, safety, gear, or '
+          'general hiking advice — using your own knowledge. '
+          'Only talk about organizers/guides when the user '
+          'asks about finding one or contact info is provided '
+          'to you.',
+      prompt: prompt,
+    );
   }
 
   @override
@@ -1609,7 +1551,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _loadSearchProviderConfig();
     unawaited(_ensureDefaultAppContent());
     unawaited(_refreshLocationAccessStatus());
+    unawaited(AgakController.instance.refresh());
     await _loadCurrentLocation();
+    unawaited(_refreshAgakAmbientWeather());
     if (_nearbyTrails.isEmpty) {
       await _refreshNearbyTrailsForActiveAnchor();
     }
@@ -1766,6 +1710,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       unawaited(_refreshMyLocationForDistance());
       final result = await _searchMountainInMindanao(query);
+      unawaited(
+        AgakBehaviorDatabase.instance.logSearch(
+          query: query,
+          matchedMountainId: result == null
+              ? null
+              : buildMountainMatchKey(
+                  name: result.name,
+                  region: result.provinceOrCity,
+                ),
+          matchedMountainName: result?.name,
+          source: 'dashboard_search',
+        ),
+      );
 
       if (!mounted) {
         return;
@@ -4781,6 +4738,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ? null
               : room.routeAssetPath,
           selectedRouteLabel: room.routeName,
+          fetchWeatherSnapshot: _fetchCurrentWeatherSnapshot,
         ),
       ),
     );
@@ -4805,6 +4763,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
     _showDashboardSnackBar('${room.mountainName} hike saved to My Hikes.');
     unawaited(_updateLeaderboardStats(trail, session));
+    unawaited(_recordAgakHikeCompletion(trail, session));
     unawaited(_submitTrailRouteIfAccepted(trail, session));
   }
 
@@ -5029,6 +4988,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           mapsApiKey: _mapsApiKey,
           communityTrail: communityTrail,
           recordingNewTrail: true,
+          fetchWeatherSnapshot: _fetchCurrentWeatherSnapshot,
         ),
       ),
     );
@@ -5054,6 +5014,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
     });
     unawaited(_updateLeaderboardStats(trail, session));
+    unawaited(_recordAgakHikeCompletion(trail, session));
     await _submitTrailRouteIfAccepted(
       trail,
       session,
@@ -5327,6 +5288,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'completedTrailKeys': FieldValue.arrayUnion([mountainKey]),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  /// Records a completed hike in AGAK's local (offline) behavior history —
+  /// additive to `_updateLeaderboardStats` above, which stays the source of
+  /// truth for the Firestore leaderboard. This is the first durable,
+  /// timestamped per-hike record in the app; it also feeds the
+  /// recommendation engine and triggers a milestone celebration when one
+  /// is hit.
+  Future<void> _recordAgakHikeCompletion(
+    _NearbyTrail trail,
+    _LiveHikeResult session,
+  ) async {
+    try {
+      await AgakBehaviorDatabase.instance.logCompletedHike(
+        mountainId: buildMountainMatchKey(
+          name: trail.name,
+          region: trail.provinceOrCity,
+        ),
+        mountainName: trail.name,
+        region: trail.provinceOrCity,
+        difficulty: trail.difficulty,
+        elevationMasl: trail.elevationMasl,
+        distanceKm: session.distanceKm,
+        reachedSummit: session.reachedSummit,
+      );
+      final completedCount =
+          (await AgakBehaviorDatabase.instance.getCompletedHikes()).length;
+      final milestone = detectCompletedHikeMilestone(completedCount);
+      unawaited(
+        AgakController.instance.refresh(force: true, milestone: milestone),
+      );
+    } catch (error) {
+      debugPrint('AGAK hike-completion logging failed: $error');
+    }
   }
 
   Future<void> _createUserNotification({
@@ -5610,6 +5605,109 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'Weather forecast is unavailable right now.',
       );
     }
+  }
+
+  /// Best-effort "is it bad outside right now, near the user" check that
+  /// feeds AGAK's weather-warning mood. Separate from the hike-planning
+  /// forecast above (which looks up a specific trail + future date) —
+  /// this looks at the user's live location, right now, and silently
+  /// no-ops on any failure so it can never block the companion greeting.
+  Future<void> _refreshAgakAmbientWeather() async {
+    try {
+      if (!_locationGranted || _myLocationCenter == null) {
+        return;
+      }
+      await _loadWeatherApiKey();
+      if (_weatherApiKey.isEmpty) {
+        return;
+      }
+      final snapshot = await _fetchCurrentWeatherSnapshot(_myLocationCenter!);
+      AgakController.instance.updateAmbientWeather(snapshot);
+      if (snapshot != null) {
+        final AgakEmotionState emotion;
+        final String message;
+        if (snapshot.isSevere) {
+          emotion = AgakEmotionState.discouraging;
+          message = '${snapshot.headline}. Be careful out there today!';
+        } else if (snapshot.isCaution) {
+          emotion = AgakEmotionState.discouraging;
+          message =
+              "Today's weather: ${snapshot.headline}. It could turn to "
+              'rain, so keep an eye on the sky and bring rain gear just '
+              'in case.';
+        } else {
+          emotion = AgakEmotionState.encouragement;
+          message =
+              "Today's weather: ${snapshot.headline}. Great day for a hike!";
+        }
+        AgakTipBus.instance.push(AgakTip(emotion: emotion, message: message));
+      }
+    } catch (error) {
+      debugPrint('AGAK ambient weather check failed: $error');
+    }
+  }
+
+  Future<AgakWeatherSnapshot?> _fetchCurrentWeatherSnapshot(
+    LatLng location,
+  ) async {
+    final uri = Uri.https('weather.googleapis.com', '/v1/currentConditions:lookup', {
+      'key': _weatherApiKey,
+      'location.latitude': location.latitude.toStringAsFixed(6),
+      'location.longitude': location.longitude.toStringAsFixed(6),
+    });
+
+    final response = await http.get(uri).timeout(const Duration(seconds: 8));
+    final decoded = jsonDecode(response.body);
+    if (response.statusCode != 200 || decoded is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final condition = decoded['weatherCondition'];
+    final conditionMap = condition is Map<String, dynamic> ? condition : null;
+    final conditionType = conditionMap?['type']?.toString() ?? '';
+    final weatherCode = _weatherCodeFromGoogleCondition(conditionType);
+
+    final precipitationData = decoded['precipitation'];
+    final precipitationMap = precipitationData is Map<String, dynamic>
+        ? precipitationData
+        : null;
+    final probability = precipitationMap?['probability'];
+    final probabilityMap = probability is Map<String, dynamic>
+        ? probability
+        : null;
+    final qpf = precipitationMap?['qpf'];
+    final qpfMap = qpf is Map<String, dynamic> ? qpf : null;
+    final wind = decoded['wind'];
+    final windMap = wind is Map<String, dynamic> ? wind : null;
+
+    final risk = _hikeWeatherRisk(
+      weatherCode: weatherCode,
+      rainChancePercent: _googleInt(probabilityMap?['percent']),
+      precipitationMm: _googleDouble(qpfMap?['quantity']),
+      windSpeedKmh: _googleSpeedKmh(windMap?['speed']),
+    );
+
+    // Populated for good weather too (not just warnings) — the rotating
+    // tip popup wants something to say about "today's weather" even when
+    // there's nothing to warn about.
+    final description = conditionMap?['description'];
+    final descriptionMap = description is Map<String, dynamic>
+        ? description
+        : null;
+    final headline =
+        descriptionMap?['text']?.toString().trim().isNotEmpty == true
+        ? descriptionMap!['text'].toString().trim()
+        : switch (risk) {
+            _HikeWeatherRisk.unsafe => 'Rough weather is rolling in near you',
+            _HikeWeatherRisk.caution => 'Weather looks a bit unsettled near you',
+            _HikeWeatherRisk.good => 'Clear skies near you',
+          };
+
+    return AgakWeatherSnapshot(
+      isSevere: risk == _HikeWeatherRisk.unsafe,
+      isCaution: risk == _HikeWeatherRisk.caution,
+      headline: headline,
+    );
   }
 
   Future<List<dynamic>> _fetchGoogleWeatherForecastDays(
@@ -6011,6 +6109,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return _HikeWeatherRisk.unsafe;
     }
     if (_isWetWeatherCode(weatherCode) ||
+        weatherCode == 3 || // overcast — real rain risk, not a "clear" day
         rainChance >= 50 ||
         precipitation >= 5 ||
         windSpeed >= 30) {
@@ -6267,6 +6366,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const SizedBox(height: 18),
                     _menuUserHeader(),
                     const SizedBox(height: 28),
+                    _appMenuItem(
+                      icon: Icons.event_available_rounded,
+                      iconColor: const Color(0xFF53D97A),
+                      title: 'My Scheduled Hikes',
+                      subtitle: 'Upcoming hikes and packing lists',
+                      onTap: () {
+                        Navigator.of(dialogContext).pop();
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (context) => AgakScheduledHikesScreen(
+                              onScheduleNewHike: _openScheduleHikeFromCatalog,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                     _appMenuItem(
                       icon: Icons.leaderboard_rounded,
                       iconColor: const Color(0xFFFFD76A),
@@ -6968,7 +7083,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const Spacer(),
                     _circleButton(
                       icon: Icons.chat_bubble_outline_rounded,
-                      onTap: _openHikeAssistant,
+                      onTap: _openAgakCompanion,
                     ),
                     const SizedBox(width: 10),
                     _circleButton(
@@ -7140,6 +7255,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
             bottom: 12,
             child: _buildNearbyBottomCard(),
           ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 122, 16, 0),
+              child: AgakTipPopup(onTap: _openAgakCompanion),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -7273,8 +7400,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
       MaterialPageRoute<void>(
         builder: (_) => _HikeAssistantScreen(
           initialTrail: _searchedTrailAnchor,
-          searchMountainInMindanao: _searchMountainInMindanao,
+          searchMountainInMindanao: (query) async {
+            final result = await _searchMountainInMindanao(query);
+            unawaited(
+              AgakBehaviorDatabase.instance.logSearch(
+                query: query,
+                matchedMountainId: result == null
+                    ? null
+                    : buildMountainMatchKey(
+                        name: result.name,
+                        region: result.provinceOrCity,
+                      ),
+                matchedMountainName: result?.name,
+                source: 'assistant_chat',
+              ),
+            );
+            return result;
+          },
           fetchMountainOrganizers: _fetchMountainOrganizers,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openAgakCompanion() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => AgakCompanionScreen(
+          openHikeAssistantChat: () => _openHikeAssistant(),
         ),
       ),
     );
@@ -8485,6 +8638,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(height: 16),
             _profileSection(
+              title: 'AGAK Companion',
+              children: [
+                _profileActionTile(
+                  icon: Icons.auto_awesome_rounded,
+                  iconColor: const Color(0xFF53D97A),
+                  title: "Meet Agak's Emotions",
+                  subtitle: 'See how your companion reacts to your hikes',
+                  trailing: Icons.chevron_right_rounded,
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (context) =>
+                            const AgakEmotionShowcaseScreen(),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _profileSection(
               title: 'Account',
               children: [
                 _profileActionTile(
@@ -9403,15 +9577,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      trail.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            trail.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Container(
+                          width: 9,
+                          height: 9,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: trail.status == 'Open'
+                                ? const Color(0xFF53D97A)
+                                : const Color(0xFFFF8A8A),
+                          ),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -9655,8 +9846,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Future<void> _openMountainDetailsCard(_NearbyTrail trail) async {
     _rememberTrail(trail);
+    unawaited(
+      AgakBehaviorDatabase.instance.logView(
+        mountainId: buildMountainMatchKey(
+          name: trail.name,
+          region: trail.provinceOrCity,
+        ),
+        mountainName: trail.name,
+        source: 'details_card',
+      ),
+    );
     final communityTrail = await _fetchCommunityTrail(trail);
     final routeOptions = await _loadMountainRouteOptions(trail);
+    final trailMatchKey = buildMountainMatchKey(
+      name: trail.name,
+      region: trail.provinceOrCity,
+    );
+    unawaited(_pushMountainTriviaTip(trail, trailMatchKey));
+    var isBookmarked = await AgakBehaviorDatabase.instance.isBookmarked(
+      mountainId: trailMatchKey,
+      mountainName: trail.name,
+    );
     if (!mounted) {
       return;
     }
@@ -9826,13 +10036,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            trail.name,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 32,
-                              fontWeight: FontWeight.w800,
-                            ),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  trail.name,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 32,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                onPressed: () async {
+                                  final nowBookmarked = !isBookmarked;
+                                  sheetSetState(() {
+                                    isBookmarked = nowBookmarked;
+                                  });
+                                  if (nowBookmarked) {
+                                    await AgakBehaviorDatabase.instance
+                                        .addBookmark(
+                                          mountainId: trailMatchKey,
+                                          mountainName: trail.name,
+                                          region: trail.provinceOrCity,
+                                          difficulty: trail.difficulty,
+                                          elevationMasl: trail.elevationMasl,
+                                        );
+                                  } else {
+                                    await AgakBehaviorDatabase.instance
+                                        .removeBookmark(
+                                          mountainId: trailMatchKey,
+                                          mountainName: trail.name,
+                                        );
+                                  }
+                                  unawaited(AgakController.instance.refresh());
+                                },
+                                icon: Icon(
+                                  isBookmarked
+                                      ? Icons.bookmark_rounded
+                                      : Icons.bookmark_border_rounded,
+                                  color: isBookmarked
+                                      ? const Color(0xFF53D97A)
+                                      : Colors.white70,
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(height: 3),
                           Text(
@@ -10251,6 +10501,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           const SizedBox(height: 8),
                         ],
                         SizedBox(
+                          height: 48,
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () => _openScheduleHikeDialog(
+                              trail,
+                              selectedHikeDate,
+                            ),
+                            icon: const Icon(Icons.event_available_rounded),
+                            label: const Text(
+                              'Schedule this Hike',
+                              style: TextStyle(fontWeight: FontWeight.w800),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF53D97A),
+                              side: const BorderSide(
+                                color: Color(0xFF53D97A),
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
                           height: 52,
                           width: double.infinity,
                           child: ElevatedButton.icon(
@@ -10273,6 +10548,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         selectedRouteLabel:
                                             selectedRoute?.routeName,
                                         recordingNewTrail: !hasAnyUsableRoute,
+                                        fetchWeatherSnapshot:
+                                            _fetchCurrentWeatherSnapshot,
                                       ),
                                     ),
                                   );
@@ -10305,6 +10582,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               );
                               unawaited(
                                 _updateLeaderboardStats(trail, session),
+                              );
+                              unawaited(
+                                _recordAgakHikeCompletion(trail, session),
                               );
                               unawaited(
                                 _submitTrailRouteIfAccepted(trail, session),
@@ -10348,6 +10628,326 @@ class _DashboardScreenState extends State<DashboardScreen> {
     ).whenComplete(() {
       sheetActive = false;
     });
+  }
+
+  /// Best-effort "fun fact about this mountain" pop-up, fired when the
+  /// user opens a mountain's details. Curated catalog mountains already
+  /// have a hand-written description — free, instant, offline. For
+  /// anything else (a live Places search result not in the 8-mountain
+  /// catalog), falls back to asking Gemini for one short fact; silently
+  /// does nothing if that's unavailable or fails, same as every other
+  /// AI-enhancement in this app.
+  Future<void> _pushMountainTriviaTip(_NearbyTrail trail, String matchKey) async {
+    try {
+      final catalog = await AgakBehaviorDatabase.instance.getCatalog();
+      final catalogMatches = catalog
+          .where((m) => m.matchKey == matchKey)
+          .toList();
+
+      String? trivia;
+      if (catalogMatches.isNotEmpty &&
+          catalogMatches.first.description.trim().isNotEmpty) {
+        trivia = 'Did you know? ${catalogMatches.first.description.trim()}';
+      } else {
+        final apiKey = await loadGeminiApiKey();
+        if (apiKey.isEmpty) {
+          return;
+        }
+        final response = await fetchGeminiResponse(
+          apiKey: apiKey,
+          systemInstruction:
+              'You are AGAK, a friendly bald-eagle hiking companion mascot '
+              'for the Agakbay app. Share one short, fun, factual trivia '
+              'sentence about the named mountain in Mindanao, Philippines. '
+              'Under 25 words. If you are not confident about a real fact '
+              'for this specific mountain, reply with exactly an empty '
+              'string instead of guessing.',
+          prompt: '${trail.name}, ${trail.provinceOrCity}',
+          maxOutputTokens: 80,
+        );
+        final cleaned = response.trim();
+        if (cleaned.isEmpty) {
+          return;
+        }
+        trivia = 'Did you know? $cleaned';
+      }
+
+      if (!mounted) {
+        return;
+      }
+      AgakTipBus.instance.push(
+        AgakTip(emotion: AgakEmotionState.pointingSuggestion, message: trivia),
+      );
+    } catch (error) {
+      debugPrint('AGAK mountain trivia failed: $error');
+    }
+  }
+
+  Future<void> _openScheduleHikeDialog(
+    _NearbyTrail trail,
+    DateTime initialDate,
+  ) {
+    return _promptScheduleHike(
+      mountainId: buildMountainMatchKey(
+        name: trail.name,
+        region: trail.provinceOrCity,
+      ),
+      mountainName: trail.name,
+      region: trail.provinceOrCity,
+      difficulty: trail.difficulty,
+      elevationMasl: trail.elevationMasl,
+      initialDate: initialDate,
+    );
+  }
+
+  /// Entry point for scheduling a hike without already being on a specific
+  /// trail's details sheet (e.g. from the home-screen companion card) —
+  /// picks a mountain from the curated catalog first, then reuses the same
+  /// date+notes prompt as the details-sheet flow.
+  Future<void> _openScheduleHikeFromCatalog() async {
+    final catalog = await AgakBehaviorDatabase.instance.getCatalog();
+    if (!mounted) return;
+    if (catalog.isEmpty) {
+      _showDashboardSnackBar('No mountains available to schedule yet.');
+      return;
+    }
+
+    final chosen = await showDialog<MountainCatalogEntry>(
+      context: context,
+      builder: (dialogContext) {
+        return SimpleDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
+          title: const Text(
+            'Schedule a Hike',
+            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 19),
+          ),
+          children: [
+            for (final mountain in catalog)
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(dialogContext).pop(mountain),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2F8C5A).withValues(
+                            alpha: 0.14,
+                          ),
+                          borderRadius: BorderRadius.circular(11),
+                        ),
+                        child: const Icon(
+                          Icons.landscape_rounded,
+                          size: 19,
+                          color: Color(0xFF2F8C5A),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              mountain.name,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${mountain.region} · ${mountain.elevationMasl}m · '
+                              '${mountain.difficulty}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+
+    if (chosen == null || !mounted) {
+      return;
+    }
+
+    await _promptScheduleHike(
+      mountainId: chosen.matchKey,
+      mountainName: chosen.name,
+      region: chosen.region,
+      difficulty: chosen.difficulty,
+      elevationMasl: chosen.elevationMasl,
+      initialDate: _dateOnly(DateTime.now()),
+    );
+  }
+
+  /// Shared date+notes prompt used by both scheduling entry points above.
+  Future<void> _promptScheduleHike({
+    required String? mountainId,
+    required String mountainName,
+    required String? region,
+    required String difficulty,
+    required int elevationMasl,
+    required DateTime initialDate,
+  }) async {
+    final firstDate = _dateOnly(DateTime.now());
+    final lastDate = firstDate.add(const Duration(days: 180));
+    var chosenDate = initialDate.isBefore(firstDate) ? firstDate : initialDate;
+    final notesController = TextEditingController();
+
+    final scheduled = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, dialogSetState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              title: Text(
+                'Schedule $mountainName',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w900,
+                  fontSize: 18,
+                ),
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF53D97A).withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: const Color(0xFF53D97A).withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.calendar_today_rounded,
+                          size: 18,
+                          color: Color(0xFF2F8C5A),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            _formatHikeDate(chosenDate),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () async {
+                            final picked = await showDatePicker(
+                              context: dialogContext,
+                              initialDate: chosenDate,
+                              firstDate: firstDate,
+                              lastDate: lastDate,
+                            );
+                            if (picked != null) {
+                              dialogSetState(() {
+                                chosenDate = _dateOnly(picked);
+                              });
+                            }
+                          },
+                          child: const Text(
+                            'Change',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: notesController,
+                    maxLines: 2,
+                    decoration: InputDecoration(
+                      hintText: 'Notes (optional) — e.g. hiking with friends',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF53D97A),
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  child: const Text(
+                    'Schedule',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (scheduled != true) {
+      return;
+    }
+
+    final notes = notesController.text.trim();
+    try {
+      await AgakBehaviorDatabase.instance.scheduleHike(
+        mountainId: mountainId,
+        mountainName: mountainName,
+        region: region,
+        difficulty: difficulty,
+        elevationMasl: elevationMasl,
+        scheduledDate: chosenDate,
+        notes: notes.isEmpty ? null : notes,
+      );
+      unawaited(AgakController.instance.refresh(force: true));
+      if (!mounted) {
+        return;
+      }
+      _showDashboardSnackBar(
+        '$mountainName scheduled for ${_formatHikeDate(chosenDate)}.',
+      );
+    } catch (error) {
+      debugPrint('scheduleHike failed: $error');
+      if (!mounted) {
+        return;
+      }
+      _showDashboardSnackBar(
+        "Couldn't save that hike — please try again.",
+      );
+    }
   }
 
   Widget _detailStatCard({required String label, required String value}) {
@@ -11055,6 +11655,7 @@ class _HikingModeScreen extends StatefulWidget {
     this.preferredGpxAssetPath,
     this.selectedRouteLabel,
     this.recordingNewTrail = false,
+    this.fetchWeatherSnapshot,
   });
 
   final _NearbyTrail trail;
@@ -11063,6 +11664,14 @@ class _HikingModeScreen extends StatefulWidget {
   final String? preferredGpxAssetPath;
   final String? selectedRouteLabel;
   final bool recordingNewTrail;
+
+  /// Reuses the dashboard's single weather-check implementation (same API
+  /// key, same risk classification) instead of duplicating it here — this
+  /// screen just calls it periodically with the live hike location. Null
+  /// (shouldn't happen in practice, but keeps this screen decoupled) means
+  /// mid-hike weather re-checks are silently skipped.
+  final Future<AgakWeatherSnapshot?> Function(LatLng location)?
+  fetchWeatherSnapshot;
 
   @override
   State<_HikingModeScreen> createState() => _HikingModeScreenState();
@@ -11106,6 +11715,31 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   bool _sendingSos = false;
   bool _hasNetworkConnection = true;
   String? _errorMessage;
+  int _lastAnnouncedKm = 0;
+  int _motivationTipIndex = 0;
+  double? _currentHeadingDegrees;
+  DateTime? _lastWrongWayWarningAt;
+  DateTime _lastMovementAt = DateTime.now();
+  DateTime? _lastStillCheckInAt;
+
+  static const _motivationMessages = <String>[
+    "You're doing amazing out there — keep that pace up!",
+    "Every step counts. Enjoy the trail!",
+    "Stay hydrated and keep enjoying the climb!",
+    "You've got this — one step at a time!",
+    'Beautiful hike so far — keep pushing forward!',
+  ];
+
+  // Course-over-ground (GPS heading) is only meaningful while actually
+  // walking at a reasonable pace with a decent fix — otherwise it's noise.
+  static const _minSpeedForHeadingMps = 0.6;
+  static const _maxAccuracyForHeadingMeters = 30.0;
+  static const _wrongWayAngleThresholdDegrees = 110.0;
+  static const _wrongWayCooldown = Duration(minutes: 2);
+
+  // How long without meaningful movement before AGAK checks in — and, if
+  // the hiker stays put, how often it asks again afterward.
+  static const _stillCheckInThreshold = Duration(minutes: 8);
 
   @override
   void initState() {
@@ -11120,6 +11754,13 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       if (activity != null && _elapsed.inSeconds % 10 == 0) {
         unawaited(_saveOfflineHikeStats());
       }
+      if (_elapsed.inSeconds > 0 && _elapsed.inSeconds % 60 == 0) {
+        _pushMinuteMotivationTip();
+      }
+      if (_elapsed.inSeconds > 0 && _elapsed.inSeconds % 900 == 0) {
+        unawaited(_checkMidHikeWeather());
+      }
+      _maybePushStillCheckIn();
       setState(() {
         // Rebuild every second so elapsed time updates smoothly.
       });
@@ -12111,6 +12752,194 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     return checkpoints;
   }
 
+  void _pushMinuteMotivationTip() {
+    final message =
+        _motivationMessages[_motivationTipIndex % _motivationMessages.length];
+    _motivationTipIndex++;
+    AgakTipBus.instance.push(
+      AgakTip(emotion: AgakEmotionState.encouragement, message: message),
+    );
+  }
+
+  /// Checks whether it's time for AGAK to ask if the hiker is okay — fires
+  /// once after [_stillCheckInThreshold] of no meaningful movement, then
+  /// again every full threshold period of continued stillness (reset by
+  /// [_lastStillCheckInAt] going back to null the moment real movement is
+  /// detected in `_updateFromPosition`).
+  void _maybePushStillCheckIn() {
+    final stillFor = DateTime.now().difference(_lastMovementAt);
+    if (stillFor < _stillCheckInThreshold) {
+      return;
+    }
+    final lastCheckIn = _lastStillCheckInAt;
+    if (lastCheckIn != null &&
+        DateTime.now().difference(lastCheckIn) < _stillCheckInThreshold) {
+      return;
+    }
+    _lastStillCheckInAt = DateTime.now();
+    AgakTipBus.instance.push(
+      AgakTip(
+        emotion: AgakEmotionState.pointingSuggestion,
+        message: "You haven't moved in a while — everything okay out there?",
+        choices: [
+          AgakTipChoice(
+            label: "I'm okay!",
+            onSelected: () => _respondToStillCheckIn(imOkay: true),
+          ),
+          AgakTipChoice(
+            label: 'Just resting',
+            onSelected: () => _respondToStillCheckIn(imOkay: false),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _respondToStillCheckIn({required bool imOkay}) {
+    AgakTipBus.instance.push(
+      AgakTip(
+        emotion: imOkay
+            ? AgakEmotionState.encouragement
+            : AgakEmotionState.pointingSuggestion,
+        message: imOkay
+            ? "Good to hear! Whenever you're ready, I'll be right here."
+            : "Take all the time you need — I'll keep an eye on things.",
+      ),
+    );
+  }
+
+  /// Re-checks weather at the live hike location every ~15 minutes so a
+  /// change in conditions (rain moving in) gets flagged mid-hike, not just
+  /// once back on the dashboard before the hike even started. Silently
+  /// skipped offline or if there's nothing actionable to say — this never
+  /// announces "still fine," only real changes worth reacting to, so it
+  /// doesn't compete with the km/checkpoint/minute tips already firing.
+  Future<void> _checkMidHikeWeather() async {
+    final fetchSnapshot = widget.fetchWeatherSnapshot;
+    final location = _currentLocation;
+    if (fetchSnapshot == null || location == null || !_hasNetworkConnection) {
+      return;
+    }
+    try {
+      final snapshot = await fetchSnapshot(location);
+      if (!mounted || snapshot == null) {
+        return;
+      }
+      if (snapshot.isSevere) {
+        AgakTipBus.instance.push(
+          AgakTip(
+            emotion: AgakEmotionState.discouraging,
+            message:
+                '${snapshot.headline}! Consider finding shelter or heading '
+                'back if it gets worse.',
+          ),
+        );
+      } else if (snapshot.isCaution) {
+        AgakTipBus.instance.push(
+          AgakTip(
+            emotion: AgakEmotionState.discouraging,
+            message:
+                '${snapshot.headline} — rain could be on the way. Might '
+                'be a good time to put on your rain gear!',
+          ),
+        );
+      }
+    } catch (error) {
+      debugPrint('Mid-hike weather check failed: $error');
+    }
+  }
+
+  void _pushKmMilestoneTip(int km) {
+    AgakTipBus.instance.push(
+      AgakTip(
+        emotion: AgakEmotionState.encouragement,
+        message: km == 1
+            ? "You've hiked 1 km! Great start, keep it up!"
+            : '$km km down! Your pace is solid — keep going!',
+      ),
+    );
+  }
+
+  void _pushCheckpointTip(_HikeCheckpoint checkpoint) {
+    if (checkpoint.isSummit) {
+      AgakTipBus.instance.push(
+        AgakTip(
+          emotion: AgakEmotionState.celebration,
+          message:
+              'CAW-CAW! You made it to the peak — ${checkpoint.name} '
+              'conquered! Incredible work!',
+        ),
+      );
+    } else {
+      AgakTipBus.instance.push(
+        AgakTip(
+          emotion: AgakEmotionState.rewardReveal,
+          message: 'Checkpoint reached: ${checkpoint.name}! Nice progress.',
+        ),
+      );
+    }
+  }
+
+  /// Coarse "you might be off course" check — compares the direction
+  /// you're actually walking (GPS course-over-ground) against the bearing
+  /// toward a point further up the planned trail. Deliberately not
+  /// precise turn-by-turn guidance: it only fires when the two directions
+  /// are wildly different (roughly facing away from the trail), and only
+  /// once every couple of minutes, so a single noisy reading can't nag.
+  void _checkWrongDirection(Position position) {
+    if (_plannedRoutePoints.isEmpty) {
+      return;
+    }
+    final now = DateTime.now();
+    final lastWarnedAt = _lastWrongWayWarningAt;
+    if (lastWarnedAt != null &&
+        now.difference(lastWarnedAt) < _wrongWayCooldown) {
+      return;
+    }
+
+    final lookaheadIndex = (_activeRouteIndex + 3).clamp(
+      0,
+      _plannedRoutePoints.length - 1,
+    );
+    final target = _plannedRoutePoints[lookaheadIndex];
+    if (Geolocator.distanceBetween(
+          position.latitude,
+          position.longitude,
+          target.latitude,
+          target.longitude,
+        ) <
+        20) {
+      // Already basically at the lookahead point — nothing meaningful to
+      // compare against.
+      return;
+    }
+
+    final bearingToTarget = Geolocator.bearingBetween(
+      position.latitude,
+      position.longitude,
+      target.latitude,
+      target.longitude,
+    );
+    final normalizedBearing = (bearingToTarget + 360) % 360;
+    final normalizedHeading = (position.heading + 360) % 360;
+    var diff = (normalizedBearing - normalizedHeading).abs();
+    if (diff > 180) {
+      diff = 360 - diff;
+    }
+
+    if (diff >= _wrongWayAngleThresholdDegrees) {
+      _lastWrongWayWarningAt = now;
+      AgakTipBus.instance.push(
+        const AgakTip(
+          emotion: AgakEmotionState.discouraging,
+          message:
+              "You might be heading the wrong way — double-check your "
+              'position against the trail!',
+        ),
+      );
+    }
+  }
+
   void _updateFromPosition(Position position, {bool isInitial = false}) {
     if (!mounted) {
       return;
@@ -12119,6 +12948,8 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     final currentPoint = LatLng(position.latitude, position.longitude);
     var segmentMeters = 0.0;
     var shouldPersistPoint = false;
+    int? kmJustReached;
+    _HikeCheckpoint? checkpointJustReached;
     final previous = _lastPosition;
     if (previous != null) {
       segmentMeters = Geolocator.distanceBetween(
@@ -12129,9 +12960,29 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       );
     }
 
+    // Course-over-ground only means something while actually walking with
+    // a decent fix — otherwise it's noise, so the arrow/wrong-way check
+    // simply keeps showing the last known good heading instead.
+    final hasReliableHeading =
+        position.heading.isFinite &&
+        position.speed.isFinite &&
+        position.speed >= _minSpeedForHeadingMps &&
+        position.accuracy.isFinite &&
+        position.accuracy <= _maxAccuracyForHeadingMeters;
+
     setState(() {
+      if (hasReliableHeading) {
+        _currentHeadingDegrees = position.heading;
+      }
       if (!isInitial && segmentMeters >= 2 && segmentMeters <= 250) {
         _trackedDistanceMeters += segmentMeters;
+        _lastMovementAt = DateTime.now();
+        _lastStillCheckInAt = null;
+        final currentKm = (_trackedDistanceMeters / 1000).floor();
+        if (currentKm > _lastAnnouncedKm && currentKm > 0) {
+          _lastAnnouncedKm = currentKm;
+          kmJustReached = currentKm;
+        }
       }
 
       if (_trackPoints.isEmpty) {
@@ -12226,9 +13077,20 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         final threshold = checkpoint.isSummit ? 160.0 : 120.0;
         if (alongRouteMeters <= threshold || directMeters <= threshold) {
           _reachedCheckpoints.add(checkpoint.name);
+          checkpointJustReached ??= checkpoint;
         }
       }
     });
+
+    if (kmJustReached != null) {
+      _pushKmMilestoneTip(kmJustReached!);
+    }
+    if (checkpointJustReached != null) {
+      _pushCheckpointTip(checkpointJustReached!);
+    }
+    if (hasReliableHeading) {
+      _checkWrongDirection(position);
+    }
 
     if (shouldPersistPoint) {
       unawaited(_persistOfflineHikePoint(position));
@@ -12507,16 +13369,26 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     ];
     final current = _currentLocation;
     if (current != null) {
+      final heading = _currentHeadingDegrees;
       markers.add(
         fm.Marker(
           point: _offlineLatLng(current),
           width: 42,
           height: 42,
-          child: const Icon(
-            Icons.my_location_rounded,
-            color: Color(0xFF2CA9FF),
-            size: 34,
-          ),
+          child: heading == null
+              ? const Icon(
+                  Icons.my_location_rounded,
+                  color: Color(0xFF2CA9FF),
+                  size: 34,
+                )
+              : Transform.rotate(
+                  angle: heading * (math.pi / 180),
+                  child: const Icon(
+                    Icons.navigation_rounded,
+                    color: Color(0xFF2CA9FF),
+                    size: 34,
+                  ),
+                ),
         ),
       );
     }
@@ -12877,6 +13749,12 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                             ],
                           ),
                         ),
+                      ),
+                      const Positioned(
+                        top: 56,
+                        left: 10,
+                        right: 10,
+                        child: AgakTipPopup(),
                       ),
                       if (_initializing)
                         Container(
