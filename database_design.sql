@@ -435,4 +435,149 @@ CREATE TABLE mountain_trail_stations (
 --   PRIMARY KEY (id)
 -- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- =====================================================================
+-- AGAK companion — added later than the pass above, from
+-- lib/services/agak_behavior_database.dart (sqflite db `agak_behavior.db`).
+-- Fully client-local/offline today (no Firestore involved) — listed here,
+-- same as pending_trail_submissions above, in case it's ever centralized.
+-- Table names are prefixed `agak_` here (unlike the unprefixed sqflite
+-- names) to avoid colliding with the generic-sounding ones already used
+-- above (e.g. plain `bookmarks`/`search_history` would be ambiguous in a
+-- shared server schema).
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 22. AGAK MOUNTAIN CATALOG  (bundled seed data the recommendation engine
+--     reads from; mirrors sqflite `mountain_catalog`. Not user-scoped —
+--     distinct from `mountain_trails` (§18), which is the community/
+--     verified trail catalog; the two aren't cross-referenced today.)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_mountain_catalog (
+  id              VARCHAR(128) NOT NULL,
+  match_key       VARCHAR(128) NOT NULL,   -- buildMountainMatchKey(name, region)
+  name            VARCHAR(255) NOT NULL,
+  region          VARCHAR(255) NOT NULL,
+  elevation_masl  INT UNSIGNED NOT NULL,
+  difficulty      VARCHAR(50)  NOT NULL,
+  trail_types     JSON         NOT NULL,   -- e.g. ["ridge","forest"]
+  features        JSON         NOT NULL,   -- e.g. ["viewdeck","river"]
+  distance_km     DECIMAL(6,2) NOT NULL,
+  description     TEXT         NOT NULL,
+  place_id        VARCHAR(255) NULL,
+  latitude        DECIMAL(9,6) NULL,
+  longitude       DECIMAL(9,6) NULL,
+  seeded_at       DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_agak_catalog_match_key (match_key),
+  KEY idx_agak_catalog_region (region)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- 23. AGAK SEARCH HISTORY  (mirrors sqflite `search_history`)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_search_history (
+  id                     BIGINT UNSIGNED AUTO_INCREMENT,
+  user_id                VARCHAR(128) NOT NULL,
+  query                  VARCHAR(255) NOT NULL,
+  matched_mountain_id    VARCHAR(128) NULL,   -- catalog match_key, not a FK
+  matched_mountain_name  VARCHAR(255) NULL,
+  source                 VARCHAR(50)  NOT NULL,  -- 'dashboard_search' | 'assistant_chat'
+  searched_at            DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_agak_search_user_time (user_id, searched_at),
+  CONSTRAINT fk_agak_search_history_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- 24. AGAK VIEW HISTORY  (mirrors sqflite `view_history`)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_view_history (
+  id             BIGINT UNSIGNED AUTO_INCREMENT,
+  user_id        VARCHAR(128) NOT NULL,
+  mountain_id    VARCHAR(128) NULL,
+  mountain_name  VARCHAR(255) NOT NULL,
+  source         VARCHAR(50)  NOT NULL,   -- e.g. 'details_card'
+  viewed_at      DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_agak_view_user_time (user_id, viewed_at),
+  KEY idx_agak_view_mountain (mountain_id),
+  CONSTRAINT fk_agak_view_history_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- 25. AGAK BOOKMARKS  (mirrors sqflite `bookmarks`)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_bookmarks (
+  id              BIGINT UNSIGNED AUTO_INCREMENT,
+  user_id         VARCHAR(128) NOT NULL,
+  mountain_id     VARCHAR(128) NULL,
+  mountain_name   VARCHAR(255) NOT NULL,
+  region          VARCHAR(255) NULL,
+  difficulty      VARCHAR(50)  NULL,
+  elevation_masl  INT UNSIGNED NULL,
+  created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_agak_bookmarks_user_mountain (user_id, mountain_id, mountain_name),
+  KEY idx_agak_bookmarks_user (user_id),
+  CONSTRAINT fk_agak_bookmarks_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- 26. AGAK COMPLETED HIKES  (mirrors sqflite `completed_hikes` — additive
+--     to the Firestore leaderboard write in §13, which stays the source
+--     of truth for completion counts)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_completed_hikes (
+  id              BIGINT UNSIGNED AUTO_INCREMENT,
+  user_id         VARCHAR(128) NOT NULL,
+  mountain_id     VARCHAR(128) NULL,
+  mountain_name   VARCHAR(255) NOT NULL,
+  region          VARCHAR(255) NULL,
+  difficulty      VARCHAR(50)  NULL,
+  elevation_masl  INT UNSIGNED NOT NULL DEFAULT 0,
+  distance_km     DECIMAL(6,2) NOT NULL DEFAULT 0,
+  reached_summit  BOOLEAN      NOT NULL DEFAULT FALSE,
+  completed_at    DATETIME(3)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_agak_completed_user_time (user_id, completed_at),
+  CONSTRAINT fk_agak_completed_hikes_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- 27. AGAK SCHEDULED HIKES  (mirrors sqflite `scheduled_hikes`)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_scheduled_hikes (
+  id              BIGINT UNSIGNED AUTO_INCREMENT,
+  user_id         VARCHAR(128) NOT NULL,
+  mountain_id     VARCHAR(128) NULL,
+  mountain_name   VARCHAR(255) NOT NULL,
+  region          VARCHAR(255) NULL,
+  difficulty      VARCHAR(50)  NULL,
+  elevation_masl  INT UNSIGNED NOT NULL DEFAULT 0,
+  scheduled_date  DATETIME(3)  NOT NULL,
+  notes           TEXT         NULL,
+  created_at      DATETIME(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_agak_scheduled_user_date (user_id, scheduled_date),
+  CONSTRAINT fk_agak_scheduled_hikes_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- 28. AGAK PREFERENCE PROFILE CACHE  (1:1 with users; mirrors sqflite
+--     `preference_profile_cache` — a derived cache, safe to drop/rebuild)
+-- ---------------------------------------------------------------------
+CREATE TABLE agak_preference_profile_cache (
+  user_id       VARCHAR(128) NOT NULL,
+  profile_json  JSON         NOT NULL,
+  computed_at   DATETIME(3)  NOT NULL,
+  PRIMARY KEY (user_id),
+  CONSTRAINT fk_agak_profile_cache_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET FOREIGN_KEY_CHECKS = 1;

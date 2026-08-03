@@ -33,6 +33,7 @@ import 'package:tunga/services/agak_tip_bus.dart';
 import 'package:tunga/services/agak_emotion_selector.dart';
 import 'package:tunga/services/gemini_client.dart';
 import 'package:tunga/services/offline_activity_database.dart';
+import 'package:tunga/widgets/agak_floating_companion.dart';
 import 'package:tunga/widgets/agak_tip_popup.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
 
@@ -6109,6 +6110,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return _HikeWeatherRisk.unsafe;
     }
     if (_isWetWeatherCode(weatherCode) ||
+        weatherCode == 2 || // partly cloudy — can still tip into rain
         weatherCode == 3 || // overcast — real rain risk, not a "clear" day
         rainChance >= 50 ||
         precipitation >= 5 ||
@@ -6248,11 +6250,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return markers;
   }
 
+  // Rough max footprint (bubble + gap + character) used only to keep the
+  // draggable companion fully on screen — doesn't need to be pixel-exact.
+  static const Size _agakFootprint = Size(280, 350);
+
+  Offset? _agakOffset;
+
   @override
   Widget build(BuildContext context) {
     final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
     return Scaffold(
-      body: _buildActiveTab(keyboardOpen),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final bodySize = constraints.biggest;
+          _agakOffset ??= Offset(
+            bodySize.width - _agakFootprint.width - 12,
+            bodySize.height - _agakFootprint.height - 140,
+          );
+          return Stack(
+            children: [
+              _buildActiveTab(keyboardOpen),
+              if (!keyboardOpen)
+                Positioned(
+                  left: _agakOffset!.dx,
+                  top: _agakOffset!.dy,
+                  child: AgakFloatingCompanion(
+                    onTap: _openAgakCompanion,
+                    onDragDelta: (delta) {
+                      setState(() {
+                        final maxX = bodySize.width - _agakFootprint.width - 4;
+                        final maxY =
+                            bodySize.height - _agakFootprint.height - 4;
+                        _agakOffset = Offset(
+                          (_agakOffset!.dx + delta.dx).clamp(
+                            4.0,
+                            maxX < 4.0 ? 4.0 : maxX,
+                          ),
+                          (_agakOffset!.dy + delta.dy).clamp(
+                            4.0,
+                            maxY < 4.0 ? 4.0 : maxY,
+                          ),
+                        );
+                      });
+                    },
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
       bottomNavigationBar: keyboardOpen ? null : _buildBottomNavigationBar(),
     );
   }
@@ -7255,18 +7301,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             bottom: 12,
             child: _buildNearbyBottomCard(),
           ),
-        Positioned(
-          top: 0,
-          left: 0,
-          right: 0,
-          child: SafeArea(
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 122, 16, 0),
-              child: AgakTipPopup(onTap: _openAgakCompanion),
-            ),
-          ),
-        ),
       ],
     );
   }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/agak_recommendation.dart';
 import '../services/agak_controller.dart';
+import '../widgets/agak_speech_bubble.dart';
 import '../widgets/agak_theme.dart';
 import 'agak_emotion_showcase_screen.dart';
 
@@ -77,9 +78,9 @@ class _AgakCompanionScreenState extends State<AgakCompanionScreen> {
                       ],
                     ),
                     SliverPadding(
-                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
                       sliver: SliverToBoxAdapter(
-                        child: _MoodBanner(moment: moment, isLoading: isLoading),
+                        child: _CompanionHero(moment: moment, isLoading: isLoading),
                       ),
                     ),
                     if (moment?.upcomingHike != null)
@@ -178,8 +179,15 @@ class _AgakCompanionScreenState extends State<AgakCompanionScreen> {
   }
 }
 
-class _MoodBanner extends StatelessWidget {
-  const _MoodBanner({required this.moment, required this.isLoading});
+/// The screen's hero: a tagline, AGAK's artwork at real size (no
+/// background, no frame — same "just the character" treatment as the
+/// dashboard's floating companion), and a comic speech bubble carrying
+/// whatever AGAK currently has to say. Loosely modeled on a reference the
+/// user shared of a generic "AI companion" hero card — reworked with
+/// AGAK's own eagle art, dark green palette, and hiking-flavored copy
+/// rather than copied wholesale.
+class _CompanionHero extends StatelessWidget {
+  const _CompanionHero({required this.moment, required this.isLoading});
 
   final AgakCompanionMoment? moment;
   final bool isLoading;
@@ -187,70 +195,63 @@ class _MoodBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final emotion = moment?.emotion ?? AgakEmotionState.pointingSuggestion;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AgakColors.surface,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: AgakColors.border.withValues(alpha: 0.55)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.28),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
+    final message = isLoading && moment == null
+        ? 'Getting to know your hiking style...'
+        : (moment?.message ?? "I'm still learning what you like.");
+
+    return Column(
+      children: [
+        RichText(
+          textAlign: TextAlign.center,
+          text: TextSpan(
+            style: AgakText.screenTitle.copyWith(
+              color: Colors.white,
+              fontSize: 25,
+              height: 1.2,
+            ),
+            children: const [
+              TextSpan(text: 'Your '),
+              TextSpan(
+                text: 'AGAK',
+                style: TextStyle(color: AgakColors.accent),
+              ),
+              TextSpan(text: '\nTrail Companion'),
+            ],
           ),
-        ],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: SizedBox(
-              width: 76,
-              height: 76,
-              child: Image.asset(
-                emotion.assetPath,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => const ColoredBox(
-                  color: AgakColors.surfaceRaised,
-                  child: Icon(Icons.flutter_dash, color: AgakColors.accentSoft),
+        ),
+        const SizedBox(height: 20),
+        SizedBox(
+          height: 230,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: 4,
+                bottom: 0,
+                child: Image.asset(
+                  emotion.assetPath,
+                  width: 190,
+                  fit: BoxFit.contain,
+                  errorBuilder: (context, error, stackTrace) =>
+                      const SizedBox(width: 190, height: 190),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'AGAK',
-                  style: TextStyle(
-                    color: AgakColors.accentSoft,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 13,
-                    letterSpacing: 0.4,
+              Positioned(
+                right: 0,
+                top: 14,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 190),
+                  child: AgakSpeechBubble(
+                    message: message,
+                    maxLines: 6,
+                    fontSize: 14,
                   ),
                 ),
-                const SizedBox(height: 4),
-                isLoading && moment == null
-                    ? Text(
-                        'Getting to know your hiking style...',
-                        style: AgakText.body.copyWith(
-                          color: Colors.white.withValues(alpha: 0.7),
-                        ),
-                      )
-                    : Text(
-                        moment?.message ?? "I'm still learning what you like.",
-                        style: AgakText.body.copyWith(color: Colors.white),
-                      ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
