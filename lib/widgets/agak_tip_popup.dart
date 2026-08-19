@@ -4,23 +4,49 @@ import 'package:flutter/material.dart';
 
 import '../models/agak_recommendation.dart';
 import '../services/agak_tip_bus.dart';
+import 'agak_speech_bubble.dart';
 import 'agak_theme.dart';
 
-/// AGAK's home-screen presence, reimagined as a transient pop-up instead of
-/// a permanently-docked card — the docked version was eating a fixed chunk
-/// of map real estate on every render.
+/// Kyrielle's live-hike presence — her artwork stays docked on the Hiking
+/// Mode map for the whole hike (not just a transient pop-up), so she reads
+/// as a companion who's there with you, not a notification widget. A
+/// speech bubble appears above her whenever [AgakTipBus] pushes something
+/// (checkpoint reached, wrong-turn warning, "almost at the next station"
+/// encouragement, still-not-moving check-in, weather), stays up for 10
+/// seconds (or until answered, for interactive tips), then fades on its
+/// own — she just goes back to her idle pose, she never leaves. There's no
+/// manual close button: tap Kyrielle herself to bring the bubble back if
+/// it already faded and you want to re-read what she said.
 ///
-/// Purely reactive: it displays whatever [AgakTipBus] pushes, for 10
-/// seconds, then gets out of the way. It does NOT poll or loop on its own
-/// — that was showing the same stale message over and over whenever
-/// nothing had actually changed. Real triggers (a weather check resolving
-/// after app open, opening a mountain's details, a reminder becoming due)
-/// are what make it show up, so what it says stays meaningful.
+/// Every one of those triggers is computed locally from GPS/timers already
+/// on-device, so this keeps working with no network connection; only the
+/// mid-hike weather re-check needs connectivity, and that one already
+/// no-ops itself when offline.
+///
+/// Purely reactive: it displays whatever [AgakTipBus] pushes. It does NOT
+/// poll or loop on its own — that was showing the same stale message over
+/// and over whenever nothing had actually changed.
+///
+/// Deliberately does NOT replay [AgakTipBus.pending] on mount (unlike a
+/// dashboard-style tip surface might) — this widget is only ever embedded
+/// in Hiking Mode, a screen entered fresh for every hike. Replaying
+/// whatever was last pushed *anywhere* in the app would surface stale,
+/// wrong content — e.g. a "First summit completed!" milestone left over
+/// from a previous, unrelated hike, reappearing at the start of a brand
+/// new one that hasn't been completed yet. Only tips pushed while this
+/// screen is actually open (this hike's checkpoints, weather, and — once
+/// it actually finishes — its own completion milestone) should show here.
 class AgakTipPopup extends StatefulWidget {
-  const AgakTipPopup({super.key, this.onTap});
+  const AgakTipPopup({super.key, this.onTap, this.onDragDelta});
 
   /// Defaults to nothing — the popup is tap-through when there's no handler.
   final VoidCallback? onTap;
+
+  /// Fired with the raw pointer movement while being dragged — same
+  /// contract as [AgakFloatingCompanion.onDragDelta]: the parent owns the
+  /// actual on-screen position (via `Positioned`), this widget only ever
+  /// reports deltas. Null means not draggable.
+  final ValueChanged<Offset>? onDragDelta;
 
   @override
   State<AgakTipPopup> createState() => _AgakTipPopupState();
@@ -32,15 +58,20 @@ class _AgakTipPopupState extends State<AgakTipPopup> {
   Timer? _hideTimer;
   bool _visible = false;
   AgakTip? _shownTip;
-  int _lastHandledVersion = -1;
+  late int _lastHandledVersion;
 
   @override
   void initState() {
     super.initState();
+    // Sync to the bus's current version WITHOUT displaying its current
+    // pending tip (see class doc) — only a tip pushed after this point
+    // will trigger `_onBusChanged` to actually show something.
+    _lastHandledVersion = AgakTipBus.instance.version;
+    debugPrint(
+      'DEBUG AgakTipPopup: mounted, syncing to bus version '
+      '$_lastHandledVersion',
+    );
     AgakTipBus.instance.addListener(_onBusChanged);
-    // Pick up anything pushed before this widget was mounted (e.g. a
-    // weather check that resolved while the Explore tab wasn't active).
-    _onBusChanged();
   }
 
   @override
@@ -52,6 +83,11 @@ class _AgakTipPopupState extends State<AgakTipPopup> {
 
   void _onBusChanged() {
     final bus = AgakTipBus.instance;
+    debugPrint(
+      'DEBUG AgakTipPopup: _onBusChanged fired, busVersion=${bus.version}, '
+      'lastHandled=$_lastHandledVersion, mounted=$mounted, '
+      'pendingIsNull=${bus.pending == null}',
+    );
     if (bus.version == _lastHandledVersion) return;
     _lastHandledVersion = bus.version;
     final tip = bus.pending;
@@ -75,163 +111,130 @@ class _AgakTipPopupState extends State<AgakTipPopup> {
     setState(() => _visible = false);
   }
 
-  /// User-triggered close — same end state as the auto-hide timeout, just
-  /// immediate instead of waiting out the remaining visible duration.
-  void _dismissNow() {
+  /// Tapping Kyrielle brings back whatever she last said, even if the
+  /// bubble already faded out — a "what did you say?" gesture rather than
+  /// a way to dismiss her. No-op before she's said anything yet this hike.
+  void _revealLastTip() {
+    final tip = _shownTip;
+    if (tip == null) return;
     _hideTimer?.cancel();
-    _hide();
+    setState(() => _visible = true);
+    if (tip.choices == null) {
+      _hideTimer = Timer(_visibleDuration, _hide);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final tip = _shownTip;
-    return IgnorePointer(
-      ignoring: !_visible,
-      child: AnimatedSlide(
-        offset: _visible ? Offset.zero : const Offset(0, -1.3),
-        duration: const Duration(milliseconds: 320),
-        curve: _visible ? Curves.easeOutBack : Curves.easeIn,
-        child: AnimatedOpacity(
-          opacity: _visible ? 1 : 0,
-          duration: const Duration(milliseconds: 220),
-          child: tip == null
-              ? const SizedBox.shrink()
-              : _PopupCard(tip: tip, onTap: widget.onTap, onClose: _dismissNow),
-        ),
+    final speaking = _visible && tip != null;
+    return GestureDetector(
+      onPanUpdate: widget.onDragDelta == null
+          ? null
+          : (details) => widget.onDragDelta!(details.delta),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          IgnorePointer(
+            ignoring: !speaking,
+            child: AnimatedSlide(
+              offset: speaking ? Offset.zero : const Offset(0, 0.15),
+              duration: const Duration(milliseconds: 320),
+              curve: speaking ? Curves.easeOutBack : Curves.easeIn,
+              child: AnimatedOpacity(
+                opacity: speaking ? 1 : 0,
+                duration: const Duration(milliseconds: 220),
+                child: tip == null
+                    ? const SizedBox.shrink()
+                    : _TipBubble(tip: tip, onTap: widget.onTap),
+              ),
+            ),
+          ),
+          const SizedBox(height: 2),
+          // Kyrielle herself — always here for the whole hike, not just
+          // while she has something to say. Wears whichever mood her
+          // latest tip called for while the bubble above is showing,
+          // otherwise her default "keeping you company" pose. Sized to
+          // match her dashboard presence rather than reading as a small
+          // corner icon, draggable so she never permanently blocks the map
+          // underneath, and tappable to bring her last message back.
+          GestureDetector(
+            onTap: _revealLastTip,
+            child: SizedBox(
+              width: 200,
+              height: 200,
+              child: Image.asset(
+                speaking
+                    ? tip.emotion.assetPath
+                    : AgakEmotionState.pointingSuggestion.assetPath,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) =>
+                    const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _PopupCard extends StatelessWidget {
-  const _PopupCard({required this.tip, required this.onClose, this.onTap});
+/// Same "just the character" treatment as [AgakFloatingCompanion] on the
+/// dashboard — a comic speech bubble (with its tail, no card chrome or
+/// name-tag header), rather than a separate notification-card look. Reads
+/// as one consistent character across screens instead of two
+/// differently-styled surfaces.
+class _TipBubble extends StatelessWidget {
+  const _TipBubble({required this.tip, this.onTap});
 
   final AgakTip tip;
   final VoidCallback? onTap;
-  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 260),
+      child: GestureDetector(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(24),
-        child: Ink(
-          padding: const EdgeInsets.fromLTRB(14, 14, 8, 14),
-          decoration: BoxDecoration(
-            color: AgakColors.surface,
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(
-              color: AgakColors.border.withValues(alpha: 0.5),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.36),
-                blurRadius: 24,
-                offset: const Offset(0, 12),
-              ),
-            ],
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: SizedBox(
-                  width: 58,
-                  height: 58,
-                  child: Image.asset(
-                    tip.emotion.assetPath,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) =>
-                        const ColoredBox(
-                          color: AgakColors.surfaceRaised,
-                          child: Icon(
-                            Icons.flutter_dash,
-                            color: AgakColors.accentSoft,
+        behavior: HitTestBehavior.opaque,
+        child: AgakSpeechBubble(
+          message: tip.message,
+          maxLines: 4,
+          fontSize: 13,
+          footer: tip.choices == null
+              ? null
+              : Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: tip.choices!
+                      .map(
+                        (choice) => OutlinedButton(
+                          onPressed: choice.onSelected,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: AgakColors.maroon,
+                            side: const BorderSide(color: AgakColors.maroon),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 8,
+                            ),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            choice.label,
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
-                  ),
+                      )
+                      .toList(),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'AGAK',
-                      style: TextStyle(
-                        color: AgakColors.accentSoft,
-                        fontWeight: FontWeight.w900,
-                        fontSize: 13,
-                        letterSpacing: 0.3,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      tip.message,
-                      maxLines: 4,
-                      overflow: TextOverflow.ellipsis,
-                      style: AgakText.body.copyWith(
-                        color: Colors.white.withValues(alpha: 0.92),
-                      ),
-                    ),
-                    if (tip.choices != null) ...[
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: tip.choices!
-                            .map(
-                              (choice) => OutlinedButton(
-                                onPressed: choice.onSelected,
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: AgakColors.accentSoft,
-                                  side: const BorderSide(
-                                    color: AgakColors.accentSoft,
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 14,
-                                    vertical: 8,
-                                  ),
-                                  minimumSize: Size.zero,
-                                  tapTargetSize:
-                                      MaterialTapTargetSize.shrinkWrap,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                ),
-                                child: Text(
-                                  choice.label,
-                                  style: const TextStyle(
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                            )
-                            .toList(),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              IconButton(
-                tooltip: 'Dismiss',
-                icon: const Icon(
-                  Icons.close_rounded,
-                  color: Colors.white54,
-                  size: 18,
-                ),
-                onPressed: onClose,
-                visualDensity: VisualDensity.compact,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-              ),
-            ],
-          ),
         ),
       ),
     );

@@ -3,8 +3,8 @@ import 'package:flutter/material.dart';
 import '../models/agak_recommendation.dart';
 import '../widgets/agak_theme.dart';
 
-/// Static feature-showcase page explaining AGAK's 5 mascot moods to the
-/// user. Purely informational — it reuses the same 5 eagle illustrations
+/// Static feature-showcase page explaining Kyrielle's 6 mascot moods to the
+/// user. Purely informational — it reuses the same eagle illustrations
 /// that back [AgakEmotionState] (via [AgakEmotionAssetX.assetPath]) but maps
 /// them onto a separate, more user-facing set of labels than the production
 /// recommendation-driven states in agak_emotion_selector.dart.
@@ -20,8 +20,8 @@ class AgakEmotionShowcaseScreen extends StatelessWidget {
       icon: Icons.chat_bubble_rounded,
       assetPath: AgakEmotionState.pointingSuggestion.assetPath,
       description:
-          'Agak greets the user, gives daily tips, hiking suggestions, and '
-          'personalized recommendations.',
+          'Kyrielle greets the user, gives daily tips, hiking suggestions, '
+          'and personalized recommendations.',
       sampleMessage: 'Good morning! Ready for your next adventure?',
       triggers: const [
         'Opens the app',
@@ -127,43 +127,60 @@ class AgakEmotionShowcaseScreen extends StatelessWidget {
         'Friends nearby hitting similar milestones',
       ],
     ),
+    _EmotionShowcaseItem(
+      emoji: '😎',
+      title: 'Sunny Day',
+      pastelColor: const Color(0xFFFFF6D9),
+      accentColor: const Color(0xFFE0A200),
+      icon: Icons.wb_sunny_rounded,
+      assetPath: AgakEmotionState.sunny.assetPath,
+      description:
+          "Shows up when it's genuinely clear and sunny at the user's "
+          'location — a good-weather mood distinct from just "not bad."',
+      sampleMessage: "Today's weather: Sunny. Great day for a hike!",
+      triggers: const ['Clear/sunny live weather check'],
+      relatedRecommendations: const [
+        'A trail with a great summit view today',
+        'Sun protection reminders — hat, sunscreen, water',
+        'A longer route since conditions are favorable',
+      ],
+    ),
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: SafeArea(
           child: LayoutBuilder(
             builder: (context, constraints) {
               final crossAxisCount = constraints.maxWidth < 380 ? 1 : 2;
               return CustomScrollView(
                 slivers: [
-                  SliverAppBar(
+                  const SliverAppBar(
                     backgroundColor: Colors.transparent,
                     elevation: 0,
                     pinned: false,
                     floating: true,
-                    title: const Text(
+                    title: Text(
                       'AI Companion Emotions',
-                      style: AgakText.screenTitle,
+                      style: TextStyle(
+                        color: AgakColors.ink,
+                        fontSize: 26,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.1,
+                      ),
                     ),
                   ),
                   SliverPadding(
                     padding: const EdgeInsets.fromLTRB(20, 4, 20, 0),
                     sliver: SliverToBoxAdapter(
                       child: Text(
-                        "Agak understands your hiking journey and changes "
+                        "Kyrielle understands your hiking journey and changes "
                         "emotions to guide, encourage, and protect you.",
                         style: AgakText.body.copyWith(
-                          color: Colors.white.withValues(alpha: 0.72),
+                          color: AgakColors.ink.withValues(alpha: 0.72),
                         ),
                       ),
                     ),
@@ -184,8 +201,8 @@ class AgakEmotionShowcaseScreen extends StatelessWidget {
                       ),
                     ),
                   ),
-                  SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(20, 32, 20, 40),
+                  const SliverPadding(
+                    padding: EdgeInsets.fromLTRB(20, 32, 20, 40),
                     sliver: SliverToBoxAdapter(
                       child: _HowAgakDecidesSection(),
                     ),
@@ -292,8 +309,8 @@ class _EmotionCardState extends State<_EmotionCard> {
                         Expanded(
                           child: Text(
                             '${item.emoji} ${item.title}',
-                            style: TextStyle(
-                              color: const Color(0xFF1D2A22),
+                            style: const TextStyle(
+                              color: Color(0xFF1D2A22),
                               fontSize: 15,
                               fontWeight: FontWeight.w900,
                             ),
@@ -364,7 +381,7 @@ class _EmotionDetailSheet extends StatelessWidget {
       builder: (context, scrollController) {
         return Container(
           decoration: const BoxDecoration(
-            color: Color(0xFF0B241A),
+            color: AgakColors.cream,
             borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
           ),
           child: ListView(
@@ -377,7 +394,7 @@ class _EmotionDetailSheet extends StatelessWidget {
                   width: 40,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.24),
+                    color: AgakColors.ink.withValues(alpha: 0.24),
                     borderRadius: BorderRadius.circular(4),
                   ),
                 ),
@@ -424,7 +441,7 @@ class _EmotionDetailSheet extends StatelessWidget {
                     Text(
                       item.description,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.82),
+                        color: AgakColors.ink.withValues(alpha: 0.82),
                         fontSize: 14,
                         height: 1.45,
                       ),
@@ -435,7 +452,7 @@ class _EmotionDetailSheet extends StatelessWidget {
                     Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF12231A),
+                        color: AgakColors.surfaceRaised,
                         borderRadius: BorderRadius.circular(16),
                         border: Border.all(
                           color: item.accentColor.withValues(alpha: 0.4),
@@ -469,7 +486,7 @@ class _EmotionDetailSheet extends StatelessWidget {
                             child: Text(
                               item.sampleMessage,
                               style: const TextStyle(
-                                color: Colors.white,
+                                color: AgakColors.ink,
                                 fontSize: 13,
                                 height: 1.4,
                               ),
@@ -494,7 +511,7 @@ class _EmotionDetailSheet extends StatelessWidget {
                     ...item.relatedRecommendations.map(
                       (r) => _bulletRow(
                         icon: Icons.arrow_right_rounded,
-                        color: Colors.white70,
+                        color: AgakColors.ink.withValues(alpha: 0.7),
                         text: r,
                       ),
                     ),
@@ -512,7 +529,7 @@ class _EmotionDetailSheet extends StatelessWidget {
     return Text(
       text.toUpperCase(),
       style: TextStyle(
-        color: Colors.white.withValues(alpha: 0.5),
+        color: AgakColors.ink.withValues(alpha: 0.5),
         fontSize: 11.5,
         fontWeight: FontWeight.w800,
         letterSpacing: 0.6,
@@ -536,7 +553,7 @@ class _EmotionDetailSheet extends StatelessWidget {
             child: Text(
               text,
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.85),
+                color: AgakColors.ink.withValues(alpha: 0.85),
                 fontSize: 13,
                 height: 1.4,
               ),
@@ -566,9 +583,9 @@ class _HowAgakDecidesSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'How Agak Decides',
+          'How Kyrielle Decides',
           style: TextStyle(
-            color: Colors.white,
+            color: AgakColors.ink,
             fontSize: 18,
             fontWeight: FontWeight.w900,
           ),
@@ -579,18 +596,18 @@ class _HowAgakDecidesSection extends StatelessWidget {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
-              color: const Color(0xFF061F16),
+              color: AgakColors.surfaceRaised,
               borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+              border: Border.all(color: AgakColors.ink.withValues(alpha: 0.1)),
             ),
             child: Row(
               children: [
-                Icon(_steps[i].icon, color: const Color(0xFF53D97A), size: 20),
+                Icon(_steps[i].icon, color: AgakColors.accentSoft, size: 20),
                 const SizedBox(width: 12),
                 Text(
                   _steps[i].label,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: AgakColors.ink,
                     fontSize: 14,
                     fontWeight: FontWeight.w700,
                   ),
@@ -603,7 +620,7 @@ class _HowAgakDecidesSection extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 4),
               child: Icon(
                 Icons.arrow_downward_rounded,
-                color: Colors.white.withValues(alpha: 0.4),
+                color: AgakColors.ink.withValues(alpha: 0.4),
                 size: 18,
               ),
             ),

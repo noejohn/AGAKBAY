@@ -106,7 +106,7 @@ class _AgakScheduledHikesScreenState extends State<AgakScheduledHikesScreen> {
                     IconButton(
                       icon: const Icon(
                         Icons.arrow_back_rounded,
-                        color: Colors.white,
+                        color: AgakColors.ink,
                       ),
                       onPressed: () => Navigator.of(context).pop(),
                     ),
@@ -115,7 +115,7 @@ class _AgakScheduledHikesScreenState extends State<AgakScheduledHikesScreen> {
                       child: Text(
                         'My Scheduled Hikes',
                         style: TextStyle(
-                          color: Colors.white,
+                          color: AgakColors.ink,
                           fontSize: 20,
                           fontWeight: FontWeight.w900,
                         ),
@@ -216,7 +216,7 @@ class _EmptyState extends StatelessWidget {
           "You don't have any upcoming hikes scheduled yet.",
           textAlign: TextAlign.center,
           style: AgakText.body.copyWith(
-            color: Colors.white.withValues(alpha: 0.75),
+            color: AgakColors.ink.withValues(alpha: 0.75),
           ),
         ),
         if (canScheduleNew) ...[
@@ -227,7 +227,7 @@ class _EmptyState extends StatelessWidget {
               onPressed: onScheduleNewHike,
               style: FilledButton.styleFrom(
                 backgroundColor: AgakColors.accent,
-                foregroundColor: Colors.black,
+                foregroundColor: AgakColors.cream,
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16),
                 ),
@@ -274,7 +274,7 @@ class _ErrorState extends StatelessWidget {
           message,
           textAlign: TextAlign.center,
           style: AgakText.body.copyWith(
-            color: Colors.white.withValues(alpha: 0.75),
+            color: AgakColors.ink.withValues(alpha: 0.75),
           ),
         ),
         const SizedBox(height: 24),
@@ -337,7 +337,7 @@ class _ScheduledHikeCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.24),
@@ -356,7 +356,7 @@ class _ScheduledHikeCard extends StatelessWidget {
           backgroundColor: AgakColors.surface,
           collapsedBackgroundColor: AgakColors.surface,
           iconColor: AgakColors.accentSoft,
-          collapsedIconColor: Colors.white54,
+          collapsedIconColor: AgakColors.ink.withValues(alpha: 0.54),
           childrenPadding: EdgeInsets.zero,
           tilePadding: const EdgeInsets.fromLTRB(14, 6, 10, 6),
           leading: Container(
@@ -374,7 +374,7 @@ class _ScheduledHikeCard extends StatelessWidget {
           ),
           title: Text(
             hike.mountainName,
-            style: AgakText.cardTitle.copyWith(color: Colors.white),
+            style: AgakText.cardTitle.copyWith(color: AgakColors.ink),
           ),
           subtitle: Padding(
             padding: const EdgeInsets.only(top: 3),
@@ -384,7 +384,7 @@ class _ScheduledHikeCard extends StatelessWidget {
               style: TextStyle(
                 fontSize: 12.5,
                 height: 1.4,
-                color: Colors.white.withValues(alpha: 0.62),
+                color: AgakColors.ink.withValues(alpha: 0.62),
               ),
             ),
           ),
@@ -401,16 +401,16 @@ class _ScheduledHikeCard extends StatelessWidget {
                 onPressed: onCancel,
                 visualDensity: VisualDensity.compact,
               ),
-              const Icon(Icons.expand_more_rounded, color: Colors.white54),
+              Icon(Icons.expand_more_rounded, color: AgakColors.ink.withValues(alpha: 0.54)),
             ],
           ),
           children: [
             Container(
               width: double.infinity,
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-              decoration: BoxDecoration(
+              decoration: const BoxDecoration(
                 color: AgakColors.surfaceRaised,
-                borderRadius: const BorderRadius.vertical(
+                borderRadius: BorderRadius.vertical(
                   bottom: Radius.circular(20),
                 ),
               ),
@@ -421,7 +421,7 @@ class _ScheduledHikeCard extends StatelessWidget {
                   Text(
                     'WHAT TO BRING',
                     style: AgakText.caption.copyWith(
-                      color: Colors.white.withValues(alpha: 0.5),
+                      color: AgakColors.ink.withValues(alpha: 0.5),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -443,7 +443,7 @@ class _ScheduledHikeCard extends StatelessWidget {
                               style: TextStyle(
                                 fontSize: 13,
                                 height: 1.35,
-                                color: Colors.white.withValues(alpha: 0.85),
+                                color: AgakColors.ink.withValues(alpha: 0.85),
                               ),
                             ),
                           ),

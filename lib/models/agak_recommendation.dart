@@ -26,7 +26,7 @@ class AgakRecommendation {
   });
 }
 
-/// The 5 emotional states AGAK can express, each backed by one of the
+/// The emotional states Kyrielle can express, each backed by one of the
 /// custom eagle illustrations under assets/images/.
 enum AgakEmotionState {
   discouraging,
@@ -34,6 +34,16 @@ enum AgakEmotionState {
   encouragement,
   celebration,
   pointingSuggestion,
+  sunny,
+
+  /// Poke reaction only — shown for the "that tickles!" line.
+  tickled,
+
+  /// Poke reaction only — shown for the "ready for an adventure?" line.
+  readyForAdventure,
+
+  /// Poke reaction only — shown for AGAK's "you called me" greeting lines.
+  youCalledMe,
 }
 
 extension AgakEmotionAssetX on AgakEmotionState {
@@ -49,6 +59,14 @@ extension AgakEmotionAssetX on AgakEmotionState {
         return 'assets/images/agak_celebration_confetti.png';
       case AgakEmotionState.pointingSuggestion:
         return 'assets/images/agak_pointing_suggestion.png';
+      case AgakEmotionState.sunny:
+        return 'assets/images/sunny.png';
+      case AgakEmotionState.tickled:
+        return 'assets/images/tickles.png';
+      case AgakEmotionState.readyForAdventure:
+        return 'assets/images/readyforadventur.png';
+      case AgakEmotionState.youCalledMe:
+        return 'assets/images/you called me.png';
     }
   }
 }
@@ -92,11 +110,18 @@ class AgakWeatherSnapshot {
   /// could turn to rain). Lets callers avoid calling an unsettled day
   /// "great weather" just because it isn't a storm.
   final bool isCaution;
+
+  /// True when conditions are both safe (not severe/caution) AND the sky
+  /// is actually clear/sunny — distinct from "just not bad," which can
+  /// still be overcast. Drives the sunglasses mascot pose specifically
+  /// for a genuinely sunny day rather than every safe-but-cloudy one.
+  final bool isSunny;
   final String headline;
 
   const AgakWeatherSnapshot({
     required this.isSevere,
     this.isCaution = false,
+    this.isSunny = false,
     required this.headline,
   });
 }

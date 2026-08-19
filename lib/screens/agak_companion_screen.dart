@@ -61,10 +61,18 @@ class _AgakCompanionScreenState extends State<AgakCompanionScreen> {
                       elevation: 0,
                       pinned: false,
                       floating: true,
-                      title: const Text('AGAK', style: AgakText.screenTitle),
+                      title: const Text(
+                        'Kyrielle',
+                        style: TextStyle(
+                          color: AgakColors.ink,
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
                       actions: [
                         IconButton(
-                          tooltip: "Meet Agak's Emotions",
+                          tooltip: "Meet Kyrielle's Emotions",
                           icon: const Icon(Icons.auto_awesome_rounded),
                           onPressed: () {
                             Navigator.of(context).push(
@@ -98,7 +106,7 @@ class _AgakCompanionScreenState extends State<AgakCompanionScreen> {
                         child: Text(
                           'SUGGESTED FOR YOU',
                           style: AgakText.caption.copyWith(
-                            color: Colors.white.withValues(alpha: 0.55),
+                            color: AgakColors.ink.withValues(alpha: 0.55),
                           ),
                         ),
                       ),
@@ -117,7 +125,7 @@ class _AgakCompanionScreenState extends State<AgakCompanionScreen> {
                                   "hike and I'll start suggesting mountains "
                                   'that fit your style.',
                                   style: AgakText.body.copyWith(
-                                    color: Colors.white.withValues(alpha: 0.6),
+                                    color: AgakColors.ink.withValues(alpha: 0.6),
                                   ),
                                 ),
                               ),
@@ -184,8 +192,8 @@ class _AgakCompanionScreenState extends State<AgakCompanionScreen> {
 /// dashboard's floating companion), and a comic speech bubble carrying
 /// whatever AGAK currently has to say. Loosely modeled on a reference the
 /// user shared of a generic "AI companion" hero card — reworked with
-/// AGAK's own eagle art, dark green palette, and hiking-flavored copy
-/// rather than copied wholesale.
+/// Kyrielle's own eagle art, cream/gold/olive/maroon palette, and
+/// hiking-flavored copy rather than copied wholesale.
 class _CompanionHero extends StatelessWidget {
   const _CompanionHero({required this.moment, required this.isLoading});
 
@@ -205,14 +213,14 @@ class _CompanionHero extends StatelessWidget {
           textAlign: TextAlign.center,
           text: TextSpan(
             style: AgakText.screenTitle.copyWith(
-              color: Colors.white,
+              color: AgakColors.ink,
               fontSize: 25,
               height: 1.2,
             ),
             children: const [
               TextSpan(text: 'Your '),
               TextSpan(
-                text: 'AGAK',
+                text: 'Kyrielle',
                 style: TextStyle(color: AgakColors.accent),
               ),
               TextSpan(text: '\nTrail Companion'),
@@ -269,7 +277,7 @@ class _WhatToBringCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: AgakColors.surfaceRaised,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -285,7 +293,7 @@ class _WhatToBringCard extends StatelessWidget {
               Text(
                 'WHAT TO BRING · ${reminder.mountainName.toUpperCase()}',
                 style: AgakText.caption.copyWith(
-                  color: Colors.white.withValues(alpha: 0.6),
+                  color: AgakColors.ink.withValues(alpha: 0.6),
                 ),
               ),
             ],
@@ -307,7 +315,7 @@ class _WhatToBringCard extends StatelessWidget {
                     child: Text(
                       item,
                       style: AgakText.body.copyWith(
-                        color: Colors.white.withValues(alpha: 0.9),
+                        color: AgakColors.ink.withValues(alpha: 0.9),
                       ),
                     ),
                   ),
@@ -335,7 +343,7 @@ class _RecommendationCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: AgakColors.surface,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -360,7 +368,7 @@ class _RecommendationCard extends StatelessWidget {
               children: [
                 Text(
                   mountain.name,
-                  style: AgakText.cardTitle.copyWith(color: Colors.white),
+                  style: AgakText.cardTitle.copyWith(color: AgakColors.ink),
                 ),
                 const SizedBox(height: 5),
                 Wrap(
@@ -379,7 +387,7 @@ class _RecommendationCard extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 12.5,
                       height: 1.4,
-                      color: Colors.white.withValues(alpha: 0.68),
+                      color: AgakColors.ink.withValues(alpha: 0.68),
                     ),
                   ),
                 ],
@@ -395,7 +403,7 @@ class _RecommendationCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
+        color: AgakColors.ink.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(
@@ -403,7 +411,7 @@ class _RecommendationCard extends StatelessWidget {
         style: TextStyle(
           fontSize: 11.5,
           fontWeight: FontWeight.w700,
-          color: Colors.white.withValues(alpha: 0.75),
+          color: AgakColors.ink.withValues(alpha: 0.75),
         ),
       ),
     );

@@ -13,6 +13,17 @@ class AgakTipChoice {
   const AgakTipChoice({required this.label, required this.onSelected});
 }
 
+/// Where a tip is allowed to be shown. [global] tips (mountain trivia,
+/// ambient weather, milestones, reminders) are relevant anywhere and are
+/// what [AgakFloatingCompanion] on the dashboard shows. [hikingOnly] tips
+/// (pace encouragement, checkpoint cheers, turn-by-turn nudges, mid-hike
+/// weather) only make sense while a specific hike is actually in progress —
+/// they're for Kyrielle's Hiking Mode presence alone. Without this
+/// distinction, the dashboard mascot would permanently adopt whatever
+/// hiking chatter was last pushed (since it has no expiry), long after the
+/// hike that produced it ended.
+enum AgakTipScope { global, hikingOnly }
+
 /// One thing AGAK wants to briefly say — an emotion to show alongside a
 /// short message. Distinct from `AgakCompanionMoment`: a moment is "what is
 /// AGAK's whole state right now" (used by the full AGAK screen), a tip is
@@ -26,8 +37,14 @@ class AgakTip {
   final AgakEmotionState emotion;
   final String message;
   final List<AgakTipChoice>? choices;
+  final AgakTipScope scope;
 
-  const AgakTip({required this.emotion, required this.message, this.choices});
+  const AgakTip({
+    required this.emotion,
+    required this.message,
+    this.choices,
+    this.scope = AgakTipScope.global,
+  });
 }
 
 /// Event-driven queue for the home-screen tip pop-up. Real triggers (a
