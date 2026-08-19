@@ -209,6 +209,260 @@ exports.verifyEmailCode = onCall(
   },
 );
 
+const SOS_COOLDOWN_SECONDS = 30;
+
+function isFiniteNumberInRange(value, min, max) {
+  const num = Number(value);
+  return Number.isFinite(num) && num >= min && num <= max;
+}
+
+exports.sendSosEvent = onCall(
+  { timeoutSeconds: 30, memory: "256MiB" },
+  async (request) => {
+    const auth = request.auth;
+    if (!auth?.uid) {
+      throw new HttpsError("unauthenticated", "You must be signed in.");
+    }
+
+    const uid = auth.uid;
+    const roomId = String(request.data?.roomId ?? "").trim();
+    const latitude = Number(request.data?.latitude);
+    const longitude = Number(request.data?.longitude);
+    const transport = String(request.data?.transport ?? "internet");
+
+    if (!roomId) {
+      throw new HttpsError("invalid-argument", "roomId is required.");
+    }
+    if (!isFiniteNumberInRange(latitude, -90, 90)) {
+      throw new HttpsError("invalid-argument", "Invalid latitude.");
+    }
+    if (!isFiniteNumberInRange(longitude, -180, 180)) {
+      throw new HttpsError("invalid-argument", "Invalid longitude.");
+    }
+
+    const roomRef = db.collection("hike_rooms").doc(roomId);
+    const cooldownRef = roomRef.collection("sos_cooldowns").doc(uid);
+    const now = admin.firestore.Timestamp.now();
+
+    const cooldownSnap = await cooldownRef.get();
+    if (cooldownSnap.exists) {
+      const nextAllowedAt = cooldownSnap.data()?.nextAllowedAt;
+      if (nextAllowedAt && nextAllowedAt.toMillis() > now.toMillis()) {
+        const waitSeconds = Math.ceil(
+          (nextAllowedAt.toMillis() - now.toMillis()) / 1000,
+        );
+        throw new HttpsError(
+          "failed-precondition",
+          `Please wait ${waitSeconds}s before sending another SOS.`,
+        );
+      }
+    }
+
+    // Re-verify room/membership server-side — the client already checks
+    // this for a fast, friendly error, but only this check is trustworthy;
+    // a modified client could otherwise skip straight to writing an event.
+    const roomSnap = await roomRef.get();
+    if (!roomSnap.exists || roomSnap.data()?.status !== "active") {
+      throw new HttpsError(
+        "failed-precondition",
+        "The guide has not started this hike room.",
+      );
+    }
+    const room = roomSnap.data();
+
+    const participantRef = roomRef.collection("participants").doc(uid);
+    const participantSnap = await participantRef.get();
+    if (
+      !participantSnap.exists ||
+      (participantSnap.data()?.membershipStatus ?? "active") !== "active"
+    ) {
+      throw new HttpsError("failed-precondition", "You are not in this room.");
+    }
+
+    // Same fallback order as _displayName() in hike_room_service.dart:
+    // profile fullName, then Auth displayName, then the email's local
+    // part, then a generic label.
+    const userSnap = await db.collection("users").doc(uid).get();
+    const fullName = String(userSnap.data()?.fullName ?? "").trim();
+    const authName = String(auth.token?.name ?? "").trim();
+    const emailLocalPart = String(auth.token?.email ?? "").split("@")[0];
+    const senderName = fullName || authName || emailLocalPart || "Hiker";
+
+    const eventRef = roomRef.collection("sos_events").doc();
+    const batch = db.batch();
+    batch.set(eventRef, {
+      roomId,
+      roomCode: room?.roomCode ?? "",
+      senderId: uid,
+      senderName,
+      latitude,
+      longitude,
+      transport,
+      status: "sent",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    batch.set(cooldownRef, {
+      nextAllowedAt: admin.firestore.Timestamp.fromMillis(
+        now.toMillis() + SOS_COOLDOWN_SECONDS * 1000,
+      ),
+    });
+    await batch.commit();
+
+    return { sent: true, eventId: eventRef.id };
+  },
+);
+
+function weatherCodeFromGoogleCondition(conditionType) {
+  const type = String(conditionType || "").toUpperCase();
+  if (type.includes("THUNDER")) return 95;
+  if (type.includes("HEAVY") && type.includes("RAIN")) return 65;
+  if (type.includes("SHOWERS")) return type.includes("HEAVY") ? 82 : 80;
+  if (type.includes("RAIN")) return 63;
+  if (type.includes("DRIZZLE")) return 53;
+  if (type.includes("SNOW") || type.includes("ICE")) return 71;
+  if (type.includes("FOG") || type.includes("HAZE")) return 45;
+  if (type.includes("CLOUD")) return type.includes("PARTLY") ? 2 : 3;
+  if (type.includes("CLEAR") || type.includes("SUNNY")) return 0;
+  return 3;
+}
+
+function isWetWeatherCode(weatherCode) {
+  return (
+    (weatherCode >= 51 && weatherCode <= 67) ||
+    (weatherCode >= 71 && weatherCode <= 86) ||
+    weatherCode >= 95
+  );
+}
+
+// Same thresholds as weather_service.dart's _hikeWeatherRisk — this is now
+// the single source of truth; the Dart copy is deleted once the client
+// calls this function instead of classifying the raw API response itself.
+function hikeWeatherRisk({
+  weatherCode,
+  rainChancePercent,
+  precipitationMm,
+  windSpeedKmh,
+}) {
+  const rainChance = rainChancePercent ?? 0;
+  const precipitation = precipitationMm ?? 0;
+  const windSpeed = windSpeedKmh ?? 0;
+  const stormy = weatherCode >= 95;
+  const heavyRain = weatherCode === 65 || weatherCode === 67 || weatherCode === 82;
+
+  if (
+    stormy ||
+    heavyRain ||
+    rainChance >= 80 ||
+    precipitation >= 20 ||
+    windSpeed >= 45
+  ) {
+    return "unsafe";
+  }
+  if (
+    isWetWeatherCode(weatherCode) ||
+    weatherCode === 3 ||
+    rainChance >= 50 ||
+    precipitation >= 5 ||
+    windSpeed >= 30
+  ) {
+    return "caution";
+  }
+  return "good";
+}
+
+exports.fetchWeatherSnapshot = onCall(
+  { timeoutSeconds: 30, memory: "256MiB", secrets: ["WEATHER_API_KEY"] },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError("unauthenticated", "You must be signed in.");
+    }
+
+    const latitude = Number(request.data?.latitude);
+    const longitude = Number(request.data?.longitude);
+    if (!isFiniteNumberInRange(latitude, -90, 90)) {
+      throw new HttpsError("invalid-argument", "Invalid latitude.");
+    }
+    if (!isFiniteNumberInRange(longitude, -180, 180)) {
+      throw new HttpsError("invalid-argument", "Invalid longitude.");
+    }
+
+    const apiKey = process.env.WEATHER_API_KEY;
+    if (!apiKey) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Weather provider is not configured. Set the WEATHER_API_KEY secret.",
+      );
+    }
+
+    const url = new URL("https://weather.googleapis.com/v1/currentConditions:lookup");
+    url.searchParams.set("key", apiKey);
+    url.searchParams.set("location.latitude", latitude.toFixed(6));
+    url.searchParams.set("location.longitude", longitude.toFixed(6));
+
+    let decoded;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!response.ok) {
+        return null;
+      }
+      decoded = await response.json();
+    } catch (_error) {
+      return null;
+    }
+    if (!decoded || typeof decoded !== "object") {
+      return null;
+    }
+
+    const conditionMap = decoded.weatherCondition;
+    const conditionType =
+      conditionMap && typeof conditionMap === "object" ? conditionMap.type : "";
+    const weatherCode = weatherCodeFromGoogleCondition(conditionType);
+
+    const precipitationMap = decoded.precipitation;
+    const probabilityMap =
+      precipitationMap && typeof precipitationMap === "object"
+        ? precipitationMap.probability
+        : null;
+    const qpfMap =
+      precipitationMap && typeof precipitationMap === "object"
+        ? precipitationMap.qpf
+        : null;
+    const windMap = decoded.wind;
+
+    const risk = hikeWeatherRisk({
+      weatherCode,
+      rainChancePercent:
+        probabilityMap && typeof probabilityMap === "object"
+          ? Number(probabilityMap.percent)
+          : undefined,
+      precipitationMm:
+        qpfMap && typeof qpfMap === "object" ? Number(qpfMap.quantity) : undefined,
+      windSpeedKmh:
+        windMap && typeof windMap === "object" ? Number(windMap.speed) : undefined,
+    });
+
+    const descriptionMap =
+      conditionMap && typeof conditionMap === "object" ? conditionMap.description : null;
+    const descriptionText =
+      descriptionMap && typeof descriptionMap === "object"
+        ? String(descriptionMap.text || "").trim()
+        : "";
+    const fallbackHeadline = {
+      unsafe: "Rough weather is rolling in near you",
+      caution: "Weather looks a bit unsettled near you",
+      good: "Clear skies near you",
+    }[risk];
+
+    return {
+      isSevere: risk === "unsafe",
+      isCaution: risk === "caution",
+      isSunny: risk === "good" && weatherCode <= 2,
+      headline: descriptionText || fallbackHeadline,
+    };
+  },
+);
+
 exports.onTrailSubmissionCreated = onDocumentCreated(
   {
     document: "trail_submissions/{submissionId}",

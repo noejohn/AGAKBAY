@@ -357,58 +357,26 @@ class AgakBehaviorDatabase {
   }
 
   // ---- Completed hikes ----
+  //
+  // This table is retired as a source of truth — completed-hike history
+  // now lives in Firestore (`users/{uid}/hikes`), which the dashboard's
+  // "My Hikes", the leaderboard, and AgakController's recommendation
+  // engine all read from directly, so they can never drift from each
+  // other again the way this on-device-only table eventually did.
+  // [clearCompletedHikes] exists purely to wipe out whatever stale rows a
+  // device already has lying around from before this change.
 
-  Future<void> logCompletedHike({
-    String? mountainId,
-    required String mountainName,
-    String? region,
-    String? difficulty,
-    required int elevationMasl,
-    required double distanceKm,
-    required bool reachedSummit,
-  }) async {
+  Future<void> clearCompletedHikes() async {
     try {
       final db = await database;
-      await db.insert(
-        'completed_hikes',
-        CompletedHikeEntry(
-          mountainId: mountainId,
-          mountainName: mountainName,
-          region: region,
-          difficulty: difficulty,
-          elevationMasl: elevationMasl,
-          distanceKm: distanceKm,
-          reachedSummit: reachedSummit,
-          completedAt: DateTime.now(),
-        ).toDbMap(userId: _currentUserId),
-      );
-    } catch (_) {
-      // Ignore — best-effort logging; the Firestore leaderboard write is
-      // the source of truth for completion, this is additive.
-    }
-  }
-
-  Future<List<CompletedHikeEntry>> getCompletedHikes({int? days}) async {
-    final db = await database;
-    if (days == null) {
-      final rows = await db.query(
+      await db.delete(
         'completed_hikes',
         where: 'user_id = ?',
         whereArgs: [_currentUserId],
-        orderBy: 'completed_at DESC',
       );
-      return rows.map(CompletedHikeEntry.fromDbMap).toList();
+    } catch (_) {
+      // Best-effort cleanup only — nothing reads this table anymore.
     }
-    final since = DateTime.now()
-        .subtract(Duration(days: days))
-        .millisecondsSinceEpoch;
-    final rows = await db.query(
-      'completed_hikes',
-      where: 'user_id = ? AND completed_at >= ?',
-      whereArgs: [_currentUserId, since],
-      orderBy: 'completed_at DESC',
-    );
-    return rows.map(CompletedHikeEntry.fromDbMap).toList();
   }
 
   // ---- Preference profile cache ----

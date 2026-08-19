@@ -21,6 +21,21 @@ service cloud.firestore {
         allow read, update, delete: if isOwner(userId);
         allow create: if isOwner(userId);
       }
+
+      // Durable per-hike record — one doc per hike attempt, completed or
+      // not. Owner-only: nobody else needs to read another hiker's log.
+      match /hikes/{hikeId} {
+        allow read, create: if isOwner(userId);
+      }
+
+      // Small denormalized slice of the profile (just the display name)
+      // that any signed-in user can read — lets the community feed
+      // resolve a post/comment author's *current* name without exposing
+      // the full profile doc (email, emergency contact, etc.) to everyone.
+      match /public/{docId} {
+        allow read: if signedIn();
+        allow write: if isOwner(userId);
+      }
     }
 
     match /leaderboard/{userId} {
@@ -37,11 +52,33 @@ service cloud.firestore {
     match /community_posts/{postId} {
       allow read: if signedIn();
       allow create: if signedIn()
-        && request.resource.data.authorId == request.auth.uid;
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.authorName is string
+        && request.resource.data.authorName.size() < 100
+        && request.resource.data.content is string
+        && request.resource.data.content.size() < 2000
+        && request.resource.data.mountainName is string
+        && request.resource.data.mountainName.size() < 200;
+      // Three distinct legitimate writers, each restricted to only the
+      // fields their action actually touches: the author editing their own
+      // post; anyone toggling their own like (+1/-1 on likeCount only, via
+      // the transaction in _toggleCommunityPostLike); anyone adding/
+      // deleting their own comment (+1/-1 on commentCount only, via the
+      // transactions in _addCommunityComment/_deleteCommunityComment).
       allow update: if signedIn() && (
         resource.data.authorId == request.auth.uid ||
-        request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['likeCount', 'commentCount', 'updatedAt'])
+        (
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['likeCount', 'updatedAt']) &&
+          (request.resource.data.likeCount == resource.data.likeCount + 1 ||
+            request.resource.data.likeCount == resource.data.likeCount - 1)
+        ) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['commentCount', 'updatedAt']) &&
+          (request.resource.data.commentCount == resource.data.commentCount + 1 ||
+            request.resource.data.commentCount == resource.data.commentCount - 1)
+        )
       );
       allow delete: if signedIn()
         && resource.data.authorId == request.auth.uid;
@@ -49,7 +86,9 @@ service cloud.firestore {
       match /comments/{commentId} {
         allow read: if signedIn();
         allow create: if signedIn()
-          && request.resource.data.authorId == request.auth.uid;
+          && request.resource.data.authorId == request.auth.uid
+          && request.resource.data.content is string
+          && request.resource.data.content.size() < 1000;
         allow update, delete: if signedIn()
           && resource.data.authorId == request.auth.uid;
       }
@@ -61,14 +100,57 @@ service cloud.firestore {
     }
 
     match /hike_rooms/{roomId} {
-      allow read, create, update: if signedIn();
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.guideId == request.auth.uid;
+      // The guide can change anything (status, route, etc.); a joining or
+      // leaving participant only ever touches `updatedAt` on the room doc
+      // itself (see joinRoom/leaveRoom in hike_room_service.dart) — this
+      // lets that through without opening the whole room to every hiker.
+      allow update: if signedIn() && (
+        resource.data.guideId == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt'])
+      );
 
       match /participants/{participantId} {
-        allow read, create, update: if signedIn();
+        allow read: if signedIn();
+        // Every participant doc is created by its own owner (createRoom
+        // for the guide, joinRoom for a hiker) — doc id and userId field
+        // both equal the creator's own uid.
+        allow create: if signedIn()
+          && participantId == request.auth.uid
+          && request.resource.data.userId == request.auth.uid;
+        // Either the participant themself (activity status, leaving the
+        // room) or the room's guide acting on someone else (kickParticipant).
+        allow update: if signedIn() && (
+          participantId == request.auth.uid ||
+          get(/databases/$(database)/documents/hike_rooms/$(roomId)).data.guideId
+            == request.auth.uid
+        );
       }
 
       match /sos_events/{eventId} {
-        allow read, create, update: if signedIn();
+        allow read: if signedIn();
+        // Creation goes through the sendSosEvent Cloud Function only (see
+        // functions/index.js), which re-verifies room/participant status
+        // server-side and enforces a per-user cooldown before writing via
+        // the Admin SDK (which bypasses these rules) — a direct client
+        // write here could skip both of those checks, so it's disallowed.
+        allow create: if false;
+        // Only the room's guide can acknowledge an SOS (acknowledgeSos in
+        // hike_room_service.dart), and only those four fields — never the
+        // location/sender data the event was created with.
+        allow update: if signedIn()
+          && get(/databases/$(database)/documents/hike_rooms/$(roomId)).data.guideId
+            == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['status', 'acknowledgedBy', 'acknowledgedAt', 'updatedAt']);
+      }
+
+      // Written only by sendSosEvent via the Admin SDK — never read or
+      // written directly by any client.
+      match /sos_cooldowns/{uid} {
+        allow read, write: if false;
       }
     }
 

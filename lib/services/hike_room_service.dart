@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 enum HikeRoomStatus { waiting, active, ended }
@@ -157,13 +158,24 @@ class RoomSosEvent {
 }
 
 class HikeRoomService {
-  HikeRoomService({FirebaseAuth? auth, FirebaseFirestore? firestore})
-    : _auth = auth ?? FirebaseAuth.instance,
-      _firestore = firestore ?? FirebaseFirestore.instance;
+  HikeRoomService({
+    FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+    FirebaseFunctions? functions,
+  }) : _auth = auth ?? FirebaseAuth.instance,
+       _firestore = firestore ?? FirebaseFirestore.instance,
+       _functions = functions ?? FirebaseFunctions.instance;
 
   final FirebaseAuth _auth;
   final FirebaseFirestore _firestore;
+  final FirebaseFunctions _functions;
   final Random _random = Random.secure();
+
+  // Instant local guard so the UI never suggests spam-tapping SOS is fine —
+  // the real enforcement is server-side in the sendSosEvent Cloud Function,
+  // this is just fast feedback before that round trip even starts.
+  static const _sosCooldown = Duration(seconds: 30);
+  DateTime? _lastSosAt;
 
   User get _user {
     final user = _auth.currentUser;
@@ -489,37 +501,36 @@ class HikeRoomService {
     });
   }
 
+  /// Writes the SOS event via the sendSosEvent Cloud Function rather than
+  /// straight to Firestore — that function re-checks room/participant
+  /// status server-side (a client can't be trusted to self-report those)
+  /// and enforces a per-user cooldown, so a compromised or modified client
+  /// can't bypass either check the way a direct `.add()` could.
   Future<void> sendSos({
     required String roomId,
     required double latitude,
     required double longitude,
     String transport = 'internet',
   }) async {
-    final profile = await getCurrentUserProfile();
-    final room = HikeRoom.fromSnapshot(await _roomRef(roomId).get());
-    if (room.status != HikeRoomStatus.active) {
-      throw StateError('The guide has not started this hike room.');
+    final now = DateTime.now();
+    final lastSent = _lastSosAt;
+    if (lastSent != null && now.difference(lastSent) < _sosCooldown) {
+      final waitSeconds =
+          (_sosCooldown - now.difference(lastSent)).inSeconds + 1;
+      throw StateError('Please wait ${waitSeconds}s before sending another SOS.');
     }
-    final participant = await _roomRef(
-      roomId,
-    ).collection('participants').doc(_user.uid).get();
-    if (!participant.exists ||
-        (participant.data()?['membershipStatus']?.toString() ?? 'active') !=
-            'active') {
-      throw StateError('You are not in this room.');
+
+    try {
+      await _functions.httpsCallable('sendSosEvent').call<void>({
+        'roomId': roomId,
+        'latitude': latitude,
+        'longitude': longitude,
+        'transport': transport,
+      });
+      _lastSosAt = now;
+    } on FirebaseFunctionsException catch (error) {
+      throw StateError(error.message ?? 'Unable to send SOS. Try again.');
     }
-    await _roomRef(roomId).collection('sos_events').add({
-      'roomId': roomId,
-      'roomCode': room.code,
-      'senderId': _user.uid,
-      'senderName': _displayName(profile),
-      'latitude': latitude,
-      'longitude': longitude,
-      'transport': transport,
-      'status': 'sent',
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
   }
 
   Future<void> acknowledgeSos(String roomId, String eventId) async {

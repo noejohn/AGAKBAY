@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/agak_behavior.dart';
@@ -52,11 +54,69 @@ class AgakController extends ChangeNotifier {
     }
   }
 
+  /// The real, durable hike history — `users/{uid}/hikes` in Firestore,
+  /// the same collection the dashboard's "My Hikes" and the leaderboard
+  /// read from. Deliberately NOT the local `AgakBehaviorDatabase` SQLite
+  /// table anymore: that table lived only on-device, could drift from
+  /// reality, and had no way to be corrected once wrong (which is exactly
+  /// how the recommendation engine ended up claiming hikes that were
+  /// never really completed). Only counts a record as genuinely completed
+  /// when it reached the summit AND covered real distance — a summit
+  /// credited on the very first GPS fix, before any walking, doesn't count.
+  Future<List<CompletedHikeEntry>> _fetchCompletedHikesFromFirestore() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      return const [];
+    }
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('hikes')
+          .orderBy('completedAt', descending: true)
+          .limit(300)
+          .get();
+      final entries = <CompletedHikeEntry>[];
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final distanceKm = (data['distanceKm'] as num?)?.toDouble() ?? 0;
+        if (data['reachedSummit'] != true || distanceKm < 0.1) {
+          continue;
+        }
+        final completedAtField = data['completedAt'];
+        final completedAt = completedAtField is Timestamp
+            ? completedAtField.toDate()
+            : DateTime.tryParse(data['endedAt']?.toString() ?? '') ??
+                  DateTime.now();
+        entries.add(
+          CompletedHikeEntry(
+            mountainId: data['placeId']?.toString(),
+            mountainName:
+                data['mountainName']?.toString() ?? 'Unknown Mountain',
+            region: data['provinceOrCity']?.toString(),
+            difficulty: data['difficulty']?.toString(),
+            elevationMasl: (data['maxElevationMasl'] as num?)?.toInt() ?? 0,
+            distanceKm: distanceKm,
+            reachedSummit: true,
+            completedAt: completedAt,
+          ),
+        );
+      }
+      return entries;
+    } catch (error) {
+      debugPrint('AgakController: failed to fetch completed hikes: $error');
+      return const [];
+    }
+  }
+
   /// Recomputes the profile + recommendations from local behavior data and
   /// updates [current]. Debounced to avoid a full recompute on every single
   /// instrumentation call — pass [force] to bypass (e.g. right after a
   /// completed hike, a strong signal worth reacting to immediately).
-  Future<void> refresh({bool force = false, AgakMilestoneEvent? milestone}) async {
+  Future<void> refresh({
+    bool force = false,
+    AgakMilestoneEvent? milestone,
+  }) async {
     final last = _lastRefreshAt;
     if (!force &&
         milestone == null &&
@@ -76,9 +136,9 @@ class AgakController extends ChangeNotifier {
       final List<ViewHistoryEntry> views = await db.getRecentViews();
       final List<BookmarkEntry> bookmarks = await db.getBookmarks();
       final List<CompletedHikeEntry> completedHikes =
-          await db.getCompletedHikes();
-      final List<ScheduledHikeEntry> upcomingScheduledHikes =
-          await db.getUpcomingScheduledHikes();
+          await _fetchCompletedHikesFromFirestore();
+      final List<ScheduledHikeEntry> upcomingScheduledHikes = await db
+          .getUpcomingScheduledHikes();
 
       final profile = computeProfile(
         searches: searches,
@@ -163,7 +223,8 @@ class AgakController extends ChangeNotifier {
     }
 
     if (upcomingHike != null) {
-      final reminderKey = '${upcomingHike.mountainName}|${upcomingHike.daysUntil}';
+      final reminderKey =
+          '${upcomingHike.mountainName}|${upcomingHike.daysUntil}';
       if (reminderKey != _lastPushedReminderKey) {
         _lastPushedReminderKey = reminderKey;
         AgakTipBus.instance.push(
@@ -249,17 +310,17 @@ class AgakController extends ChangeNotifier {
       final top = moment.topRecommendation;
       final prompt = top == null
           ? 'Rephrase this warmly in 2 short sentences, like a companion '
-              'greeting a friend: keep both the encouraging tone AND every '
-              'concrete suggestion it mentions (searching, viewing, '
-              'bookmarking, or scheduling a hike) — do not drop the call '
-              'to action, and do not invent mountain names or facts: '
-              '"${moment.message}"'
+                'greeting a friend: keep both the encouraging tone AND every '
+                'concrete suggestion it mentions (searching, viewing, '
+                'bookmarking, or scheduling a hike) — do not drop the call '
+                'to action, and do not invent mountain names or facts: '
+                '"${moment.message}"'
           : 'Rephrase this hiking recommendation warmly in 1-2 sentences. '
-              'Do not invent new mountains or facts beyond what is given. '
-              'Mountain: ${top.mountain.name} (${top.mountain.region}, '
-              '${top.mountain.elevationMasl}m, ${top.mountain.difficulty}). '
-              'Reason: ${top.reason.name}. '
-              'Original message: "${moment.message}"';
+                'Do not invent new mountains or facts beyond what is given. '
+                'Mountain: ${top.mountain.name} (${top.mountain.region}, '
+                '${top.mountain.elevationMasl}m, ${top.mountain.difficulty}). '
+                'Reason: ${top.reason.name}. '
+                'Original message: "${moment.message}"';
 
       final phrased = await fetchGeminiResponse(
         apiKey: apiKey,

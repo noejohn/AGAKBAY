@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart' as ll;
+import 'package:tunga/services/heltec_ble_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
 
@@ -392,7 +393,13 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
             _SharedRouteMap(room: room),
           ],
           const SizedBox(height: 10),
-          const _HeltecStatusCard(),
+          _HeltecStatusCard(
+            guideName: room.guideName,
+            mountainName: room.mountainName,
+            isGuide: _isGuide,
+            service: _service,
+            roomId: room.id,
+          ),
           const SizedBox(height: 18),
           Text(
             'Participants',
@@ -600,19 +607,91 @@ class _SharedRouteMap extends StatelessWidget {
 }
 
 class _HeltecStatusCard extends StatelessWidget {
-  const _HeltecStatusCard();
+  const _HeltecStatusCard({
+    this.guideName,
+    this.mountainName,
+    this.isGuide = false,
+    this.service,
+    this.roomId,
+  });
+
+  /// When set, sent to the device's OLED right after a successful connect
+  /// so it can show hike context even with no one looking at the phone.
+  final String? guideName;
+  final String? mountainName;
+
+  /// True when the current user is this room's tour guide — picks whether
+  /// the device gets [HeltecBleService.sendGuideInfo] (mountain + hiker
+  /// count) or [HeltecBleService.sendHikerInfo] (guide name + mountain).
+  final bool isGuide;
+
+  /// Only needed when [isGuide] is true, to look up the live participant
+  /// count at the moment of connecting.
+  final HikeRoomService? service;
+  final String? roomId;
+
+  Future<void> _connect() async {
+    final ble = HeltecBleService.instance;
+    await ble.connect();
+    if (!ble.isConnected) return;
+
+    final mountain = mountainName;
+    if (mountain == null) return;
+
+    if (isGuide) {
+      final svc = service;
+      final id = roomId;
+      if (svc == null || id == null) return;
+      final participants = await svc.watchParticipants(id).first;
+      await ble.sendGuideInfo(
+        mountainName: mountain,
+        participantCount: participants.length,
+      );
+    } else {
+      final guide = guideName;
+      if (guide == null) return;
+      await ble.sendHikerInfo(guideName: guide, mountainName: mountain);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      color: Colors.orange.withValues(alpha: 0.12),
-      child: const ListTile(
-        leading: Icon(Icons.bluetooth_disabled_rounded, color: Colors.orange),
-        title: Text('Heltec device: Not connected'),
-        subtitle: Text(
-          'Room and internet SOS are working. The Heltec BLE/LoRa protocol must be integrated before offline radio SOS can be enabled.',
-        ),
-      ),
+    final ble = HeltecBleService.instance;
+    return ListenableBuilder(
+      listenable: ble,
+      builder: (context, _) {
+        final connected = ble.isConnected;
+        final subtitle = connected
+            ? (ble.lastFixAt != null
+                  ? 'Last location: ${ble.lastLatitude!.toStringAsFixed(6)}, '
+                        '${ble.lastLongitude!.toStringAsFixed(6)}'
+                  : 'Connected. Waiting for a GPS fix from the device.')
+            : (ble.lastError ??
+                  'Room and internet SOS are working. Connect a Heltec device to enable offline radio SOS.');
+        return Card(
+          color: connected
+              ? Colors.green.withValues(alpha: 0.12)
+              : Colors.orange.withValues(alpha: 0.12),
+          child: ListTile(
+            leading: Icon(
+              connected
+                  ? Icons.bluetooth_connected_rounded
+                  : Icons.bluetooth_disabled_rounded,
+              color: connected ? Colors.greenAccent : Colors.orange,
+            ),
+            title: Text(
+              connected ? 'Heltec device: Connected' : 'Heltec device: Not connected',
+            ),
+            subtitle: Text(subtitle),
+            trailing: connected
+                ? null
+                : TextButton(
+                    onPressed: ble.isScanning ? null : _connect,
+                    child: Text(ble.isScanning ? 'Scanning...' : 'Connect'),
+                  ),
+          ),
+        );
+      },
     );
   }
 }

@@ -5,6 +5,7 @@ import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -19,21 +20,27 @@ import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
 import 'package:tunga/screens/agak_companion_screen.dart';
+import 'package:tunga/screens/kyrielle_companion_chat_screen.dart';
 import 'package:tunga/screens/agak_emotion_showcase_screen.dart';
 import 'package:tunga/screens/agak_scheduled_hikes_screen.dart';
 import 'package:tunga/screens/hike_room_screen.dart';
+import 'package:tunga/screens/onboarding/onboarding_flow_screen.dart';
 import 'package:tunga/services/activity_sync_service.dart';
 import 'package:tunga/services/auth_database_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
+import 'package:tunga/services/onboarding_service.dart';
 import 'package:tunga/models/agak_mountain.dart';
 import 'package:tunga/models/agak_recommendation.dart';
 import 'package:tunga/services/agak_behavior_database.dart';
 import 'package:tunga/services/agak_controller.dart';
+import 'package:tunga/services/agak_packing_list.dart';
+import 'package:tunga/services/weather_service.dart' show WeatherService;
 import 'package:tunga/services/agak_tip_bus.dart';
 import 'package:tunga/services/agak_emotion_selector.dart';
 import 'package:tunga/services/gemini_client.dart';
 import 'package:tunga/services/offline_activity_database.dart';
 import 'package:tunga/widgets/agak_floating_companion.dart';
+import 'package:tunga/widgets/agak_theme.dart';
 import 'package:tunga/widgets/agak_tip_popup.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
 
@@ -49,9 +56,10 @@ class TunGaApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final baseTheme = ThemeData(
       colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xFF0F5A3D),
-        brightness: Brightness.dark,
+        seedColor: const Color(0xFF97070A),
+        brightness: Brightness.light,
       ),
+      scaffoldBackgroundColor: const Color(0xFFFDF8DC),
       useMaterial3: true,
     );
     return MaterialApp(
@@ -87,6 +95,22 @@ class _SplashScreenState extends State<SplashScreen> {
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
+      // Registering the Android app for Play Integrity (Firebase Console
+      // → App Check) is a manual step outside this code — until that's
+      // done, activation here is harmless (tokens just won't attest
+      // successfully yet). No Cloud Function enforces App Check yet either
+      // (see functions/index.js); that's a deliberate later step, since
+      // turning on enforcement before real traffic reliably produces valid
+      // tokens would lock out genuine users.
+      try {
+        await FirebaseAppCheck.instance.activate(
+          androidProvider: AndroidProvider.playIntegrity,
+          appleProvider: AppleProvider.deviceCheck,
+        );
+      } catch (_) {
+        // Non-fatal — App Check is defense-in-depth, not required for the
+        // app to function.
+      }
       ActivitySyncService.shared.startAutoSync();
     } catch (_) {
       firebaseReady = false;
@@ -104,13 +128,7 @@ class _SplashScreenState extends State<SplashScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF071B13), Color(0xFF03291B), Color(0xFF00140E)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: const Center(child: BounceLoadingScreen()),
       ),
     );
@@ -141,24 +159,35 @@ class AuthGate extends StatelessWidget {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Scaffold(
             body: Container(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Color(0xFF071B13),
-                    Color(0xFF03291B),
-                    Color(0xFF00140E),
-                  ],
-                ),
-              ),
+              decoration: BoxDecoration(gradient: AgakColors.screenBackground),
               child: const Center(child: BounceLoadingScreen()),
             ),
           );
         }
 
         if (snapshot.hasData && snapshot.data != null) {
-          return const DashboardScreen();
+          return FutureBuilder<bool>(
+            future: OnboardingService().hasCompletedOnboarding(
+              snapshot.data!.uid,
+            ),
+            builder: (context, onboardingSnapshot) {
+              if (onboardingSnapshot.connectionState ==
+                  ConnectionState.waiting) {
+                return Scaffold(
+                  body: Container(
+                    decoration: BoxDecoration(
+                      gradient: AgakColors.screenBackground,
+                    ),
+                    child: const Center(child: BounceLoadingScreen()),
+                  ),
+                );
+              }
+              if (onboardingSnapshot.data == false) {
+                return const OnboardingFlowScreen();
+              }
+              return const DashboardScreen();
+            },
+          );
         }
 
         return WelcomeScreen(firebaseReady: firebaseReady);
@@ -225,7 +254,7 @@ class _BounceLoadingScreenState extends State<BounceLoadingScreen>
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             border: Border.all(
-              color: Colors.white.withValues(alpha: 0.2),
+              color: AgakColors.ink.withValues(alpha: 0.2),
               width: 2,
             ),
           ),
@@ -252,7 +281,7 @@ class _BounceLoadingScreenState extends State<BounceLoadingScreen>
                     style: const TextStyle(
                       fontSize: 48,
                       fontWeight: FontWeight.w800,
-                      color: Colors.white,
+                      color: AgakColors.ink,
                       letterSpacing: 2,
                     ),
                   ),
@@ -266,7 +295,7 @@ class _BounceLoadingScreenState extends State<BounceLoadingScreen>
           'Initializing...',
           style: TextStyle(
             fontSize: 14,
-            color: Colors.white.withValues(alpha: 0.7),
+            color: AgakColors.ink.withValues(alpha: 0.7),
             letterSpacing: 1.2,
           ),
         ),
@@ -284,13 +313,7 @@ class WelcomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF071B13), Color(0xFF03291B), Color(0xFF00140E)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: SafeArea(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 28.0),
@@ -304,7 +327,7 @@ class WelcomeScreen extends StatelessWidget {
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.2),
+                      color: AgakColors.ink.withValues(alpha: 0.2),
                       width: 2,
                     ),
                     boxShadow: [
@@ -328,7 +351,7 @@ class WelcomeScreen extends StatelessWidget {
                   style: Theme.of(context).textTheme.headlineLarge?.copyWith(
                     fontWeight: FontWeight.w800,
                     letterSpacing: 1.4,
-                    color: Colors.white,
+                    color: AgakColors.ink,
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -336,7 +359,7 @@ class WelcomeScreen extends StatelessWidget {
                   'EXPLORE PEAKS. TRACK ADVENTURES.',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Colors.white70,
+                    color: AgakColors.ink.withValues(alpha: 0.7),
                     letterSpacing: 1.7,
                     height: 1.4,
                   ),
@@ -345,13 +368,13 @@ class WelcomeScreen extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.08),
+                    color: Colors.white.withValues(alpha: 0.55),
                     borderRadius: BorderRadius.circular(24),
                     border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.14),
+                      color: AgakColors.ink.withValues(alpha: 0.14),
                     ),
                   ),
-                  child: Column(
+                  child: const Column(
                     children: [
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -366,7 +389,7 @@ class WelcomeScreen extends StatelessWidget {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
+                      SizedBox(height: 12),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
@@ -396,8 +419,8 @@ class WelcomeScreen extends StatelessWidget {
                       );
                     },
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF57B772),
-                      foregroundColor: Colors.black,
+                      backgroundColor: AgakColors.maroon,
+                      foregroundColor: AgakColors.cream,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
@@ -481,12 +504,25 @@ class _LoginScreenState extends State<LoginScreen> {
 
     setState(() => _isSubmitting = true);
     try {
-      await _authDatabaseService.signInUser(email: email, password: password);
+      final credential = await _authDatabaseService.signInUser(
+        email: email,
+        password: password,
+      );
+      if (!mounted) {
+        return;
+      }
+      final onboarded = await OnboardingService().hasCompletedOnboarding(
+        credential.user!.uid,
+      );
       if (!mounted) {
         return;
       }
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(builder: (context) => const DashboardScreen()),
+        MaterialPageRoute<void>(
+          builder: (context) => onboarded
+              ? const DashboardScreen()
+              : const OnboardingFlowScreen(),
+        ),
       );
     } on FirebaseAuthException catch (error) {
       final message = switch (error.code) {
@@ -507,6 +543,44 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  Future<void> _handleGoogleSignIn() async {
+    if (!widget.firebaseReady) {
+      _showSnackBar('Firebase is not configured yet.');
+      return;
+    }
+    setState(() => _isSubmitting = true);
+    try {
+      final credential = await _authDatabaseService.signInWithGoogle();
+      if (!mounted) {
+        return;
+      }
+      final onboarded = await OnboardingService().hasCompletedOnboarding(
+        credential.user!.uid,
+      );
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute<void>(
+          builder: (context) => onboarded
+              ? const DashboardScreen()
+              : const OnboardingFlowScreen(),
+        ),
+      );
+    } on FirebaseAuthException catch (error) {
+      if (error.code == 'sign-in-canceled') {
+        return;
+      }
+      _showSnackBar(error.message ?? 'Google sign-in failed. Please try again.');
+    } catch (error) {
+      _showSnackBar('Google sign-in failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
   void _showSnackBar(String message) {
     ScaffoldMessenger.of(
       context,
@@ -517,13 +591,7 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF04140E), Color(0xFF072519), Color(0xFF03110C)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: Stack(
           children: [
             Positioned(
@@ -538,8 +606,8 @@ class _LoginScreenState extends State<LoginScreen> {
                     shape: BoxShape.circle,
                     gradient: RadialGradient(
                       colors: [
-                        const Color(0xFFB4CD3A).withValues(alpha: 0.55),
-                        const Color(0xFFB4CD3A).withValues(alpha: 0.0),
+                        AgakColors.gold.withValues(alpha: 0.55),
+                        AgakColors.gold.withValues(alpha: 0.0),
                       ],
                     ),
                   ),
@@ -584,15 +652,15 @@ class _LoginScreenState extends State<LoginScreen> {
                                     begin: Alignment.topLeft,
                                     end: Alignment.bottomRight,
                                     colors: [
-                                      Color(0xFF38D86E),
-                                      Color(0xFF2CB95F),
+                                      AgakColors.olive,
+                                      AgakColors.maroon,
                                     ],
                                   ),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: const Color(
-                                        0xFF38D86E,
-                                      ).withValues(alpha: 0.35),
+                                      color: AgakColors.maroon.withValues(
+                                        alpha: 0.35,
+                                      ),
                                       blurRadius: 24,
                                       offset: const Offset(0, 12),
                                     ),
@@ -611,7 +679,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 'Agakbay',
                                 style: Theme.of(context).textTheme.displaySmall
                                     ?.copyWith(
-                                      color: Colors.white,
+                                      color: AgakColors.ink,
                                       fontWeight: FontWeight.w800,
                                     ),
                               ),
@@ -621,7 +689,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 textAlign: TextAlign.center,
                                 style: Theme.of(context).textTheme.bodyMedium
                                     ?.copyWith(
-                                      color: Colors.white.withValues(
+                                      color: AgakColors.ink.withValues(
                                         alpha: 0.68,
                                       ),
                                       letterSpacing: 1.4,
@@ -634,7 +702,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                     .textTheme
                                     .headlineMedium
                                     ?.copyWith(
-                                      color: Colors.white,
+                                      color: AgakColors.ink,
                                       fontWeight: FontWeight.w700,
                                     ),
                               ),
@@ -643,7 +711,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 'Login to continue your adventure.',
                                 textAlign: TextAlign.center,
                                 style: Theme.of(context).textTheme.titleMedium
-                                    ?.copyWith(color: const Color(0xFF82CFA5)),
+                                    ?.copyWith(color: AgakColors.maroon),
                               ),
                               if (!widget.firebaseReady) ...[
                                 const SizedBox(height: 14),
@@ -651,20 +719,20 @@ class _LoginScreenState extends State<LoginScreen> {
                                   width: double.infinity,
                                   padding: const EdgeInsets.all(12),
                                   decoration: BoxDecoration(
-                                    color: const Color(
-                                      0xFF5D1D1D,
-                                    ).withValues(alpha: 0.35),
+                                    color: AgakColors.maroon.withValues(
+                                      alpha: 0.1,
+                                    ),
                                     borderRadius: BorderRadius.circular(12),
                                     border: Border.all(
-                                      color: const Color(
-                                        0xFFFF6A6A,
-                                      ).withValues(alpha: 0.6),
+                                      color: AgakColors.maroon.withValues(
+                                        alpha: 0.5,
+                                      ),
                                     ),
                                   ),
                                   child: const Text(
                                     'Firebase is not configured yet. Database sign up will fail until setup is completed.',
                                     style: TextStyle(
-                                      color: Colors.white,
+                                      color: AgakColors.maroon,
                                       fontSize: 13,
                                       height: 1.35,
                                     ),
@@ -697,7 +765,9 @@ class _LoginScreenState extends State<LoginScreen> {
                                     _obscurePassword
                                         ? Icons.visibility_outlined
                                         : Icons.visibility_off_outlined,
-                                    color: Colors.white.withValues(alpha: 0.66),
+                                    color: AgakColors.ink.withValues(
+                                      alpha: 0.66,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -708,7 +778,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   child: const Text(
                                     'Forgot Password?',
                                     style: TextStyle(
-                                      color: Color(0xFF57C97D),
+                                      color: AgakColors.olive,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
@@ -722,8 +792,8 @@ class _LoginScreenState extends State<LoginScreen> {
                                       ? null
                                       : _handleLogin,
                                   style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF45D972),
-                                    foregroundColor: Colors.black,
+                                    backgroundColor: AgakColors.maroon,
+                                    foregroundColor: AgakColors.cream,
                                     padding: const EdgeInsets.symmetric(
                                       vertical: 18,
                                     ),
@@ -738,7 +808,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                           height: 24,
                                           child: CircularProgressIndicator(
                                             strokeWidth: 2.4,
-                                            color: Colors.black,
+                                            color: AgakColors.cream,
                                           ),
                                         )
                                       : const Text(
@@ -751,6 +821,68 @@ class _LoginScreenState extends State<LoginScreen> {
                                         ),
                                 ),
                               ),
+                              const SizedBox(height: 16),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Divider(
+                                      color: AgakColors.ink.withValues(
+                                        alpha: 0.18,
+                                      ),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                    ),
+                                    child: Text(
+                                      'OR',
+                                      style: TextStyle(
+                                        color: AgakColors.ink.withValues(
+                                          alpha: 0.5,
+                                        ),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Divider(
+                                      color: AgakColors.ink.withValues(
+                                        alpha: 0.18,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 16),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  onPressed: _isSubmitting
+                                      ? null
+                                      : _handleGoogleSignIn,
+                                  icon: const Icon(
+                                    Icons.g_mobiledata_rounded,
+                                    size: 26,
+                                  ),
+                                  label: const Text('Sign in with Google'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: AgakColors.ink,
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 16,
+                                    ),
+                                    side: BorderSide(
+                                      color: AgakColors.ink.withValues(
+                                        alpha: 0.3,
+                                      ),
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(18),
+                                    ),
+                                  ),
+                                ),
+                              ),
                               const SizedBox(height: 22),
                               Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -758,7 +890,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   Text(
                                     "Don't have an account? ",
                                     style: TextStyle(
-                                      color: Colors.white.withValues(
+                                      color: AgakColors.ink.withValues(
                                         alpha: 0.6,
                                       ),
                                       fontSize: 18,
@@ -783,7 +915,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                     child: const Text(
                                       'Sign Up',
                                       style: TextStyle(
-                                        color: Color(0xFF4FD972),
+                                        color: AgakColors.olive,
                                         fontWeight: FontWeight.w700,
                                         fontSize: 18,
                                       ),
@@ -979,10 +1111,7 @@ class _MountainOrganizer {
 }
 
 class _AssistantMessage {
-  const _AssistantMessage({
-    required this.role,
-    required this.text,
-  });
+  const _AssistantMessage({required this.role, required this.text});
 
   final String role;
   final String text;
@@ -990,16 +1119,17 @@ class _AssistantMessage {
 
 class _HikeAssistantScreen extends StatefulWidget {
   const _HikeAssistantScreen({
-    Key? key,
+    // ignore: unused_element_parameter
+    super.key,
     this.initialTrail,
     required this.searchMountainInMindanao,
     required this.fetchMountainOrganizers,
-  }) : super(key: key);
+  });
 
   final _NearbyTrail? initialTrail;
   final Future<_NearbyTrail?> Function(String query) searchMountainInMindanao;
   final Future<List<_MountainOrganizer>> Function(_NearbyTrail trail)
-      fetchMountainOrganizers;
+  fetchMountainOrganizers;
 
   @override
   State<_HikeAssistantScreen> createState() => _HikeAssistantScreenState();
@@ -1062,100 +1192,23 @@ class _HikeAssistantScreenState extends State<_HikeAssistantScreen> {
     _scrollToBottom();
   }
 
-  Future<String> _buildAssistantResponse(String question) async {
-    final normalized = question.toLowerCase();
-    if (normalized.contains('what to bring') ||
-        normalized.contains('what i need to bring') ||
-        normalized.contains('what should i bring') ||
-        normalized.contains('what do i bring') ||
-        normalized.contains('what should i pack') ||
-        normalized.contains('need to bring') ||
-        normalized.contains('packing list') ||
-        normalized.contains('gear') ||
-        normalized.contains('pack') ||
-        normalized.contains('prepare') ||
-        normalized.contains('what do i need') ||
-        normalized.contains('what do i need for') ||
-        normalized.contains('what is needed') ||
-        normalized.contains('what should i wear') ||
-        normalized.contains('what is the gear')) {
-      return 'For a hike, bring plenty of water, snacks, weather-proof layers, a first-aid kit, a flashlight, and a charged phone. If you want, ask me next for organizers for a specific mountain or request a trail packing list for Mt. Apo.';
-    }
-
-    _NearbyTrail? trail = widget.initialTrail;
-    if (trail == null || !_matchesTrailInQuestion(trail, normalized)) {
-      trail = await widget.searchMountainInMindanao(question);
-    }
-
-    final organizers = trail == null
-        ? const <_MountainOrganizer>[]
-        : await widget.fetchMountainOrganizers(trail);
-
-    if (_aiApiKey.isNotEmpty) {
-      final contextBuffer = StringBuffer();
-      if (trail != null) {
-        contextBuffer.writeln(
-          'Matched trail: ${trail.name}, ${trail.provinceOrCity}.',
-        );
-        if (organizers.isNotEmpty) {
-          final organizerList = organizers.take(5).map((organizer) {
-            return '${organizer.name} — ${organizer.contact} (${organizer.source})${organizer.verified ? ' ✓ verified' : ''}';
-          }).join('\n');
-          contextBuffer.writeln(
-            'Known organizer contacts for this trail:\n$organizerList',
-          );
-        } else {
-          contextBuffer.writeln(
-            'No organizer contacts are on file for this trail in the app.',
-          );
-        }
-      } else {
-        contextBuffer.writeln(
-          'No specific trail was matched in the app database for this question.',
-        );
-      }
-      final prompt =
-          '''
-The user asked: "$question"
-$contextBuffer
-You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user's actual question directly and helpfully, using your general knowledge (e.g. elevation, difficulty, weather, best season) whenever the app data above doesn't cover it. Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
-''';
-      final aiAnswer = await _fetchAiAssistantResponse(prompt);
-      if (aiAnswer.isNotEmpty) {
-        return aiAnswer;
-      }
-    }
-
-    if (trail == null) {
-      return 'I could not find a mountain matching that query. Try asking with a more exact name, such as "Mt. Apo" or "Mount Matutum."';
-    }
-
-    if (organizers.isEmpty) {
-      return 'I found ${trail.name}, but I could not find any matching organizers right now. You can still search again with another mountain name, or use the Explore map to browse nearby trails.';
-    }
-
-    final buffer = StringBuffer();
-    buffer.writeln('I found ${organizers.length} organizer suggestions for ${trail.name}:');
-    final displayedOrganizers = organizers.take(3);
-    var index = 1;
-    for (final organizer in displayedOrganizers) {
-      buffer.writeln(
-        '${index++}. ${organizer.name} — ${organizer.contact} (${organizer.source})${organizer.verified ? ' ✓ verified' : ''}',
-      );
-    }
-    if (organizers.length > 3) {
-      buffer.writeln('And ${organizers.length - 3} more results are available.');
-    }
-    buffer.writeln('You can ask me to search another mountain or request more details.');
-    return buffer.toString();
-  }
-
-  bool _matchesTrailInQuestion(_NearbyTrail trail, String normalizedQuestion) {
-    final normalizedName = trail.name.toLowerCase();
-    return normalizedQuestion.contains(normalizedName) ||
-        normalizedQuestion.contains('this mountain') ||
-        normalizedQuestion.contains('this hike') ||
-        normalizedQuestion.contains('the hike');
+  Future<String> _buildAssistantResponse(String question) {
+    return _answerHikeAssistantQuestion(
+      question: question,
+      initialTrail: widget.initialTrail,
+      searchMountainInMindanao: widget.searchMountainInMindanao,
+      fetchMountainOrganizers: widget.fetchMountainOrganizers,
+      aiApiKey: _aiApiKey,
+      systemInstruction:
+          'You are a friendly, knowledgeable hiking assistant '
+          'for hikers in Mindanao, Philippines. Answer '
+          'whatever the user actually asks — trail '
+          'difficulty, elevation, weather, safety, gear, or '
+          'general hiking advice — using your own knowledge. '
+          'Only talk about organizers/guides when the user '
+          'asks about finding one or contact info is provided '
+          'to you.',
+    );
   }
 
   void _scrollToBottom() {
@@ -1176,22 +1229,6 @@ You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user'
       return;
     }
     _aiApiKey = await loadGeminiApiKey();
-  }
-
-  Future<String> _fetchAiAssistantResponse(String prompt) {
-    return fetchGeminiResponse(
-      apiKey: _aiApiKey,
-      systemInstruction:
-          'You are a friendly, knowledgeable hiking assistant '
-          'for hikers in Mindanao, Philippines. Answer '
-          'whatever the user actually asks — trail '
-          'difficulty, elevation, weather, safety, gear, or '
-          'general hiking advice — using your own knowledge. '
-          'Only talk about organizers/guides when the user '
-          'asks about finding one or contact info is provided '
-          'to you.',
-      prompt: prompt,
-    );
   }
 
   @override
@@ -1215,8 +1252,9 @@ You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user'
                   final isUser = message.role == 'user';
                   return Container(
                     margin: const EdgeInsets.only(bottom: 12),
-                    alignment:
-                        isUser ? Alignment.centerRight : Alignment.centerLeft,
+                    alignment: isUser
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft,
                     child: Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
@@ -1245,9 +1283,7 @@ You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user'
             if (_isSearching)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 10),
-                child: CircularProgressIndicator(
-                  color: Color(0xFF7CF9A2),
-                ),
+                child: CircularProgressIndicator(color: Color(0xFF7CF9A2)),
               ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -1322,6 +1358,389 @@ You are a hiking assistant for hikers in Mindanao, Philippines. Answer the user'
       ),
     );
   }
+}
+
+/// Whether [normalizedQuestion] is asking about weather/conditions — the
+/// trigger for pulling a live GPS + weather snapshot into the answer
+/// instead of letting the AI guess or say it has no real-time data, and
+/// for skipping the free-text mountain-name search below (a weather
+/// question like "what is the weather today" has no mountain name in it,
+/// and searching Places/Nominatim for the whole sentence risks fuzzy-
+/// matching an unrelated place, e.g. it previously matched PAGASA's
+/// office off the word "weather").
+bool _isWeatherQuestion(String normalizedQuestion) {
+  const weatherWords = [
+    'weather',
+    'rain',
+    'rainy',
+    'raining',
+    'forecast',
+    'storm',
+    'stormy',
+    'typhoon',
+    'sunny',
+    'cloudy',
+    'temperature',
+    'hot',
+    'cold',
+    'humid',
+    'climate',
+    'condition',
+  ];
+  return weatherWords.any(normalizedQuestion.contains);
+}
+
+/// Whether [normalizedQuestion] is asking about the hiker's current
+/// whereabouts — same rationale as [_isWeatherQuestion]: it both triggers
+/// the dedicated GPS-classification context and skips the free-text
+/// mountain-name search, which has nothing useful to match against a
+/// "where am I" question.
+bool _isLocationQuestion(String normalizedQuestion) {
+  const locationPhrases = [
+    'where am i',
+    "where's this",
+    'where is this',
+    'what trail am i on',
+    'which trail am i on',
+    'my current location',
+    'my location',
+    'what is my location',
+    "what's my location",
+  ];
+  return locationPhrases.any(normalizedQuestion.contains);
+}
+
+/// Shared "modern, on-palette" confirm/cancel dialog — cream card, rounded
+/// corners, a tinted icon roundel, and a two-button row. Top-level (not a
+/// State method) so any screen can show a real confirmation instead of a
+/// default gray `AlertDialog`, without duplicating this layout per call
+/// site. Returns true only when the hiker tapped the confirm action.
+Future<bool> _showAgakConfirmDialog(
+  BuildContext context, {
+  required IconData icon,
+  required String title,
+  required String message,
+  required String cancelLabel,
+  required String confirmLabel,
+  IconData? confirmIcon,
+  Color iconColor = AgakColors.maroon,
+  Color confirmColor = AgakColors.maroon,
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.55),
+    builder: (dialogContext) {
+      return Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 28),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+          decoration: BoxDecoration(
+            color: AgakColors.cream,
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.28),
+                blurRadius: 30,
+                offset: const Offset(0, 14),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: iconColor.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: iconColor, size: 32),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: AgakColors.ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: AgakColors.ink.withValues(alpha: 0.7),
+                  fontSize: 13.5,
+                  height: 1.45,
+                ),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(false),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AgakColors.ink.withValues(alpha: 0.68),
+                        side: BorderSide(
+                          color: AgakColors.ink.withValues(alpha: 0.22),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: Text(
+                        cancelLabel,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: confirmIcon == null
+                        ? ElevatedButton(
+                            onPressed: () =>
+                                Navigator.of(dialogContext).pop(true),
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: AgakColors.cream,
+                              backgroundColor: confirmColor,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            child: Text(
+                              confirmLabel,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          )
+                        : ElevatedButton.icon(
+                            onPressed: () =>
+                                Navigator.of(dialogContext).pop(true),
+                            icon: Icon(confirmIcon, size: 18),
+                            label: Text(
+                              confirmLabel,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: AgakColors.cream,
+                              backgroundColor: confirmColor,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+  return result == true;
+}
+
+/// Whether [normalizedQuestion] plausibly names a *specific* mountain or
+/// is asking to look one up by name — the gate for the free-text
+/// Places/Nominatim search below. This is deliberately narrow: generic
+/// hiking-topic words ("hike", "trail", "climb"...) do NOT count, because
+/// a sentence merely mentioning hiking isn't a place-name query and
+/// sending it as one risks a fuzzy match on an unrelated real point of
+/// interest (this once matched "what's your name" to an unnamed POI
+/// literally labeled "No Name Yet", and "I'm sad, do I need to hike?" —
+/// no mountain named at all — to a bogus "not found" mountain-search
+/// reply instead of actually engaging with what was asked). Anything
+/// that isn't a named-mountain lookup should go straight to the AI (or
+/// the companion small-talk/fallback paths), never through this search.
+bool _looksLikeMountainQuery(String normalizedQuestion) {
+  const mountainSignalWords = [
+    'mt ',
+    'mt.',
+    'mount ',
+    'organizer',
+    'organizers',
+    'guide for',
+    'guides for',
+    'contact for',
+  ];
+  return mountainSignalWords.any(normalizedQuestion.contains);
+}
+
+/// Shared hike-question answering logic — extracted from the original
+/// `_HikeAssistantScreenState` implementation so both the dark hike-assistant
+/// chat and Kyrielle's own in-screen conversation (`KyrielleCompanionChatScreen`)
+/// give identical answers instead of drifting apart from two copies.
+Future<String> _answerHikeAssistantQuestion({
+  required String question,
+  required _NearbyTrail? initialTrail,
+  required Future<_NearbyTrail?> Function(String query)
+  searchMountainInMindanao,
+  required Future<List<_MountainOrganizer>> Function(_NearbyTrail trail)
+  fetchMountainOrganizers,
+  required String aiApiKey,
+  required String systemInstruction,
+  void Function(_NearbyTrail trail)? onMountainMentioned,
+  String? extraContext,
+}) async {
+  final normalized = question.toLowerCase();
+  if (normalized.contains('what to bring') ||
+      normalized.contains('what i need to bring') ||
+      normalized.contains('what should i bring') ||
+      normalized.contains('what do i bring') ||
+      normalized.contains('what should i pack') ||
+      normalized.contains('need to bring') ||
+      normalized.contains('packing list') ||
+      normalized.contains('gear') ||
+      normalized.contains('pack') ||
+      normalized.contains('prepare') ||
+      normalized.contains('what do i need') ||
+      normalized.contains('what do i need for') ||
+      normalized.contains('what is needed') ||
+      normalized.contains('what should i wear') ||
+      normalized.contains('what is the gear')) {
+    if (initialTrail == null) {
+      return 'For a hike, bring plenty of water, snacks, weather-proof '
+          'layers, a first-aid kit, a flashlight, and a charged phone. '
+          'Tell me which mountain you have in mind and I can tailor the '
+          'list to it.';
+    }
+    final items = buildPackingList(
+      difficulty: initialTrail.difficulty,
+      elevationMasl: initialTrail.elevationMasl,
+    );
+    return 'For ${initialTrail.name}, bring: ${items.join(', ')}.';
+  }
+
+  bool matchesTrailInQuestion(_NearbyTrail trail) {
+    final normalizedName = trail.name.toLowerCase();
+    return normalized.contains(normalizedName) ||
+        normalized.contains('this mountain') ||
+        normalized.contains('this hike') ||
+        normalized.contains('the hike');
+  }
+
+  // Only questions that plausibly name/ask about a mountain go to the
+  // free-text Places/Nominatim search — anything else (weather, location,
+  // small talk) either has its own dedicated context or nothing to
+  // usefully match, and sending it as a place-name query risks a fuzzy
+  // match on an unrelated real place (e.g. "what is the weather today"
+  // once matched PAGASA's office; "what's your name" once matched an
+  // unnamed POI literally labeled "No Name Yet").
+  final skipMountainSearch =
+      _isWeatherQuestion(normalized) ||
+      _isLocationQuestion(normalized) ||
+      !_looksLikeMountainQuery(normalized);
+
+  _NearbyTrail? trail = initialTrail;
+  if (trail == null || !matchesTrailInQuestion(trail)) {
+    trail = skipMountainSearch
+        ? null
+        : await searchMountainInMindanao(question);
+  }
+  if (trail != null) {
+    onMountainMentioned?.call(trail);
+  }
+
+  final organizers = trail == null
+      ? const <_MountainOrganizer>[]
+      : await fetchMountainOrganizers(trail);
+
+  if (aiApiKey.isNotEmpty) {
+    final contextBuffer = StringBuffer();
+    if (extraContext != null && extraContext.isNotEmpty) {
+      contextBuffer.writeln(extraContext);
+    }
+    if (trail != null) {
+      contextBuffer.writeln(
+        'Matched trail: ${trail.name}, ${trail.provinceOrCity}.',
+      );
+      if (organizers.isNotEmpty) {
+        final organizerList = organizers
+            .take(5)
+            .map((organizer) {
+              return '${organizer.name} — ${organizer.contact} (${organizer.source})${organizer.verified ? ' ✓ verified' : ''}';
+            })
+            .join('\n');
+        contextBuffer.writeln(
+          'Known organizer contacts for this trail:\n$organizerList',
+        );
+      } else {
+        contextBuffer.writeln(
+          'No organizer contacts are on file for this trail in the app.',
+        );
+      }
+    } else {
+      contextBuffer.writeln(
+        'No specific trail was matched in the app database for this question.',
+      );
+    }
+    final prompt =
+        '''
+The user asked: "$question"
+$contextBuffer
+Answer the user's actual question directly and helpfully, using your general knowledge (e.g. elevation, difficulty, weather, best season) whenever the app data above doesn't cover it. Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
+''';
+    final aiAnswer = await fetchGeminiResponse(
+      apiKey: aiApiKey,
+      systemInstruction: systemInstruction,
+      prompt: prompt,
+    );
+    if (aiAnswer.isNotEmpty) {
+      return aiAnswer;
+    }
+  }
+
+  if (trail == null) {
+    if (skipMountainSearch) {
+      // We deliberately never searched — the question wasn't mountain-
+      // related to begin with, so "I couldn't find a mountain matching
+      // that" would be a non sequitur here (this is the AI-unavailable
+      // fallback; the AI branch above already tried to answer directly).
+      return "I'm more in my element talking trails — difficulty, "
+          'elevation, weather, gear, or organizer contacts for a '
+          "mountain. Throw one of those my way and I'll help you plan "
+          'it out!';
+    }
+    return 'I could not find a mountain matching that query. Try asking with a more exact name, such as "Mt. Apo" or "Mount Matutum."';
+  }
+
+  if (organizers.isEmpty) {
+    return 'I found ${trail.name}, but I could not find any matching organizers right now. You can still search again with another mountain name, or use the Explore map to browse nearby trails.';
+  }
+
+  final buffer = StringBuffer();
+  buffer.writeln(
+    'I found ${organizers.length} organizer suggestions for ${trail.name}:',
+  );
+  final displayedOrganizers = organizers.take(3);
+  var index = 1;
+  for (final organizer in displayedOrganizers) {
+    buffer.writeln(
+      '${index++}. ${organizer.name} — ${organizer.contact} (${organizer.source})${organizer.verified ? ' ✓ verified' : ''}',
+    );
+  }
+  if (organizers.length > 3) {
+    buffer.writeln('And ${organizers.length - 3} more results are available.');
+  }
+  buffer.writeln(
+    'You can ask me to search another mountain or request more details.',
+  );
+  return buffer.toString();
 }
 
 class _GpxRoutePreview {
@@ -1440,7 +1859,7 @@ class _WeekdayLabel extends StatelessWidget {
         label,
         textAlign: TextAlign.center,
         style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.52),
+          color: AgakColors.ink.withValues(alpha: 0.52),
           fontSize: 8,
           fontWeight: FontWeight.w800,
         ),
@@ -1468,8 +1887,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   );
   static const LatLng _fallbackCenter = LatLng(8.0, 125.0);
   static final LatLngBounds _mindanaoBounds = LatLngBounds(
-    southwest: LatLng(4.3, 121.0),
-    northeast: LatLng(10.7, 126.7),
+    southwest: const LatLng(4.3, 121.0),
+    northeast: const LatLng(10.7, 126.7),
   );
   GoogleMapController? _mapController;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -1480,6 +1899,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       TextEditingController();
   XFile? _communityComposerImage;
   bool _postingCommunityPost = false;
+  final WeatherService _weatherService = WeatherService();
   String _mapsApiKey = '';
   String _weatherApiKey = '';
   String _customSearchApiKey = '';
@@ -1493,6 +1913,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   LatLng _currentCenter = _fallbackCenter;
   LatLng? _myLocationCenter;
   _NearbyTrail? _searchedTrailAnchor;
+  String _kyrielleAiApiKey = '';
   _NearbyAnchorMode _nearbyAnchorMode = _NearbyAnchorMode.nearMe;
   bool _nearbyCardCollapsed = false;
   String? _locationMessage;
@@ -1548,11 +1969,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (_) {
       _accountType = 'hiker';
     }
+    unawaited(_backfillPublicProfileName());
+    unawaited(AgakBehaviorDatabase.instance.clearCompletedHikes());
     await _loadMapsApiKey();
     await _loadSearchProviderConfig();
     unawaited(_ensureDefaultAppContent());
     unawaited(_refreshLocationAccessStatus());
     unawaited(AgakController.instance.refresh());
+    unawaited(_loadCompletedHikesFromFirestore());
     await _loadCurrentLocation();
     unawaited(_refreshAgakAmbientWeather());
     if (_nearbyTrails.isEmpty) {
@@ -1597,8 +2021,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     try {
-      final apiKey = await _configChannel.invokeMethod<String>('getCustomSearchApiKey');
-      final searchEngineId = await _configChannel.invokeMethod<String>('getCustomSearchEngineId');
+      final apiKey = await _configChannel.invokeMethod<String>(
+        'getCustomSearchApiKey',
+      );
+      final searchEngineId = await _configChannel.invokeMethod<String>(
+        'getCustomSearchEngineId',
+      );
       if (apiKey != null && apiKey.trim().isNotEmpty) {
         _customSearchApiKey = apiKey.trim();
       }
@@ -2881,7 +3309,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       for (final doc in docs) {
         final data = doc.data();
         final name = data['organizerName']?.toString().trim() ?? 'Organizer';
-        final contact = data['contact']?.toString().trim() ?? 'Contact not available';
+        final contact =
+            data['contact']?.toString().trim() ?? 'Contact not available';
         final description = data['description']?.toString().trim() ?? '';
         final source = data['source']?.toString().trim() ?? 'App listing';
         final verified = data['verified'] == true;
@@ -2962,10 +3391,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       for (final doc in userDocs) {
         final data = doc.data();
-        final displayName = data['fullName']?.toString().trim() ??
+        final displayName =
+            data['fullName']?.toString().trim() ??
             data['displayName']?.toString().trim() ??
             'Tour Guide';
-        final contact = data['phoneNumber']?.toString().trim() ??
+        final contact =
+            data['phoneNumber']?.toString().trim() ??
             data['contactNumber']?.toString().trim() ??
             data['phone']?.toString().trim() ??
             data['email']?.toString().trim() ??
@@ -2987,7 +3418,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           );
         }
 
-        final normalizedBio = _normalizeTokenWords(data['bio']?.toString() ?? '');
+        final normalizedBio = _normalizeTokenWords(
+          data['bio']?.toString() ?? '',
+        );
         if (serviceMountains.isEmpty && searchTokens.isNotEmpty) {
           for (final token in searchTokens) {
             if (normalizedBio.contains(token)) {
@@ -3019,7 +3452,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     try {
-      final externalOrganizers = await _fetchExternalOrganizerSuggestions(trail);
+      final externalOrganizers = await _fetchExternalOrganizerSuggestions(
+        trail,
+      );
       for (final organizer in externalOrganizers) {
         if (!foundOrganizers.any((item) => item.id == organizer.id)) {
           foundOrganizers.add(organizer);
@@ -3037,7 +3472,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   ) async {
     if (_customSearchApiKey.isNotEmpty && _customSearchEngineId.isNotEmpty) {
       try {
-        final customSearchResults = await _fetchGoogleCustomSearchSuggestions(trail);
+        final customSearchResults = await _fetchGoogleCustomSearchSuggestions(
+          trail,
+        );
         if (customSearchResults.isNotEmpty) {
           return customSearchResults;
         }
@@ -3120,21 +3557,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
   ) async {
     final cityOrProvince = _provinceOrCityFromAddress(trail.address);
     final queries = <String>{
-      [trail.name, 'mountain guide contact', cityOrProvince]
-          .where((part) => part.isNotEmpty)
-          .join(' '),
-      [trail.name, 'hiking guide', cityOrProvince]
-          .where((part) => part.isNotEmpty)
-          .join(' '),
-      [trail.name, 'tour guide', cityOrProvince]
-          .where((part) => part.isNotEmpty)
-          .join(' '),
-      [trail.name, 'mountain guide Philippines']
-          .where((part) => part.isNotEmpty)
-          .join(' '),
-      ['Mount ${trail.name}', 'guide', cityOrProvince]
-          .where((part) => part.isNotEmpty)
-          .join(' '),
+      [
+        trail.name,
+        'mountain guide contact',
+        cityOrProvince,
+      ].where((part) => part.isNotEmpty).join(' '),
+      [
+        trail.name,
+        'hiking guide',
+        cityOrProvince,
+      ].where((part) => part.isNotEmpty).join(' '),
+      [
+        trail.name,
+        'tour guide',
+        cityOrProvince,
+      ].where((part) => part.isNotEmpty).join(' '),
+      [
+        trail.name,
+        'mountain guide Philippines',
+      ].where((part) => part.isNotEmpty).join(' '),
+      [
+        'Mount ${trail.name}',
+        'guide',
+        cityOrProvince,
+      ].where((part) => part.isNotEmpty).join(' '),
     };
 
     for (final query in queries) {
@@ -3178,16 +3624,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
 
         if (body['RelatedTopics'] is List) {
-          for (final topic in _extractDuckDuckGoTopics(body['RelatedTopics'] as List)) {
+          for (final topic in _extractDuckDuckGoTopics(
+            body['RelatedTopics'] as List,
+          )) {
             final text = topic['Text']?.toString().trim() ?? '';
             if (text.isEmpty) {
               continue;
             }
 
             final firstUrl = topic['FirstURL']?.toString().trim();
-            final title = topic['Name']?.toString().trim() ??
-                'Web search recommendation';
-            final id = 'web_${trail.placeId}_${suggestions.length}_${text.hashCode}';
+            final title =
+                topic['Name']?.toString().trim() ?? 'Web search recommendation';
+            final id =
+                'web_${trail.placeId}_${suggestions.length}_${text.hashCode}';
 
             suggestions.add(
               _MountainOrganizer(
@@ -3392,6 +3841,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  /// Self-heals accounts created before `users/{uid}/public/profile`
+  /// existed — without this doc, other users resolving *this* account's
+  /// live display name (see `_fetchCommunityAuthorName`) would keep
+  /// falling back to whatever name was frozen into their old posts.
+  /// Cheap: only writes if the doc is actually missing.
+  Future<void> _backfillPublicProfileName() async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return;
+    }
+    try {
+      final publicDocRef = _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('public')
+          .doc('profile');
+      final existing = await publicDocRef.get();
+      if (existing.exists &&
+          (existing.data()?['fullName']?.toString().trim().isNotEmpty ??
+              false)) {
+        return;
+      }
+      await publicDocRef.set({'fullName': _communityDisplayName()});
+    } catch (error) {
+      debugPrint('Failed to backfill public profile name: $error');
+    }
+  }
+
   String _communityDisplayName() {
     final profileName =
         _currentUserProfile['fullName']?.toString().trim() ??
@@ -3494,6 +3971,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
           'displayName': name,
           'updatedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
+        unawaited(
+          _firestore
+              .collection('users')
+              .doc(user.uid)
+              .collection('public')
+              .doc('profile')
+              .set({'fullName': name}),
+        );
         _showDashboardSnackBar('Profile name updated.');
       } on FirebaseException catch (error) {
         _showDashboardSnackBar(
@@ -3538,7 +4023,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final bytes = await picked.readAsBytes();
       await ref.putData(
         bytes,
-        SettableMetadata(contentType: picked.mimeType ?? 'image/jpeg'),
+        SettableMetadata(
+          contentType: picked.mimeType ?? 'image/jpeg',
+          // Not immutable — this filename gets overwritten on every
+          // re-upload, so a long/immutable cache would hide a changed
+          // avatar. Moderate max-age keeps the CDN edge useful without
+          // masking updates for too long.
+          cacheControl: 'public, max-age=3600',
+        ),
       );
       final url = await ref.getDownloadURL();
       await user.updatePhotoURL(url);
@@ -3836,7 +4328,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final bytes = await image.readAsBytes();
         await ref.putData(
           bytes,
-          SettableMetadata(contentType: image.mimeType ?? 'image/jpeg'),
+          SettableMetadata(
+            contentType: image.mimeType ?? 'image/jpeg',
+            // Safe to mark immutable: the filename embeds a microsecond
+            // timestamp, so a given URL's content never changes.
+            cacheControl: 'public, max-age=86400, immutable',
+          ),
         );
         imageUrl = await ref.getDownloadURL();
       }
@@ -4104,228 +4601,246 @@ class _DashboardScreenState extends State<DashboardScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (sheetContext) {
-        return FractionallySizedBox(
-          heightFactor: 0.9,
-          child: Container(
-            decoration: const BoxDecoration(
-              color: Color(0xFF02130E),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
-            ),
-            child: Column(
-              children: [
-                const SizedBox(height: 10),
-                Container(
-                  width: 44,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(10),
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, result) {
+            if (didPop) return;
+            // The comment TextField's keyboard teardown racing with the
+            // sheet's own dismiss animation is what trips a framework
+            // assertion on drag-to-dismiss — unfocusing first, then
+            // popping, sequences the two instead of leaving them to race.
+            FocusManager.instance.primaryFocus?.unfocus();
+            Navigator.of(sheetContext).pop();
+          },
+          child: FractionallySizedBox(
+            heightFactor: 0.9,
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFF02130E),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+              ),
+              child: Column(
+                children: [
+                  const SizedBox(height: 10),
+                  Container(
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-                  child: Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Post Details',
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Post Details',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.of(sheetContext).pop(),
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      children: [
+                        _communityPostCard(post, showCommentAction: false),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Comments',
                           style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
+                            color: Color(0xFF7CF9A2),
                             fontWeight: FontWeight.w700,
                           ),
                         ),
-                      ),
-                      IconButton(
-                        onPressed: () => Navigator.of(sheetContext).pop(),
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          color: Colors.white70,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                    children: [
-                      _communityPostCard(post, showCommentAction: false),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'Comments',
-                        style: TextStyle(
-                          color: Color(0xFF7CF9A2),
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                        stream: _firestore
-                            .collection('community_posts')
-                            .doc(post.id)
-                            .collection('comments')
-                            .orderBy('createdAt', descending: false)
-                            .limit(200)
-                            .snapshots(),
-                        builder: (context, snapshot) {
-                          if (snapshot.connectionState ==
-                              ConnectionState.waiting) {
-                            return const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 16),
-                              child: Center(
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Color(0xFF7CF9A2),
-                                ),
-                              ),
-                            );
-                          }
-                          final docs = snapshot.data?.docs ?? const [];
-                          if (docs.isEmpty) {
-                            return Text(
-                              'No comments yet.',
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.75),
-                              ),
-                            );
-                          }
-                          final currentUid = _firebaseAuth.currentUser?.uid;
-                          return Column(
-                            children: docs.map((doc) {
-                              final data = doc.data();
-                              final author =
-                                  data['authorName']?.toString() ?? 'Hiker';
-                              final content = data['content']?.toString() ?? '';
-                              final isOwnComment =
-                                  currentUid != null &&
-                                  data['authorId']?.toString() == currentUid;
-                              DateTime? createdAt;
-                              if (data['createdAt'] is Timestamp) {
-                                createdAt = (data['createdAt'] as Timestamp)
-                                    .toDate();
-                              }
-                              return Container(
-                                width: double.infinity,
-                                margin: const EdgeInsets.only(bottom: 8),
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.04),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          child: Text(
-                                            author,
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                        ),
-                                        if (isOwnComment)
-                                          GestureDetector(
-                                            onTap: () => unawaited(
-                                              _deleteCommunityComment(
-                                                post.id,
-                                                doc.id,
-                                              ),
-                                            ),
-                                            child: Icon(
-                                              Icons.delete_outline_rounded,
-                                              size: 16,
-                                              color: Colors.white.withValues(
-                                                alpha: 0.5,
-                                              ),
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      content,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                    if (createdAt != null) ...[
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        _formatDate(createdAt),
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(
-                                            alpha: 0.6,
-                                          ),
-                                          fontSize: 11,
-                                        ),
-                                      ),
-                                    ],
-                                  ],
+                        const SizedBox(height: 8),
+                        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                          stream: _firestore
+                              .collection('community_posts')
+                              .doc(post.id)
+                              .collection('comments')
+                              .orderBy('createdAt', descending: false)
+                              .limit(200)
+                              .snapshots(),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState ==
+                                ConnectionState.waiting) {
+                              return const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Center(
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Color(0xFF7CF9A2),
+                                  ),
                                 ),
                               );
-                            }).toList(),
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-                SafeArea(
-                  top: false,
-                  minimum: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: commentController,
-                          maxLines: 2,
-                          minLines: 1,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: InputDecoration(
-                            hintText: 'Add a comment...',
-                            hintStyle: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.6),
-                            ),
-                            filled: true,
-                            fillColor: Colors.white.withValues(alpha: 0.07),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: BorderSide.none,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        height: 46,
-                        child: ElevatedButton(
-                          onPressed: () async {
-                            final text = commentController.text.trim();
-                            if (text.isEmpty) {
-                              return;
                             }
-                            FocusManager.instance.primaryFocus?.unfocus();
-                            commentController.clear();
-                            await _addCommunityComment(post.id, text);
+                            final docs = snapshot.data?.docs ?? const [];
+                            if (docs.isEmpty) {
+                              return Text(
+                                'No comments yet.',
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.75),
+                                ),
+                              );
+                            }
+                            final currentUid = _firebaseAuth.currentUser?.uid;
+                            return Column(
+                              children: docs.map((doc) {
+                                final data = doc.data();
+                                final commentAuthorId =
+                                    data['authorId']?.toString() ?? '';
+                                final author = _communityAuthorName(
+                                  commentAuthorId,
+                                  data['authorName']?.toString() ?? 'Hiker',
+                                );
+                                final content =
+                                    data['content']?.toString() ?? '';
+                                final isOwnComment =
+                                    currentUid != null &&
+                                    commentAuthorId == currentUid;
+                                DateTime? createdAt;
+                                if (data['createdAt'] is Timestamp) {
+                                  createdAt = (data['createdAt'] as Timestamp)
+                                      .toDate();
+                                }
+                                return Container(
+                                  width: double.infinity,
+                                  margin: const EdgeInsets.only(bottom: 8),
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.04),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              author,
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
+                                          if (isOwnComment)
+                                            GestureDetector(
+                                              onTap: () => unawaited(
+                                                _deleteCommunityComment(
+                                                  post.id,
+                                                  doc.id,
+                                                ),
+                                              ),
+                                              child: Icon(
+                                                Icons.delete_outline_rounded,
+                                                size: 16,
+                                                color: Colors.white.withValues(
+                                                  alpha: 0.5,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        content,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      if (createdAt != null) ...[
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          _formatDate(createdAt),
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(
+                                              alpha: 0.6,
+                                            ),
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            );
                           },
-                          style: ElevatedButton.styleFrom(
-                            foregroundColor: Colors.black,
-                            backgroundColor: const Color(0xFF53D97A),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SafeArea(
+                    top: false,
+                    minimum: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: commentController,
+                            maxLines: 2,
+                            minLines: 1,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: InputDecoration(
+                              hintText: 'Add a comment...',
+                              hintStyle: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.6),
+                              ),
+                              filled: true,
+                              fillColor: Colors.white.withValues(alpha: 0.07),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide.none,
+                              ),
                             ),
                           ),
-                          child: const Text('Post'),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          height: 46,
+                          child: ElevatedButton(
+                            onPressed: () async {
+                              final text = commentController.text.trim();
+                              if (text.isEmpty) {
+                                return;
+                              }
+                              FocusManager.instance.primaryFocus?.unfocus();
+                              commentController.clear();
+                              await _addCommunityComment(post.id, text);
+                            },
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: Colors.black,
+                              backgroundColor: const Color(0xFF53D97A),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Text('Post'),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         );
@@ -4380,9 +4895,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .where((part) => part.isNotEmpty)
         .toList();
     final filtered = parts
-        .where((part) => !RegExp(r'^(philippines|ph|usa|united states|united states of america)',
-                caseSensitive: false)
-            .hasMatch(part))
+        .where(
+          (part) => !RegExp(
+            r'^(philippines|ph|usa|united states|united states of america)',
+            caseSensitive: false,
+          ).hasMatch(part),
+        )
         .toList();
     if (filtered.isEmpty) {
       return parts.isNotEmpty ? parts.last : '';
@@ -4763,9 +5281,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
     });
     _showDashboardSnackBar('${room.mountainName} hike saved to My Hikes.');
+    unawaited(_recordHikeAttempt(trail, session));
     unawaited(_updateLeaderboardStats(trail, session));
-    unawaited(_recordAgakHikeCompletion(trail, session));
+    _recordAgakHikeCompletion(trail, session);
     unawaited(_submitTrailRouteIfAccepted(trail, session));
+    _pushPostHikeCompanionMessage(trail, session);
   }
 
   Future<_TrailRecordingDetails?> _askTrailRecordingDetails(
@@ -4863,10 +5383,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         IconButton(
                           onPressed: stationControllers.isEmpty
                               ? null
-                              : () =>
-                                    setStationCount(
-                                      stationControllers.length - 1,
-                                    ),
+                              : () => setStationCount(
+                                  stationControllers.length - 1,
+                                ),
                           icon: const Icon(
                             Icons.remove_circle_outline,
                             color: Colors.white70,
@@ -4882,10 +5401,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         IconButton(
                           onPressed: stationControllers.length >= 20
                               ? null
-                              : () =>
-                                    setStationCount(
-                                      stationControllers.length + 1,
-                                    ),
+                              : () => setStationCount(
+                                  stationControllers.length + 1,
+                                ),
                           icon: const Icon(
                             Icons.add_circle_outline,
                             color: Colors.white70,
@@ -4996,26 +5514,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (!mounted || session == null) {
       return;
     }
+    // Recording a new trail always saves the walked route (below) even if
+    // the hiker turns back early — that GPX data is useful either way. But
+    // it only counts as a *completed* hike — the "Completed" list, the
+    // milestone-tracking count, the trail's completed badge — when they
+    // actually reached the summit, same bar as any other hike.
     setState(() {
       _rememberTrail(trail);
-      _completedTrailIds.add(trail.placeId);
-      _completedHikeSessions.insert(
-        0,
-        _CompletedHikeSession(
-          trail: trail,
-          completedAt: DateTime.now(),
-          distanceKm: session.distanceKm,
-          duration: session.duration,
-          elevationGainMasl: session.elevationGainMasl,
-          maxElevationMasl: session.maxElevationMasl,
-          checkpointsReached: session.checkpointsReached,
-          totalCheckpoints: session.totalCheckpoints,
-          reachedSummit: session.reachedSummit,
-        ),
-      );
+      if (session.reachedSummit) {
+        _completedTrailIds.add(trail.placeId);
+        _completedHikeSessions.insert(
+          0,
+          _CompletedHikeSession(
+            trail: trail,
+            completedAt: DateTime.now(),
+            distanceKm: session.distanceKm,
+            duration: session.duration,
+            elevationGainMasl: session.elevationGainMasl,
+            maxElevationMasl: session.maxElevationMasl,
+            checkpointsReached: session.checkpointsReached,
+            totalCheckpoints: session.totalCheckpoints,
+            reachedSummit: session.reachedSummit,
+          ),
+        );
+      }
     });
+    unawaited(_recordHikeAttempt(trail, session));
     unawaited(_updateLeaderboardStats(trail, session));
-    unawaited(_recordAgakHikeCompletion(trail, session));
+    if (session.reachedSummit) {
+      _recordAgakHikeCompletion(trail, session);
+    }
+    _pushPostHikeCompanionMessage(trail, session);
     await _submitTrailRouteIfAccepted(
       trail,
       session,
@@ -5106,6 +5635,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
     }
     return points;
+  }
+
+  /// Blocks a bare "Start Hiking" tap on a mountain with no mapped or
+  /// community route — asks up front instead of silently dropping the
+  /// hiker into trail-recording mode with no warning. Returns true only
+  /// when the hiker explicitly chose to record the trail; false/null
+  /// (including barrier dismiss) means stay on the details sheet.
+  Future<bool> _showNoTrailRouteDialog(String mountainName) {
+    return _showAgakConfirmDialog(
+      context,
+      icon: Icons.signpost_rounded,
+      title: 'No Trail Route Yet',
+      message:
+          "$mountainName doesn't have a mapped trail route yet. "
+          'You can record your walked path as you hike so future '
+          'hikers have a route to follow, or exit and pick another '
+          'mountain.',
+      cancelLabel: 'Exit',
+      confirmLabel: 'Record Trail',
+      confirmIcon: Icons.route_rounded,
+    );
+  }
+
+  Future<bool> _showLogoutConfirmationDialog() {
+    return _showAgakConfirmDialog(
+      context,
+      icon: Icons.logout_rounded,
+      title: 'Sign Out?',
+      message:
+          "You'll need to sign back in to see your hikes, saved "
+          'mountains, and messages from Kyrielle.',
+      cancelLabel: 'Cancel',
+      confirmLabel: 'Sign Out',
+    );
   }
 
   Future<_CommunityTrailData?> _fetchCommunityTrail(
@@ -5233,10 +5796,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         },
         'routePoints': _encodeRoutePoints(routePoints),
         'trackPoints': _encodeTrackPoints(trackPoints),
-        'recordedAt':
-            (recordingDetails?.recordedAt ?? DateTime.now())
-                .toUtc()
-                .toIso8601String(),
+        'recordedAt': (recordingDetails?.recordedAt ?? DateTime.now())
+            .toUtc()
+            .toIso8601String(),
         'startedAt': hikeResult.startedAt.toUtc().toIso8601String(),
         'endedAt': hikeResult.endedAt.toUtc().toIso8601String(),
       });
@@ -5268,6 +5830,150 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  /// The durable, per-hike record — one Firestore document per hike
+  /// *attempt*, completed or not. Unlike the old setup (an in-memory list
+  /// that reset to empty on every app restart, plus a bare Firestore
+  /// counter with no records behind it), this is the actual source of
+  /// truth: it survives restarts and reinstalls, and every other "how many
+  /// hikes" number in the app gets reconciled against it.
+  Future<void> _recordHikeAttempt(
+    _NearbyTrail trail,
+    _LiveHikeResult session,
+  ) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return;
+    }
+    try {
+      await _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('hikes')
+          .add({
+            'placeId': trail.placeId,
+            'mountainName': trail.name,
+            'address': trail.address,
+            'lat': trail.location.latitude,
+            'lon': trail.location.longitude,
+            'provinceOrCity': trail.provinceOrCity,
+            'difficulty': trail.difficulty,
+            'status': trail.status,
+            'description': trail.description,
+            'distanceKm': session.distanceKm,
+            'durationSeconds': session.duration.inSeconds,
+            'elevationGainMasl': session.elevationGainMasl,
+            'maxElevationMasl': session.maxElevationMasl,
+            'checkpointsReached': session.checkpointsReached,
+            'totalCheckpoints': session.totalCheckpoints,
+            'reachedSummit': session.reachedSummit,
+            'startedAt': session.startedAt.toUtc().toIso8601String(),
+            'endedAt': session.endedAt.toUtc().toIso8601String(),
+            'completedAt': FieldValue.serverTimestamp(),
+          });
+    } catch (error) {
+      debugPrint('Failed to record hike attempt: $error');
+    }
+  }
+
+  /// Loads real hike history from Firestore on dashboard start, replacing
+  /// whatever was in the in-memory `_completedHikeSessions`/
+  /// `_completedTrailIds` (empty on a fresh launch) with what actually
+  /// happened. Also reconciles the leaderboard's `completedMountains`
+  /// counter to match this real count — that counter used to drift from
+  /// reality (it incremented on every ended hike regardless of summit,
+  /// for a long stretch), and had nothing behind it to correct against;
+  /// now it's recomputed from the real records every time the dashboard
+  /// loads instead of trusting an independently-incrementing number.
+  Future<void> _loadCompletedHikesFromFirestore() async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return;
+    }
+    try {
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('hikes')
+          .orderBy('completedAt', descending: true)
+          .limit(300)
+          .get();
+      final sessions = <_CompletedHikeSession>[];
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final distanceKm = (data['distanceKm'] as num?)?.toDouble() ?? 0;
+        // Belt-and-suspenders against records written before the
+        // meaningful-distance guard existed (a summit credited on the
+        // very first GPS fix, before any real walking) — require actual
+        // distance covered, not just the stored flag.
+        if (data['reachedSummit'] != true || distanceKm < 0.1) {
+          continue;
+        }
+        final completedAtField = data['completedAt'];
+        final completedAt = completedAtField is Timestamp
+            ? completedAtField.toDate()
+            : DateTime.tryParse(data['endedAt']?.toString() ?? '') ??
+                  DateTime.now();
+        sessions.add(
+          _CompletedHikeSession(
+            trail: _NearbyTrail(
+              placeId: data['placeId']?.toString() ?? doc.id,
+              name: data['mountainName']?.toString() ?? 'Unknown Mountain',
+              address: data['address']?.toString() ?? '',
+              location: LatLng(
+                (data['lat'] as num?)?.toDouble() ?? 0,
+                (data['lon'] as num?)?.toDouble() ?? 0,
+              ),
+              provinceOrCity: data['provinceOrCity']?.toString(),
+              difficulty: data['difficulty']?.toString(),
+              status: data['status']?.toString(),
+              description: data['description']?.toString(),
+            ),
+            completedAt: completedAt,
+            distanceKm: distanceKm,
+            duration: Duration(
+              seconds: (data['durationSeconds'] as num?)?.toInt() ?? 0,
+            ),
+            elevationGainMasl:
+                (data['elevationGainMasl'] as num?)?.toInt() ?? 0,
+            maxElevationMasl: (data['maxElevationMasl'] as num?)?.toInt() ?? 0,
+            checkpointsReached:
+                (data['checkpointsReached'] as num?)?.toInt() ?? 0,
+            totalCheckpoints: (data['totalCheckpoints'] as num?)?.toInt() ?? 0,
+            reachedSummit: true,
+          ),
+        );
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _completedHikeSessions
+          ..clear()
+          ..addAll(sessions);
+        _completedTrailIds
+          ..clear()
+          ..addAll(sessions.map((session) => session.trail.placeId));
+      });
+      unawaited(_reconcileLeaderboardCompletedCount(sessions.length));
+    } catch (error) {
+      debugPrint('Failed to load completed hikes: $error');
+    }
+  }
+
+  Future<void> _reconcileLeaderboardCompletedCount(int trueCount) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return;
+    }
+    try {
+      await _firestore.collection('leaderboard').doc(user.uid).set({
+        'completedMountains': trueCount,
+      }, SetOptions(merge: true));
+    } catch (error) {
+      debugPrint('Failed to reconcile leaderboard completed count: $error');
+    }
+  }
+
   Future<void> _updateLeaderboardStats(
     _NearbyTrail trail,
     _LiveHikeResult hikeResult,
@@ -5281,7 +5987,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'userId': user.uid,
       'displayName': _communityDisplayName(),
       'accountType': _accountType,
-      'completedMountains': FieldValue.increment(1),
+      'completedMountains': FieldValue.increment(
+        hikeResult.reachedSummit ? 1 : 0,
+      ),
       'summitsReached': FieldValue.increment(hikeResult.reachedSummit ? 1 : 0),
       'totalDistanceKm': FieldValue.increment(hikeResult.distanceKm),
       'lastMountainName': trail.name,
@@ -5292,36 +6000,57 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   /// Records a completed hike in AGAK's local (offline) behavior history —
-  /// additive to `_updateLeaderboardStats` above, which stays the source of
-  /// truth for the Firestore leaderboard. This is the first durable,
-  /// timestamped per-hike record in the app; it also feeds the
-  /// recommendation engine and triggers a milestone celebration when one
-  /// is hit.
-  Future<void> _recordAgakHikeCompletion(
+  /// separate from `_recordHikeAttempt`'s Firestore record (the actual
+  /// source of truth for "how many hikes have I completed"), this one
+  /// exists purely to feed the on-device recommendation engine and trigger
+  /// a milestone celebration when one is hit.
+  /// Triggers Kyrielle's milestone celebration when this genuinely-reached
+  /// summit crosses a milestone threshold. The count comes from
+  /// `_completedHikeSessions` — by the time this runs, the caller has
+  /// already inserted this session into it, and that list is itself loaded
+  /// from `users/{uid}/hikes` in Firestore (see
+  /// `_loadCompletedHikesFromFirestore`), the same real record
+  /// `AgakController` reads for its recommendation engine. One source of
+  /// truth, not a separate on-device tally that can drift from it.
+  void _recordAgakHikeCompletion(_NearbyTrail trail, _LiveHikeResult session) {
+    final milestone = detectCompletedHikeMilestone(
+      _completedHikeSessions.length,
+    );
+    unawaited(
+      AgakController.instance.refresh(force: true, milestone: milestone),
+    );
+  }
+
+  /// What Kyrielle says on the dashboard right after a hike ends — pushed
+  /// as a [AgakTipScope.global] tip so it actually shows on
+  /// [AgakFloatingCompanion] (unlike every tip Hiking Mode pushes during
+  /// the hike itself, which is [AgakTipScope.hikingOnly] and filtered out
+  /// there). Distinct message depending on whether the summit was actually
+  /// reached, so ending a hike early doesn't get the same congratulations
+  /// as genuinely finishing it.
+  void _pushPostHikeCompanionMessage(
     _NearbyTrail trail,
     _LiveHikeResult session,
-  ) async {
-    try {
-      await AgakBehaviorDatabase.instance.logCompletedHike(
-        mountainId: buildMountainMatchKey(
-          name: trail.name,
-          region: trail.provinceOrCity,
+  ) {
+    if (session.reachedSummit) {
+      AgakTipBus.instance.push(
+        AgakTip(
+          emotion: AgakEmotionState.celebration,
+          message:
+              'CAW-CAW! You completed ${trail.name} — congratulations! '
+              'Rest up and hydrate. Whenever you\'re ready, I\'ve got more '
+              'mountains for you.',
         ),
-        mountainName: trail.name,
-        region: trail.provinceOrCity,
-        difficulty: trail.difficulty,
-        elevationMasl: trail.elevationMasl,
-        distanceKm: session.distanceKm,
-        reachedSummit: session.reachedSummit,
       );
-      final completedCount =
-          (await AgakBehaviorDatabase.instance.getCompletedHikes()).length;
-      final milestone = detectCompletedHikeMilestone(completedCount);
-      unawaited(
-        AgakController.instance.refresh(force: true, milestone: milestone),
+    } else {
+      AgakTipBus.instance.push(
+        AgakTip(
+          emotion: AgakEmotionState.encouragement,
+          message:
+              "Welcome back! How'd ${trail.name} go — you doing okay? "
+              "Whenever you're ready, let's plan what's next.",
+        ),
       );
-    } catch (error) {
-      debugPrint('AGAK hike-completion logging failed: $error');
     }
   }
 
@@ -5636,6 +6365,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
               "Today's weather: ${snapshot.headline}. It could turn to "
               'rain, so keep an eye on the sky and bring rain gear just '
               'in case.';
+        } else if (snapshot.isSunny) {
+          emotion = AgakEmotionState.sunny;
+          message =
+              "Today's weather: ${snapshot.headline}. Great day for a hike!";
         } else {
           emotion = AgakEmotionState.encouragement;
           message =
@@ -5648,66 +6381,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  // Delegates to the shared WeatherService, which calls the
+  // fetchWeatherSnapshot Cloud Function instead of hitting Google directly
+  // — the Weather API key and the risk-classification logic both moved
+  // server-side (functions/index.js), so this no longer needs
+  // _weatherApiKey at all. Kept as its own named method (rather than
+  // repointing every call site at WeatherService directly) purely so the
+  // several existing callers below don't all need touching.
   Future<AgakWeatherSnapshot?> _fetchCurrentWeatherSnapshot(
     LatLng location,
-  ) async {
-    final uri = Uri.https('weather.googleapis.com', '/v1/currentConditions:lookup', {
-      'key': _weatherApiKey,
-      'location.latitude': location.latitude.toStringAsFixed(6),
-      'location.longitude': location.longitude.toStringAsFixed(6),
-    });
-
-    final response = await http.get(uri).timeout(const Duration(seconds: 8));
-    final decoded = jsonDecode(response.body);
-    if (response.statusCode != 200 || decoded is! Map<String, dynamic>) {
-      return null;
-    }
-
-    final condition = decoded['weatherCondition'];
-    final conditionMap = condition is Map<String, dynamic> ? condition : null;
-    final conditionType = conditionMap?['type']?.toString() ?? '';
-    final weatherCode = _weatherCodeFromGoogleCondition(conditionType);
-
-    final precipitationData = decoded['precipitation'];
-    final precipitationMap = precipitationData is Map<String, dynamic>
-        ? precipitationData
-        : null;
-    final probability = precipitationMap?['probability'];
-    final probabilityMap = probability is Map<String, dynamic>
-        ? probability
-        : null;
-    final qpf = precipitationMap?['qpf'];
-    final qpfMap = qpf is Map<String, dynamic> ? qpf : null;
-    final wind = decoded['wind'];
-    final windMap = wind is Map<String, dynamic> ? wind : null;
-
-    final risk = _hikeWeatherRisk(
-      weatherCode: weatherCode,
-      rainChancePercent: _googleInt(probabilityMap?['percent']),
-      precipitationMm: _googleDouble(qpfMap?['quantity']),
-      windSpeedKmh: _googleSpeedKmh(windMap?['speed']),
-    );
-
-    // Populated for good weather too (not just warnings) — the rotating
-    // tip popup wants something to say about "today's weather" even when
-    // there's nothing to warn about.
-    final description = conditionMap?['description'];
-    final descriptionMap = description is Map<String, dynamic>
-        ? description
-        : null;
-    final headline =
-        descriptionMap?['text']?.toString().trim().isNotEmpty == true
-        ? descriptionMap!['text'].toString().trim()
-        : switch (risk) {
-            _HikeWeatherRisk.unsafe => 'Rough weather is rolling in near you',
-            _HikeWeatherRisk.caution => 'Weather looks a bit unsettled near you',
-            _HikeWeatherRisk.good => 'Clear skies near you',
-          };
-
-    return AgakWeatherSnapshot(
-      isSevere: risk == _HikeWeatherRisk.unsafe,
-      isCaution: risk == _HikeWeatherRisk.caution,
-      headline: headline,
+  ) {
+    return _weatherService.fetchCurrentSnapshot(
+      latitude: location.latitude,
+      longitude: location.longitude,
     );
   }
 
@@ -6110,13 +6796,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return _HikeWeatherRisk.unsafe;
     }
     if (_isWetWeatherCode(weatherCode) ||
-        weatherCode == 2 || // partly cloudy — can still tip into rain
         weatherCode == 3 || // overcast — real rain risk, not a "clear" day
         rainChance >= 50 ||
         precipitation >= 5 ||
         windSpeed >= 30) {
       return _HikeWeatherRisk.caution;
     }
+    // Partly cloudy/partly sunny (weatherCode 2) is NOT auto-caution — it's
+    // a normal, hikeable sky. Only the actual rain/wind numbers above (or
+    // a wetter/overcast code) should push it into caution; otherwise a
+    // "Partly sunny" reading would always show the rain-gear warning even
+    // with a near-zero chance of rain.
     return _HikeWeatherRisk.good;
   }
 
@@ -6275,7 +6965,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   left: _agakOffset!.dx,
                   top: _agakOffset!.dy,
                   child: AgakFloatingCompanion(
-                    onTap: _openAgakCompanion,
+                    onTap: _openKyrielleCompanion,
                     onDragDelta: (delta) {
                       setState(() {
                         final maxX = bodySize.width - _agakFootprint.width - 4;
@@ -6329,9 +7019,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       },
       type: BottomNavigationBarType.fixed,
-      backgroundColor: const Color(0xFF02130E),
-      selectedItemColor: const Color(0xFF53D97A),
-      unselectedItemColor: Colors.white70,
+      backgroundColor: Colors.white,
+      selectedItemColor: AgakColors.maroon,
+      unselectedItemColor: AgakColors.ink.withValues(alpha: 0.5),
       items: const [
         BottomNavigationBarItem(
           icon: Icon(Icons.explore_rounded),
@@ -6373,14 +7063,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 margin: const EdgeInsets.fromLTRB(10, 10, 0, 10),
                 padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF02130E),
+                  color: AgakColors.cream,
                   borderRadius: BorderRadius.circular(28),
                   border: Border.all(
-                    color: Colors.white.withValues(alpha: 0.12),
+                    color: AgakColors.ink.withValues(alpha: 0.12),
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.35),
+                      color: Colors.black.withValues(alpha: 0.2),
                       blurRadius: 28,
                       offset: const Offset(12, 0),
                     ),
@@ -6393,7 +7083,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         const Text(
                           'Menu',
                           style: TextStyle(
-                            color: Colors.white,
+                            color: AgakColors.ink,
                             fontSize: 24,
                             fontWeight: FontWeight.w900,
                           ),
@@ -6402,9 +7092,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         IconButton(
                           tooltip: 'Close menu',
                           onPressed: () => Navigator.of(dialogContext).pop(),
-                          icon: const Icon(
+                          icon: Icon(
                             Icons.close_rounded,
-                            color: Colors.white,
+                            color: AgakColors.ink.withValues(alpha: 0.68),
                           ),
                         ),
                       ],
@@ -6459,7 +7149,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       },
                     ),
                     const Spacer(),
-                    Divider(color: Colors.white.withValues(alpha: 0.1)),
+                    Divider(color: AgakColors.ink.withValues(alpha: 0.1)),
                     _appMenuItem(
                       icon: Icons.person_outline_rounded,
                       iconColor: const Color(0xFF7CF9A2),
@@ -6528,7 +7218,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: AgakColors.ink,
                   fontSize: 17,
                   fontWeight: FontWeight.w900,
                 ),
@@ -6539,7 +7229,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.58),
+                  color: AgakColors.ink.withValues(alpha: 0.58),
                   fontSize: 12,
                 ),
               ),
@@ -6583,7 +7273,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Text(
                       title,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: AgakColors.ink,
                         fontSize: 15,
                         fontWeight: FontWeight.w900,
                       ),
@@ -6594,14 +7284,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.62),
+                        color: AgakColors.ink.withValues(alpha: 0.62),
                         fontSize: 12,
                       ),
                     ),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded, color: Colors.white54),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: AgakColors.ink.withValues(alpha: 0.35),
+              ),
             ],
           ),
         ),
@@ -6636,7 +7329,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               for (var index = 0; index < docs.length; index++) ...[
                 _leaderboardRow(index + 1, docs[index].data()),
                 if (index != docs.length - 1)
-                  Divider(color: Colors.white.withValues(alpha: 0.08)),
+                  Divider(color: AgakColors.ink.withValues(alpha: 0.08)),
               ],
             ],
           );
@@ -6654,12 +7347,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final summits = (data['summitsReached'] as num?)?.toInt() ?? 0;
     final distance = (data['totalDistanceKm'] as num?)?.toDouble() ?? 0;
     final color = rank == 1
-        ? const Color(0xFFFFD76A)
+        ? AgakColors.goldDark
         : rank == 2
-        ? const Color(0xFFBBD2E8)
+        ? AgakColors.ink.withValues(alpha: 0.45)
         : rank == 3
-        ? const Color(0xFFD9A066)
-        : const Color(0xFF7CF9A2);
+        ? const Color(0xFFB2703A)
+        : AgakColors.olive;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -6688,7 +7381,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: AgakColors.ink,
                     fontSize: 15,
                     fontWeight: FontWeight.w900,
                   ),
@@ -6699,7 +7392,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.62),
+                    color: AgakColors.ink.withValues(alpha: 0.6),
                     fontSize: 12,
                   ),
                 ),
@@ -6709,7 +7402,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Text(
             '$completed',
             style: const TextStyle(
-              color: Color(0xFF7CF9A2),
+              color: AgakColors.maroon,
               fontSize: 24,
               fontWeight: FontWeight.w900,
             ),
@@ -6774,7 +7467,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   body,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.82),
+                    color: AgakColors.ink.withValues(alpha: 0.82),
                     height: 1.38,
                   ),
                 ),
@@ -6800,9 +7493,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(13),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.055),
+        color: AgakColors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.1)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -6810,7 +7503,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Text(
             title,
             style: const TextStyle(
-              color: Colors.white,
+              color: AgakColors.ink,
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -6819,7 +7512,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Text(
               body,
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.74),
+                color: AgakColors.ink.withValues(alpha: 0.74),
                 height: 1.32,
               ),
             ),
@@ -6921,7 +7614,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   title,
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: AgakColors.ink,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -6930,7 +7623,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   Text(
                     body,
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.7),
+                      color: AgakColors.ink.withValues(alpha: 0.7),
                       height: 1.3,
                     ),
                   ),
@@ -6940,7 +7633,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   Text(
                     _formatDate(date),
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.48),
+                      color: AgakColors.ink.withValues(alpha: 0.48),
                       fontSize: 11,
                     ),
                   ),
@@ -6971,7 +7664,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           builder: (context, scrollController) {
             return Container(
               decoration: const BoxDecoration(
-                color: Color(0xFF02130E),
+                color: AgakColors.cream,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
               ),
               child: Column(
@@ -6981,7 +7674,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     width: 44,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.white24,
+                      color: AgakColors.ink.withValues(alpha: 0.18),
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
@@ -6989,13 +7682,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
                     child: Row(
                       children: [
-                        Icon(icon, color: const Color(0xFF7CF9A2)),
+                        Icon(icon, color: AgakColors.maroon),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             title,
                             style: const TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 22,
                               fontWeight: FontWeight.w900,
                             ),
@@ -7003,9 +7696,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                         IconButton(
                           onPressed: () => Navigator.of(sheetContext).pop(),
-                          icon: const Icon(
+                          icon: Icon(
                             Icons.close_rounded,
-                            color: Colors.white70,
+                            color: AgakColors.ink.withValues(alpha: 0.68),
                           ),
                         ),
                       ],
@@ -7036,19 +7729,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.055),
+        color: AgakColors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.1)),
       ),
       child: Column(
         children: [
-          Icon(icon, color: const Color(0xFF7CF9A2), size: 42),
+          Icon(icon, color: AgakColors.maroon, size: 42),
           const SizedBox(height: 10),
           Text(
             title,
             textAlign: TextAlign.center,
             style: const TextStyle(
-              color: Colors.white,
+              color: AgakColors.ink,
               fontSize: 17,
               fontWeight: FontWeight.w900,
             ),
@@ -7058,7 +7751,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             message,
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.68),
+              color: AgakColors.ink.withValues(alpha: 0.68),
               height: 1.35,
             ),
           ),
@@ -7099,9 +7792,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    const Color(0xFF04140E).withValues(alpha: 0.45),
+                    AgakColors.cream.withValues(alpha: 0.55),
                     Colors.transparent,
-                    const Color(0xFF03110C).withValues(alpha: 0.68),
+                    AgakColors.cream.withValues(alpha: 0.78),
                   ],
                   stops: const [0, 0.35, 1],
                 ),
@@ -7121,7 +7814,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const Text(
                       'Agakbay',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: AgakColors.ink,
                         fontSize: 30,
                         fontWeight: FontWeight.w700,
                       ),
@@ -7143,17 +7836,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   height: 48,
                   padding: const EdgeInsets.symmetric(horizontal: 14),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF021710).withValues(alpha: 0.8),
+                    color: Colors.white.withValues(alpha: 0.85),
                     borderRadius: BorderRadius.circular(18),
                     border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.18),
+                      color: AgakColors.ink.withValues(alpha: 0.18),
                     ),
                   ),
                   child: Row(
                     children: [
-                      const Icon(
+                      Icon(
                         Icons.search_rounded,
-                        color: Colors.white70,
+                        color: AgakColors.ink.withValues(alpha: 0.7),
                         size: 22,
                       ),
                       const SizedBox(width: 10),
@@ -7163,14 +7856,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           textInputAction: TextInputAction.search,
                           onSubmitted: (_) => _searchOnMap(),
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: AgakColors.ink,
                             fontSize: 16,
                           ),
                           decoration: InputDecoration(
                             isCollapsed: true,
                             hintText: 'Search place or mountain...',
                             hintStyle: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.75),
+                              color: AgakColors.ink.withValues(alpha: 0.5),
                               fontSize: 16,
                             ),
                             border: InputBorder.none,
@@ -7192,12 +7885,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       height: 16,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        color: Color(0xFF7CF9A2),
+                                        color: AgakColors.maroon,
                                       ),
                                     )
                                   : const Icon(
                                       Icons.arrow_forward_rounded,
-                                      color: Color(0xFF7CF9A2),
+                                      color: AgakColors.maroon,
                                       size: 20,
                                     ),
                             ),
@@ -7260,15 +7953,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF361515).withValues(alpha: 0.75),
+                      color: AgakColors.maroon.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: const Color(0xFFFF7A7A).withValues(alpha: 0.7),
+                        color: AgakColors.maroon.withValues(alpha: 0.5),
                       ),
                     ),
                     child: Text(
                       _locationMessage!,
-                      style: const TextStyle(color: Colors.white),
+                      style: const TextStyle(color: AgakColors.maroon),
                     ),
                   ),
                 ],
@@ -7314,12 +8007,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
         width: double.infinity,
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
         decoration: BoxDecoration(
-          color: const Color(0xFF02130E).withValues(alpha: 0.9),
+          color: Colors.white.withValues(alpha: 0.92),
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+          border: Border.all(color: AgakColors.ink.withValues(alpha: 0.12)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.32),
+              color: Colors.black.withValues(alpha: 0.18),
               blurRadius: 22,
               offset: const Offset(0, 12),
             ),
@@ -7333,7 +8026,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 const Text(
                   'Nearby Trails',
                   style: TextStyle(
-                    color: Colors.white,
+                    color: AgakColors.ink,
                     fontSize: 19,
                     fontWeight: FontWeight.w700,
                   ),
@@ -7355,7 +8048,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               ? 'View All'
                               : 'View All (${_nearbyTrails.length})',
                           style: const TextStyle(
-                            color: Color(0xFF7CF9A2),
+                            color: AgakColors.maroon,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -7377,7 +8070,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         _nearbyCardCollapsed
                             ? Icons.keyboard_arrow_up_rounded
                             : Icons.keyboard_arrow_down_rounded,
-                        color: Colors.white70,
+                        color: AgakColors.ink.withValues(alpha: 0.7),
                       ),
                     ),
                   ),
@@ -7391,7 +8084,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Text(
                   _nearbyAnchorLabel(),
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.7),
+                    color: AgakColors.ink.withValues(alpha: 0.7),
                     fontSize: 12,
                     fontWeight: FontWeight.w500,
                   ),
@@ -7410,8 +8103,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   const SizedBox(width: 8),
                   _nearbyAnchorChip(
                     label: 'Near Search',
-                    isActive:
-                        _nearbyAnchorMode == _NearbyAnchorMode.nearSearch,
+                    isActive: _nearbyAnchorMode == _NearbyAnchorMode.nearSearch,
                     isEnabled: _searchedTrailAnchor != null,
                     onTap: () {
                       _setNearbyAnchorMode(_NearbyAnchorMode.nearSearch);
@@ -7467,16 +8159,449 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  /// Tries a quick AI rephrase of [deterministic] using
+  /// [aiSystemInstruction]/[aiPrompt], falling back to [deterministic]
+  /// verbatim if the AI is unavailable or the call fails. Used so
+  /// weather/location answers always have a solid, correct answer on
+  /// their own and only get nicer phrasing when the AI actually comes
+  /// through — never depending on it to produce the answer at all.
+  Future<String> _polishWithAi({
+    required String deterministic,
+    required String aiSystemInstruction,
+    required String aiPrompt,
+  }) async {
+    if (_kyrielleAiApiKey.isEmpty) {
+      return deterministic;
+    }
+    final aiAnswer = await fetchGeminiResponse(
+      apiKey: _kyrielleAiApiKey,
+      systemInstruction: aiSystemInstruction,
+      prompt: aiPrompt,
+    );
+    return aiAnswer.isNotEmpty ? aiAnswer : deterministic;
+  }
+
+  /// Answers a weather question directly from a live weather snapshot.
+  /// Unlike routing weather data through the general AI Q&A pipeline as
+  /// mere "context" (which leaves the hiker with nothing if that AI call
+  /// fails), this always has something honest and useful to say on its
+  /// own — the AI is only asked to make the phrasing nicer when it's
+  /// actually reachable, never relied on to relay the data at all.
+  Future<String> _kyrielleWeatherAnswer(String hikerName) async {
+    if (_myLocationCenter == null) {
+      await _loadCurrentLocation();
+    }
+    final location = _myLocationCenter;
+    if (location == null) {
+      return "I can't see your location right now, $hikerName — turn on "
+          'location access in Agakbay and ask again, or check a weather '
+          'app in the meantime.';
+    }
+
+    await _loadWeatherApiKey();
+    AgakWeatherSnapshot? snapshot;
+    if (_weatherApiKey.isNotEmpty) {
+      try {
+        snapshot = await _fetchCurrentWeatherSnapshot(location);
+      } catch (_) {
+        snapshot = null;
+      }
+    }
+    if (snapshot == null) {
+      return "I couldn't pull live weather just now, $hikerName — worth "
+          'checking the sky or a weather app before you head out. Ask me '
+          'again in a bit and I\'ll try again.';
+    }
+
+    final deterministicAnswer = snapshot.isSevere
+        ? "It's looking rough right now — ${snapshot.headline}. I'd hold "
+              'off or pick an easier day for this one, $hikerName.'
+        : snapshot.isCaution
+        ? "It's a bit unsettled — ${snapshot.headline}. Still hikeable, "
+              'just keep an eye on the sky and bring rain gear.'
+        : 'Conditions look good — ${snapshot.headline}. Solid day to be '
+              'out there, $hikerName.';
+
+    final severityLabel = snapshot.isSevere
+        ? 'severe — advise real caution or postponing the hike'
+        : snapshot.isCaution
+        ? 'unsettled — worth a caution'
+        : 'good hiking conditions';
+    return _polishWithAi(
+      deterministic: deterministicAnswer,
+      aiSystemInstruction:
+          'You are Kyrielle, a capable AI trail companion. Rephrase '
+          'the given live weather data into 1-3 natural, encouraging '
+          'sentences addressed to $hikerName by name. Do not invent '
+          'any details beyond what is given.',
+      aiPrompt:
+          "Live weather right now at the hiker's GPS location: "
+          '${snapshot.headline} ($severityLabel).',
+    );
+  }
+
+  /// Inside this radius of a real, findable mountain/trail point, the
+  /// hiker is treated as being on that trail rather than merely near it.
+  static const double _onTrailRadiusKm = 2.0;
+
+  /// Runs the same nearby-mountain lookup [_loadNearbyTrails] uses (live
+  /// Places search, falling back to a text search, falling back to
+  /// Nominatim), so "is the hiker on a trail" and "what's the nearest
+  /// hikeable mountain" both reuse the app's one real trail-finding path
+  /// instead of a second, possibly-inconsistent one.
+  Future<List<_NearbyTrail>> _findMountainsNear(
+    LatLng center, {
+    required double maxDistanceKm,
+  }) async {
+    await _loadMapsApiKey();
+    List<_NearbyTrail> trails = const <_NearbyTrail>[];
+    if (_mapsApiKey.isNotEmpty) {
+      trails = await _fetchNearbyTrailsByDistance(
+        center,
+        maxDistanceKm: maxDistanceKm,
+      );
+    }
+    if (trails.isEmpty && _mapsApiKey.isNotEmpty) {
+      trails = await _fetchNearbyTrailsFromPlaces(
+        center,
+        maxDistanceKm: maxDistanceKm,
+      );
+    }
+    if (trails.isEmpty) {
+      trails = await _fetchNearbyTrailsFromNominatim(
+        center,
+        maxDistanceKm: maxDistanceKm,
+      );
+    }
+    return trails;
+  }
+
+  /// Reverse-geocodes [point] to a human city/town/neighborhood label via
+  /// Nominatim (same free OSM host [_fetchNearbyTrailsFromNominatim]
+  /// already talks to, so this needs no new API key). Returns null if the
+  /// lookup fails rather than guessing.
+  Future<String?> _reverseGeocodeCityName(LatLng point) async {
+    try {
+      final uri = Uri.https('nominatim.openstreetmap.org', '/reverse', {
+        'lat': '${point.latitude}',
+        'lon': '${point.longitude}',
+        'format': 'jsonv2',
+        'zoom': '14',
+      });
+      final response = await http
+          .get(
+            uri,
+            headers: const {
+              'User-Agent': 'Agakbay/1.0',
+              'Accept': 'application/json',
+            },
+          )
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return null;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic>) return null;
+      final address = decoded['address'];
+      if (address is Map<String, dynamic>) {
+        final place =
+            address['city'] ??
+            address['town'] ??
+            address['municipality'] ??
+            address['village'] ??
+            address['suburb'] ??
+            address['county'];
+        if (place != null) {
+          final placeStr = place.toString();
+          final province = address['state'] ?? address['province'];
+          if (province != null &&
+              province.toString().isNotEmpty &&
+              province.toString() != placeStr) {
+            return '$placeStr, ${province.toString()}';
+          }
+          return placeStr;
+        }
+      }
+      final displayName = decoded['display_name']?.toString();
+      if (displayName != null && displayName.isNotEmpty) {
+        return _extractProvinceOrCity(displayName);
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Answers a "where am I" question directly: classifies the hiker's
+  /// live GPS point as either on an actual trail or in a non-hiking area
+  /// first (never guessing from raw coordinates), builds a ready answer
+  /// from that fact, and only asks the AI to polish the phrasing — same
+  /// self-contained-first rationale as [_kyrielleWeatherAnswer]. When
+  /// they're not on a trail, this also finds the nearest real hikeable
+  /// mountain to proactively suggest, and hands that trail back so the
+  /// chat can show a tappable mention card for it — mirroring how a
+  /// name-matched mountain does.
+  Future<({String text, _NearbyTrail? recommendedMountain})>
+  _kyrielleLocationAnswer(String hikerName) async {
+    if (_myLocationCenter == null) {
+      await _loadCurrentLocation();
+    }
+    final location = _myLocationCenter;
+    if (location == null) {
+      return (
+        text:
+            "I can't see your location right now, $hikerName — turn on "
+            'location access in Agakbay and ask again.',
+        recommendedMountain: null,
+      );
+    }
+
+    final onTrailMatches = await _findMountainsNear(
+      location,
+      maxDistanceKm: _onTrailRadiusKm,
+    );
+    if (onTrailMatches.isNotEmpty) {
+      final trail = onTrailMatches.first;
+      final elevationText = trail.elevationMasl > 0
+          ? '${trail.elevationMasl} MASL'
+          : 'elevation not on file';
+      final answer = await _polishWithAi(
+        deterministic:
+            "You're right on the ${trail.name} trail in "
+            '${trail.provinceOrCity}, around $elevationText. Want the '
+            'nearest campsite or trail info?',
+        aiSystemInstruction:
+            'You are Kyrielle, a capable AI trail companion. Rephrase '
+            'the given live location data into 1-3 natural, encouraging '
+            'sentences addressed to $hikerName by name — describe this '
+            'as being on the trail (name the mountain; add elevation or '
+            'nearest-campsite knowledge of your own if useful). Never '
+            'call this a city or non-hiking location.',
+        aiPrompt:
+            "Live location: the hiker's GPS puts them ON the "
+            '${trail.name} trail in ${trail.provinceOrCity} '
+            '($elevationText).',
+      );
+      return (text: answer, recommendedMountain: trail);
+    }
+
+    final cityName = await _reverseGeocodeCityName(location);
+    final place = (cityName == null || cityName.isEmpty)
+        ? "an area I couldn't identify by name"
+        : cityName;
+    final nearby = await _findMountainsNear(location, maxDistanceKm: 80.0);
+    if (nearby.isEmpty) {
+      final answer = await _polishWithAi(
+        deterministic:
+            "You're in $place — no trail there, and I couldn't find a "
+            "hikeable mountain nearby in the app's data right now.",
+        aiSystemInstruction:
+            'You are Kyrielle, a capable AI trail companion. Rephrase '
+            'the given live location data into 1-2 natural sentences '
+            'addressed to $hikerName by name. This is NOT a hiking '
+            'trail — never use trail language for it. State plainly '
+            'where they are; do not invent a nearby mountain since none '
+            'was found.',
+        aiPrompt: "Live location: the hiker's GPS puts them in $place.",
+      );
+      return (text: answer, recommendedMountain: null);
+    }
+    final closest = nearby.first;
+    final distanceLabel = closest.distanceKm > 0
+        ? '${closest.distanceKm.toStringAsFixed(1)} km away'
+        : 'nearby';
+    final answer = await _polishWithAi(
+      deterministic:
+          "You're in $place. No trail here, but ${closest.name} is "
+          "about $distanceLabel and a good hike if you're heading out "
+          '— want directions or trail info?',
+      aiSystemInstruction:
+          'You are Kyrielle, a capable AI trail companion. Rephrase the '
+          'given live location data into 1-3 natural, encouraging '
+          'sentences addressed to $hikerName by name. This is NOT a '
+          'hiking trail — never use trail language for it or call it a '
+          'trail. State plainly where they are, then proactively '
+          'recommend the given nearby mountain as a hike.',
+      aiPrompt:
+          "Live location: the hiker's GPS puts them in $place. Nearest "
+          'real hikeable mountain: ${closest.name} ($distanceLabel).',
+    );
+    return (text: answer, recommendedMountain: closest);
+  }
+
+  /// Instant, deterministic replies for companion-style small talk —
+  /// Kyrielle should never stumble on "what's your name" waiting on a
+  /// network round trip, and these double as a chance to act like an
+  /// actual trail buddy (encourage, then nudge toward a concrete next
+  /// step) instead of a flat assistant. Returns null for anything that
+  /// isn't small talk, so real hiking questions still go to the full
+  /// answer pipeline below.
+  String? _kyrielleSmallTalkReply(String normalizedQuestion, String hikerName) {
+    const namePhrases = [
+      "what's your name",
+      'what is your name',
+      'who are you',
+      'what are you',
+    ];
+    if (namePhrases.any(normalizedQuestion.contains)) {
+      return "I'm Kyrielle — your trail companion here in Agakbay, "
+          '$hikerName! I\'ll help you plan, check conditions, and keep '
+          "you company once you're out there. Want me to check the "
+          'weather or find the nearest trail to get you started?';
+    }
+    final trimmed = normalizedQuestion.trim();
+    const greetingPhrases = ['hello', 'hey kyrielle', 'hi kyrielle'];
+    if (trimmed == 'hi' ||
+        trimmed == 'hey' ||
+        greetingPhrases.any(normalizedQuestion.contains)) {
+      return 'Hey $hikerName! Good to have you here. Got a mountain in '
+          'mind, or want me to suggest one nearby?';
+    }
+    const thanksPhrases = ['thank you', 'thanks', 'thx'];
+    if (thanksPhrases.any(normalizedQuestion.contains)) {
+      return "Anytime, $hikerName — that's what I'm here for. You've got "
+          'this. Ready for the next mountain?';
+    }
+    const howAreYouPhrases = ['how are you', "how're you", 'how you doing'];
+    if (howAreYouPhrases.any(normalizedQuestion.contains)) {
+      return 'Doing great and ready for the trail, $hikerName! How about '
+          'you — planning a hike soon, or just scouting ideas?';
+    }
+    // A real companion notices when you're not okay before jumping to
+    // trail logistics — this checks in first, and only then offers
+    // hiking as an option, not a prescription.
+    const feelingDownPhrases = [
+      'im sad',
+      "i'm sad",
+      'i am sad',
+      'feeling sad',
+      'feeling down',
+      'im down',
+      "i'm down",
+      'im stressed',
+      "i'm stressed",
+      'i am stressed',
+      'feeling stressed',
+      'im anxious',
+      "i'm anxious",
+      'feeling anxious',
+      'feeling low',
+      "i'm not okay",
+      'im not okay',
+      'im depressed',
+      "i'm depressed",
+      'having a bad day',
+      'rough day',
+      'im tired',
+      "i'm tired",
+      'feeling tired',
+      'im overwhelmed',
+      "i'm overwhelmed",
+    ];
+    if (feelingDownPhrases.any(normalizedQuestion.contains)) {
+      return "I'm sorry you're feeling that way, $hikerName — you don't "
+          'need a reason to hike, so no pressure either way. That said, '
+          'a lot of hikers say time on the trail genuinely helps clear '
+          "their head. Want me to suggest an easy nearby trail for some "
+          "fresh air? Either way, how are you holding up?";
+    }
+    return null;
+  }
+
+  /// Builds the tappable mention card for [trail], or null. Shared by
+  /// every answer path (name-matched, location-recommended) so the card
+  /// always behaves the same way.
+  KyrielleMountainMention? _kyrielleMentionFor(_NearbyTrail? trail) {
+    if (trail == null) return null;
+    final distanceLabel = trail.distanceKm > 0
+        ? '${trail.distanceKm.toStringAsFixed(1)} km away'
+        : trail.provinceOrCity;
+    return KyrielleMountainMention(
+      name: trail.name,
+      subtitle: '$distanceLabel · tap to view on map',
+      onTap: () {
+        Navigator.of(context).pop();
+        unawaited(_focusTrailAndOpenDetails(trail));
+      },
+    );
+  }
+
+  Future<KyrielleAnswer> _answerKyrielleQuestion(String question) async {
+    final firstName = _communityDisplayName().trim().split(' ').first;
+    final hikerName = firstName.isEmpty ? 'this hiker' : firstName;
+    final normalizedQuestion = question.toLowerCase();
+
+    final smallTalk = _kyrielleSmallTalkReply(normalizedQuestion, hikerName);
+    if (smallTalk != null) {
+      return KyrielleAnswer(text: smallTalk);
+    }
+
+    if (_kyrielleAiApiKey.isEmpty) {
+      _kyrielleAiApiKey = await loadGeminiApiKey();
+    }
+
+    // Weather and location both have dedicated, always-answer-something
+    // handlers (never dependent on the general AI/mountain-search
+    // pipeline below actually succeeding) — see their doc comments.
+    if (_isWeatherQuestion(normalizedQuestion)) {
+      return KyrielleAnswer(text: await _kyrielleWeatherAnswer(hikerName));
+    }
+    if (_isLocationQuestion(normalizedQuestion)) {
+      final result = await _kyrielleLocationAnswer(hikerName);
+      return KyrielleAnswer(
+        text: result.text,
+        mountain: _kyrielleMentionFor(result.recommendedMountain),
+      );
+    }
+
+    _NearbyTrail? mentionedTrail;
+    final text = await _answerHikeAssistantQuestion(
+      question: question,
+      initialTrail: _searchedTrailAnchor,
+      searchMountainInMindanao: _searchMountainInMindanao,
+      fetchMountainOrganizers: _fetchMountainOrganizers,
+      aiApiKey: _kyrielleAiApiKey,
+      systemInstruction:
+          'You are Kyrielle, an AI trail companion inside the Agakbay '
+          'hiking app for Mindanao, Philippines. You are talking with '
+          '$hikerName — speak to them directly and by name every so '
+          'often, the way a real hiking buddy would, not like a generic '
+          'assistant answering a search query. Your tone is encouraging, '
+          'concise, and grounded in practical trail knowledge — avoid '
+          "overly cute or childish language; you're a capable guide, not "
+          'a mascot performing for the user. Answer whatever they '
+          'actually ask — trail difficulty, elevation, safety, gear, or '
+          'general hiking advice — using your own knowledge. Only talk '
+          'about organizers/guides when they ask about finding one or '
+          'contact info is provided to you. Keep replies conversational, '
+          '2-4 sentences.',
+      onMountainMentioned: (trail) => mentionedTrail = trail,
+    );
+
+    return KyrielleAnswer(
+      text: text,
+      mountain: _kyrielleMentionFor(mentionedTrail),
+    );
+  }
+
+  Future<void> _openKyrielleCompanion() async {
+    final firstName = _communityDisplayName().trim().split(' ').first;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => KyrielleCompanionChatScreen(
+          userFirstName: firstName.isEmpty ? 'there' : firstName,
+          onNearestTrail: () {
+            Navigator.of(context).pop();
+            _openNearbyTrailsSheet();
+          },
+          askQuestion: _answerKyrielleQuestion,
+        ),
+      ),
+    );
+  }
+
   // ignore: unused_element
   Widget _buildCommunityTab() {
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
-        ),
-      ),
+      decoration: BoxDecoration(gradient: AgakColors.screenBackground),
       child: SafeArea(
         child: Column(
           children: [
@@ -7489,7 +8614,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   const Text(
                     'Agakbay',
                     style: TextStyle(
-                      color: Colors.white,
+                      color: AgakColors.ink,
                       fontSize: 28,
                       fontWeight: FontWeight.w700,
                     ),
@@ -7503,7 +8628,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const Text(
               'Community',
               style: TextStyle(
-                color: Colors.white,
+                color: AgakColors.ink,
                 fontSize: 36,
                 fontWeight: FontWeight.w800,
               ),
@@ -7511,7 +8636,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Text(
               'Share your hikes. Inspire others.',
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.72),
+                color: AgakColors.ink.withValues(alpha: 0.72),
                 fontSize: 14,
               ),
             ),
@@ -7521,7 +8646,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: Container(
                 padding: const EdgeInsets.all(4),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.08),
+                  color: AgakColors.ink.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(14),
                 ),
                 child: Row(
@@ -7538,142 +8663,138 @@ class _DashboardScreenState extends State<DashboardScreen> {
               child: Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.06),
+                  color: AgakColors.ink.withValues(alpha: 0.06),
                   borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: 0.08),
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (_communityComposerImage != null) ...[
-                          Stack(
-                            children: [
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(10),
-                                child: Image.file(
-                                  File(_communityComposerImage!.path),
-                                  height: 140,
-                                  width: double.infinity,
-                                  fit: BoxFit.cover,
-                                ),
-                              ),
-                              Positioned(
-                                top: 6,
-                                right: 6,
-                                child: GestureDetector(
-                                  onTap: () => setState(
-                                    () => _communityComposerImage = null,
-                                  ),
-                                  child: Container(
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withValues(
-                                        alpha: 0.6,
-                                      ),
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: const Icon(
-                                      Icons.close_rounded,
-                                      color: Colors.white,
-                                      size: 16,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
+                  border: Border.all(
+                    color: AgakColors.ink.withValues(alpha: 0.08),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_communityComposerImage != null) ...[
+                      Stack(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: Image.file(
+                              File(_communityComposerImage!.path),
+                              height: 140,
+                              width: double.infinity,
+                              fit: BoxFit.cover,
+                            ),
                           ),
-                          const SizedBox(height: 8),
-                        ],
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            IconButton(
-                              onPressed: _postingCommunityPost
-                                  ? null
-                                  : _pickCommunityComposerImage,
-                              icon: const Icon(
-                                Icons.add_photo_alternate_rounded,
-                                color: Color(0xFF7CF9A2),
+                          Positioned(
+                            top: 6,
+                            right: 6,
+                            child: GestureDetector(
+                              onTap: () => setState(
+                                () => _communityComposerImage = null,
+                              ),
+                              child: Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.6),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.close_rounded,
+                                  color: Colors.white,
+                                  size: 16,
+                                ),
                               ),
                             ),
-                            Expanded(
-                              child: TextField(
-                                controller: _communityComposerController,
-                                minLines: 1,
-                                maxLines: 3,
-                                style: const TextStyle(color: Colors.white),
-                                decoration: InputDecoration(
-                                  hintText: "What's on your trail today?",
-                                  hintStyle: TextStyle(
-                                    color: Colors.white.withValues(
-                                      alpha: 0.62,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        IconButton(
+                          onPressed: _postingCommunityPost
+                              ? null
+                              : _pickCommunityComposerImage,
+                          icon: const Icon(
+                            Icons.add_photo_alternate_rounded,
+                            color: AgakColors.maroon,
+                          ),
+                        ),
+                        Expanded(
+                          child: TextField(
+                            controller: _communityComposerController,
+                            minLines: 1,
+                            maxLines: 3,
+                            style: const TextStyle(color: AgakColors.ink),
+                            decoration: InputDecoration(
+                              hintText: "What's on your trail today?",
+                              hintStyle: TextStyle(
+                                color: AgakColors.ink.withValues(alpha: 0.5),
+                              ),
+                              border: InputBorder.none,
+                              isCollapsed: true,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          height: 42,
+                          child: ElevatedButton(
+                            onPressed: _postingCommunityPost
+                                ? null
+                                : () async {
+                                    final content = _communityComposerController
+                                        .text
+                                        .trim();
+                                    final image = _communityComposerImage;
+                                    if (content.isEmpty && image == null) {
+                                      return;
+                                    }
+                                    FocusManager.instance.primaryFocus
+                                        ?.unfocus();
+                                    setState(
+                                      () => _postingCommunityPost = true,
+                                    );
+                                    await _createCommunityPost(
+                                      content,
+                                      image: image,
+                                    );
+                                    _communityComposerController.clear();
+                                    setState(() {
+                                      _communityComposerImage = null;
+                                      _postingCommunityPost = false;
+                                    });
+                                  },
+                            style: ElevatedButton.styleFrom(
+                              foregroundColor: AgakColors.cream,
+                              backgroundColor: AgakColors.maroon,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                            ),
+                            child: _postingCommunityPost
+                                ? const SizedBox(
+                                    height: 18,
+                                    width: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: AgakColors.cream,
+                                    ),
+                                  )
+                                : const Text(
+                                    'Post',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
                                     ),
                                   ),
-                                  border: InputBorder.none,
-                                  isCollapsed: true,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            SizedBox(
-                              height: 42,
-                              child: ElevatedButton(
-                                onPressed: _postingCommunityPost
-                                    ? null
-                                    : () async {
-                                        final content =
-                                            _communityComposerController.text
-                                                .trim();
-                                        final image = _communityComposerImage;
-                                        if (content.isEmpty && image == null) {
-                                          return;
-                                        }
-                                        FocusManager.instance.primaryFocus
-                                            ?.unfocus();
-                                        setState(
-                                          () => _postingCommunityPost = true,
-                                        );
-                                        await _createCommunityPost(
-                                          content,
-                                          image: image,
-                                        );
-                                        _communityComposerController.clear();
-                                        setState(() {
-                                          _communityComposerImage = null;
-                                          _postingCommunityPost = false;
-                                        });
-                                      },
-                                style: ElevatedButton.styleFrom(
-                                  foregroundColor: Colors.black,
-                                  backgroundColor: const Color(0xFF53D97A),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                ),
-                                child: _postingCommunityPost
-                                    ? const SizedBox(
-                                        height: 18,
-                                        width: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.black,
-                                        ),
-                                      )
-                                    : const Text(
-                                        'Post',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                       ],
                     ),
-                  ),
+                  ],
+                ),
+              ),
             ),
             const SizedBox(height: 8),
             Expanded(
@@ -7684,7 +8805,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     return const Center(
                       child: CircularProgressIndicator(
                         strokeWidth: 2.2,
-                        color: Color(0xFF7CF9A2),
+                        color: AgakColors.maroon,
                       ),
                     );
                   }
@@ -7715,7 +8836,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           emptyText,
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.74),
+                            color: AgakColors.ink.withValues(alpha: 0.74),
                           ),
                         ),
                       ),
@@ -7751,13 +8872,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
           alignment: Alignment.center,
           padding: const EdgeInsets.symmetric(vertical: 9),
           decoration: BoxDecoration(
-            color: isActive ? const Color(0xFF53D97A) : Colors.transparent,
+            color: isActive ? AgakColors.maroon : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
           ),
           child: Text(
             label,
             style: TextStyle(
-              color: isActive ? Colors.black : Colors.white70,
+              color: isActive
+                  ? AgakColors.cream
+                  : AgakColors.ink.withValues(alpha: 0.6),
               fontWeight: FontWeight.w700,
               fontSize: 12,
             ),
@@ -7769,13 +8892,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _buildMyHikesTab() {
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
-        ),
-      ),
+      decoration: BoxDecoration(gradient: AgakColors.screenBackground),
       child: SafeArea(
         child: Column(
           children: [
@@ -7788,7 +8905,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     child: Text(
                       'My Hikes',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: AgakColors.ink,
                         fontSize: 28,
                         fontWeight: FontWeight.w800,
                       ),
@@ -7803,12 +8920,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             height: 18,
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: Color(0xFF7CF9A2),
+                              color: AgakColors.maroon,
                             ),
                           )
                         : const Icon(
                             Icons.sync_rounded,
-                            color: Color(0xFF7CF9A2),
+                            color: AgakColors.maroon,
                           ),
                   ),
                 ],
@@ -7852,12 +8969,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFF061F16),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.12)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.22),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 18,
             offset: const Offset(0, 10),
           ),
@@ -7872,12 +8989,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 width: 42,
                 height: 42,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF53D97A).withValues(alpha: 0.14),
+                  color: AgakColors.maroon.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(14),
                 ),
                 child: const Icon(
                   Icons.landscape_rounded,
-                  color: Color(0xFF7CF9A2),
+                  color: AgakColors.maroon,
                 ),
               ),
               const SizedBox(width: 10),
@@ -7888,7 +9005,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const Text(
                       'Trail Log',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: AgakColors.ink,
                         fontSize: 17,
                         fontWeight: FontWeight.w900,
                       ),
@@ -7901,7 +9018,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.68),
+                        color: AgakColors.ink.withValues(alpha: 0.68),
                         fontSize: 12,
                       ),
                     ),
@@ -7916,19 +9033,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
               _myHikesSummaryStat(
                 label: 'Hikes',
                 value: hikeCount.toString(),
-                color: const Color(0xFF7CF9A2),
+                color: AgakColors.maroon,
               ),
               const SizedBox(width: 8),
               _myHikesSummaryStat(
                 label: 'Distance',
                 value: '${totalDistanceKm.toStringAsFixed(1)} km',
-                color: const Color(0xFF48D1FF),
+                color: AgakColors.olive,
               ),
               const SizedBox(width: 8),
               _myHikesSummaryStat(
                 label: 'Summits',
                 value: summitCount.toString(),
-                color: const Color(0xFFFFD76A),
+                color: AgakColors.goldDark,
               ),
             ],
           ),
@@ -7946,7 +9063,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.055),
+          color: AgakColors.ink.withValues(alpha: 0.055),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: color.withValues(alpha: 0.18)),
         ),
@@ -7958,7 +9075,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.62),
+                color: AgakColors.ink.withValues(alpha: 0.62),
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
               ),
@@ -7999,13 +9116,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 color: selected
-                    ? const Color(0xFF53D97A)
-                    : Colors.white.withValues(alpha: 0.06),
+                    ? AgakColors.maroon
+                    : AgakColors.ink.withValues(alpha: 0.06),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
                   color: selected
                       ? Colors.transparent
-                      : Colors.white.withValues(alpha: 0.12),
+                      : AgakColors.ink.withValues(alpha: 0.12),
                 ),
               ),
               child: Row(
@@ -8014,7 +9131,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   Icon(
                     icon,
                     size: 17,
-                    color: selected ? const Color(0xFF03150E) : Colors.white70,
+                    color: selected
+                        ? AgakColors.cream
+                        : AgakColors.ink.withValues(alpha: 0.6),
                   ),
                   const SizedBox(width: 6),
                   Flexible(
@@ -8024,8 +9143,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: selected
-                            ? const Color(0xFF03150E)
-                            : Colors.white70,
+                            ? AgakColors.cream
+                            : AgakColors.ink.withValues(alpha: 0.6),
                         fontSize: 12,
                         fontWeight: FontWeight.w800,
                       ),
@@ -8040,16 +9159,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 5),
                       decoration: BoxDecoration(
                         color: selected
-                            ? const Color(0xFF03150E).withValues(alpha: 0.12)
-                            : const Color(0xFF7CF9A2).withValues(alpha: 0.16),
+                            ? AgakColors.cream.withValues(alpha: 0.22)
+                            : AgakColors.maroon.withValues(alpha: 0.14),
                         borderRadius: BorderRadius.circular(999),
                       ),
                       child: Text(
                         count.toString(),
                         style: TextStyle(
                           color: selected
-                              ? const Color(0xFF03150E)
-                              : const Color(0xFF7CF9A2),
+                              ? AgakColors.cream
+                              : AgakColors.maroon,
                           fontSize: 10,
                           fontWeight: FontWeight.w900,
                         ),
@@ -8126,7 +9245,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           return const Center(
             child: CircularProgressIndicator(
               strokeWidth: 2.4,
-              color: Color(0xFF7CF9A2),
+              color: AgakColors.maroon,
             ),
           );
         }
@@ -8199,7 +9318,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: Text(
         label,
         style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.72),
+          color: AgakColors.ink.withValues(alpha: 0.72),
           fontSize: 12,
           fontWeight: FontWeight.w800,
           letterSpacing: 0.4,
@@ -8222,12 +9341,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(22, 24, 22, 22),
           decoration: BoxDecoration(
-            color: const Color(0xFF061F16),
+            color: Colors.white,
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.11)),
+            border: Border.all(color: AgakColors.ink.withValues(alpha: 0.11)),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.26),
+                color: Colors.black.withValues(alpha: 0.1),
                 blurRadius: 20,
                 offset: const Offset(0, 10),
               ),
@@ -8242,23 +9361,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 decoration: BoxDecoration(
                   gradient: RadialGradient(
                     colors: [
-                      const Color(0xFF53D97A).withValues(alpha: 0.28),
-                      const Color(0xFF53D97A).withValues(alpha: 0.06),
+                      AgakColors.maroon.withValues(alpha: 0.24),
+                      AgakColors.maroon.withValues(alpha: 0.04),
                     ],
                   ),
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: const Color(0xFF53D97A).withValues(alpha: 0.3),
+                    color: AgakColors.maroon.withValues(alpha: 0.3),
                   ),
                 ),
-                child: Icon(icon, size: 36, color: const Color(0xFF7CF9A2)),
+                child: Icon(icon, size: 36, color: AgakColors.maroon),
               ),
               const SizedBox(height: 14),
               Text(
                 title,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
-                  color: Colors.white,
+                  color: AgakColors.ink,
                   fontSize: 19,
                   fontWeight: FontWeight.w900,
                 ),
@@ -8268,7 +9387,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 message,
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.72),
+                  color: AgakColors.ink.withValues(alpha: 0.72),
                   height: 1.35,
                 ),
               ),
@@ -8281,8 +9400,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     icon: const Icon(Icons.explore_rounded),
                     label: Text(actionLabel),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF53D97A),
-                      foregroundColor: const Color(0xFF03150E),
+                      backgroundColor: AgakColors.maroon,
+                      foregroundColor: AgakColors.cream,
                       padding: const EdgeInsets.symmetric(vertical: 14),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
@@ -8316,7 +9435,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       title: trailName,
       subtitle: province.isEmpty ? mountainName : '$mountainName · $province',
       statusLabel: 'Waiting Upload',
-      statusColor: const Color(0xFFFFD76A),
+      statusColor: AgakColors.goldDark,
       statusIcon: Icons.cloud_off_rounded,
       dateText: _formatDate(submission.createdAt),
       metrics: [
@@ -8326,7 +9445,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         '$routePoints points',
         if (stationCount > 0) '$stationCount stations',
       ],
-      footer: 'This recording will upload and become a trail automatically '
+      footer:
+          'This recording will upload and become a trail automatically '
           'once you\'re back online.',
     );
   }
@@ -8383,12 +9503,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: const Color(0xFF061F16),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: statusColor.withValues(alpha: 0.28)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.2),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 14,
             offset: const Offset(0, 8),
           ),
@@ -8425,7 +9545,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 16,
                               fontWeight: FontWeight.w900,
                             ),
@@ -8436,7 +9556,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.68),
+                              color: AgakColors.ink.withValues(alpha: 0.68),
                               fontSize: 12,
                             ),
                           ),
@@ -8467,16 +9587,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.calendar_month_rounded,
-                      color: Colors.white54,
+                      color: AgakColors.ink.withValues(alpha: 0.54),
                       size: 15,
                     ),
                     const SizedBox(width: 6),
                     Text(
                       dateText,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.64),
+                        color: AgakColors.ink.withValues(alpha: 0.64),
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
                       ),
@@ -8492,7 +9612,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         .map(
                           (metric) => _myHikesChip(
                             label: metric,
-                            color: Colors.white.withValues(alpha: 0.78),
+                            color: AgakColors.ink.withValues(alpha: 0.78),
                           ),
                         )
                         .toList(growable: false),
@@ -8502,7 +9622,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   footer,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.72),
+                    color: AgakColors.ink.withValues(alpha: 0.72),
                     height: 1.32,
                     fontSize: 12,
                   ),
@@ -8519,9 +9639,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.08),
+        color: AgakColors.ink.withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
       ),
       child: Text(
         label,
@@ -8556,11 +9676,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Color _submissionStatusColor(String status) {
     return switch (status) {
-      'included' => const Color(0xFF53D97A),
-      'checked' => const Color(0xFF7CF9A2),
-      'accepted' => const Color(0xFF7CF9A2),
-      'rejected' => const Color(0xFFFF7A7A),
-      _ => const Color(0xFFFFD76A),
+      'included' => AgakColors.olive,
+      'checked' => AgakColors.olive,
+      'accepted' => AgakColors.olive,
+      'rejected' => AgakColors.maroon,
+      _ => AgakColors.goldDark,
     };
   }
 
@@ -8578,13 +9698,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final user = _firebaseAuth.currentUser;
     final pendingCount = _pendingTrailSubmissions.length;
     return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xFF15432D), Color(0xFF082A1C), Color(0xFF020D09)],
-        ),
-      ),
+      decoration: BoxDecoration(gradient: AgakColors.screenBackground),
       child: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
@@ -8592,7 +9706,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const Text(
               'Profile',
               style: TextStyle(
-                color: Colors.white,
+                color: AgakColors.ink,
                 fontSize: 30,
                 fontWeight: FontWeight.w900,
               ),
@@ -8647,14 +9761,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     _profileStatTile(
                       label: 'Completed',
                       value: _completedHikeSessions.length.toString(),
-                      color: const Color(0xFF7CF9A2),
+                      color: AgakColors.maroon,
                       onTap: () => _openMyHikesView(_MyHikesView.completed),
                     ),
                     const SizedBox(width: 10),
                     _profileStatTile(
                       label: 'Recorded',
                       value: pendingCount.toString(),
-                      color: const Color(0xFF7CF9A2),
+                      color: AgakColors.maroon,
                       onTap: () => _openMyHikesView(_MyHikesView.recorded),
                     ),
                   ],
@@ -8662,7 +9776,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 const SizedBox(height: 10),
                 _profileActionTile(
                   icon: Icons.route_rounded,
-                  iconColor: const Color(0xFF7CF9A2),
+                  iconColor: AgakColors.maroon,
                   title: 'Recorded Trails',
                   subtitle: 'View uploaded and saved trail recordings',
                   trailing: Icons.chevron_right_rounded,
@@ -8672,19 +9786,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
             const SizedBox(height: 16),
             _profileSection(
-              title: 'AGAK Companion',
+              title: 'Kyrielle Companion',
               children: [
                 _profileActionTile(
                   icon: Icons.auto_awesome_rounded,
-                  iconColor: const Color(0xFF53D97A),
-                  title: "Meet Agak's Emotions",
+                  iconColor: AgakColors.olive,
+                  title: "Meet Kyrielle's Emotions",
                   subtitle: 'See how your companion reacts to your hikes',
                   trailing: Icons.chevron_right_rounded,
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (context) =>
-                            const AgakEmotionShowcaseScreen(),
+                        builder: (context) => const AgakEmotionShowcaseScreen(),
                       ),
                     );
                   },
@@ -8702,7 +9815,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   subtitle: user?.email ?? 'No email',
                   trailing: Icons.chevron_right_rounded,
                   onTap: () async {
-                    await _firebaseAuth.signOut();
+                    final confirmed = await _showLogoutConfirmationDialog();
+                    if (confirmed) {
+                      await _firebaseAuth.signOut();
+                    }
                   },
                 ),
               ],
@@ -8719,12 +9835,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF061F16),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.12)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.22),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 18,
             offset: const Offset(0, 10),
           ),
@@ -8778,24 +9894,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     width: 24,
                     height: 24,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF53D97A),
+                      color: AgakColors.maroon,
                       shape: BoxShape.circle,
-                      border: Border.all(
-                        color: const Color(0xFF061F16),
-                        width: 2,
-                      ),
+                      border: Border.all(color: Colors.white, width: 2),
                     ),
                     child: _uploadingProfilePhoto
                         ? const Padding(
                             padding: EdgeInsets.all(5),
                             child: CircularProgressIndicator(
                               strokeWidth: 2,
-                              color: Color(0xFF03150E),
+                              color: AgakColors.cream,
                             ),
                           )
                         : const Icon(
                             Icons.camera_alt_rounded,
-                            color: Color(0xFF03150E),
+                            color: AgakColors.cream,
                             size: 14,
                           ),
                   ),
@@ -8816,7 +9929,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: AgakColors.ink,
                           fontSize: 20,
                           fontWeight: FontWeight.w900,
                         ),
@@ -8833,12 +9946,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               height: 16,
                               child: CircularProgressIndicator(
                                 strokeWidth: 2,
-                                color: Color(0xFF7CF9A2),
+                                color: AgakColors.maroon,
                               ),
                             )
                           : const Icon(
                               Icons.edit_rounded,
-                              color: Color(0xFF7CF9A2),
+                              color: AgakColors.maroon,
                               size: 19,
                             ),
                     ),
@@ -8849,7 +9962,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.66),
+                    color: AgakColors.ink.withValues(alpha: 0.6),
                     fontSize: 13,
                   ),
                 ),
@@ -8858,7 +9971,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   spacing: 8,
                   runSpacing: 8,
                   children: [
-                    _profileBadge(_accountTypeLabel(), const Color(0xFF7CF9A2)),
+                    _profileBadge(_accountTypeLabel(), AgakColors.maroon),
                   ],
                 ),
               ],
@@ -8900,7 +10013,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Text(
             title,
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.74),
+              color: AgakColors.ink.withValues(alpha: 0.74),
               fontSize: 13,
               fontWeight: FontWeight.w900,
               letterSpacing: 0.5,
@@ -8909,9 +10022,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         Container(
           decoration: BoxDecoration(
-            color: const Color(0xFF061F16),
+            color: Colors.white,
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+            border: Border.all(color: AgakColors.ink.withValues(alpha: 0.1)),
           ),
           child: Column(
             children: [
@@ -8920,7 +10033,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 if (i != children.length - 1)
                   Divider(
                     height: 1,
-                    color: Colors.white.withValues(alpha: 0.08),
+                    color: AgakColors.ink.withValues(alpha: 0.08),
                     indent: 58,
                   ),
               ],
@@ -8967,7 +10080,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: AgakColors.ink,
                         fontSize: 15,
                         fontWeight: FontWeight.w800,
                       ),
@@ -8978,7 +10091,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.62),
+                        color: AgakColors.ink.withValues(alpha: 0.62),
                         fontSize: 12,
                       ),
                     ),
@@ -8986,7 +10099,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              Icon(trailing, color: Colors.white54, size: 21),
+              Icon(
+                trailing,
+                color: AgakColors.ink.withValues(alpha: 0.54),
+                size: 21,
+              ),
             ],
           ),
         ),
@@ -9009,7 +10126,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Container(
             padding: const EdgeInsets.all(13),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.055),
+              color: AgakColors.ink.withValues(alpha: 0.055),
               borderRadius: BorderRadius.circular(16),
               border: Border.all(color: color.withValues(alpha: 0.18)),
             ),
@@ -9019,7 +10136,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   label,
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.64),
+                    color: AgakColors.ink.withValues(alpha: 0.64),
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
                   ),
@@ -9052,11 +10169,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           width: 44,
           height: 44,
           decoration: BoxDecoration(
-            color: const Color(0xFF02150E).withValues(alpha: 0.75),
+            color: Colors.white.withValues(alpha: 0.85),
             shape: BoxShape.circle,
-            border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+            border: Border.all(color: AgakColors.ink.withValues(alpha: 0.16)),
           ),
-          child: Icon(icon, color: Colors.white, size: 24),
+          child: Icon(icon, color: AgakColors.ink, size: 24),
         ),
       ),
     );
@@ -9077,19 +10194,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
             color: isActive
-                ? const Color(0xFF53D97A)
-                : const Color(0xFF041B13).withValues(alpha: 0.78),
+                ? AgakColors.maroon
+                : Colors.white.withValues(alpha: 0.82),
             borderRadius: BorderRadius.circular(24),
             border: Border.all(
               color: isActive
                   ? Colors.transparent
-                  : Colors.white.withValues(alpha: 0.18),
+                  : AgakColors.ink.withValues(alpha: 0.18),
             ),
           ),
           child: Text(
             label,
             style: TextStyle(
-              color: isActive ? Colors.black : Colors.white,
+              color: isActive ? AgakColors.cream : AgakColors.ink,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -9111,11 +10228,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           width: 42,
           height: 42,
           decoration: BoxDecoration(
-            color: const Color(0xFF041B13).withValues(alpha: 0.9),
+            color: Colors.white.withValues(alpha: 0.9),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+            border: Border.all(color: AgakColors.ink.withValues(alpha: 0.18)),
           ),
-          child: Icon(icon, color: Colors.white, size: 24),
+          child: Icon(icon, color: AgakColors.ink, size: 24),
         ),
       ),
     );
@@ -9136,23 +10253,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
           decoration: BoxDecoration(
             color: isActive
-                ? const Color(0xFF53D97A)
-                : Colors.white.withValues(alpha: 0.08),
+                ? AgakColors.maroon
+                : AgakColors.ink.withValues(alpha: 0.06),
             borderRadius: BorderRadius.circular(18),
             border: Border.all(
               color: isActive
                   ? Colors.transparent
-                  : Colors.white.withValues(alpha: isEnabled ? 0.18 : 0.08),
+                  : AgakColors.ink.withValues(alpha: isEnabled ? 0.18 : 0.08),
             ),
           ),
           child: Text(
             label,
             style: TextStyle(
               color: isActive
-                  ? Colors.black
+                  ? AgakColors.cream
                   : isEnabled
-                  ? Colors.white
-                  : Colors.white54,
+                  ? AgakColors.ink
+                  : AgakColors.ink.withValues(alpha: 0.4),
               fontSize: 12,
               fontWeight: FontWeight.w600,
             ),
@@ -9162,11 +10279,78 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  /// Cache of authorId -> current display name, resolved live from
+  /// `users/{authorId}` instead of trusting whatever name was frozen into
+  /// a post/comment at the moment it was written. Session-lived only (not
+  /// persisted) — cheap to rebuild, and a renamed user's own posts/replies
+  /// always resolve instantly since that branch never needs a fetch.
+  final Map<String, String> _communityAuthorNameCache = <String, String>{};
+  final Set<String> _communityAuthorNameFetching = <String>{};
+
+  /// Returns the best name to show for [authorId] right now — your own
+  /// live display name if it's you, a cached live lookup if one's already
+  /// resolved, otherwise [fallback] (the frozen name stored on the
+  /// post/comment) while a lookup kicks off in the background.
+  String _communityAuthorName(String authorId, String fallback) {
+    if (authorId.isEmpty) {
+      return fallback;
+    }
+    final currentUser = _firebaseAuth.currentUser;
+    if (currentUser != null && authorId == currentUser.uid) {
+      return _communityDisplayName();
+    }
+    final cached = _communityAuthorNameCache[authorId];
+    if (cached != null) {
+      return cached;
+    }
+    if (_communityAuthorNameFetching.add(authorId)) {
+      unawaited(_fetchCommunityAuthorName(authorId, fallback));
+    }
+    return fallback;
+  }
+
+  Future<void> _fetchCommunityAuthorName(
+    String authorId,
+    String fallback,
+  ) async {
+    try {
+      // Reads the public name slice, not the full profile doc — Firestore
+      // rules only let a user read their own full `users/{id}` doc (or a
+      // tour guide's), so resolving other hikers' live names has to go
+      // through the small denormalized `public/profile` doc instead.
+      final doc = await _firestore
+          .collection('users')
+          .doc(authorId)
+          .collection('public')
+          .doc('profile')
+          .get();
+      final data = doc.data();
+      final fullName = data?['fullName']?.toString().trim();
+      final displayName = data?['displayName']?.toString().trim();
+      final resolved = (fullName != null && fullName.isNotEmpty)
+          ? fullName
+          : (displayName != null && displayName.isNotEmpty)
+          ? displayName
+          : fallback;
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _communityAuthorNameCache[authorId] = resolved;
+      });
+    } catch (error) {
+      debugPrint('Failed to resolve community author name: $error');
+    } finally {
+      _communityAuthorNameFetching.remove(authorId);
+    }
+  }
+
   Widget _communityPostCard(
     _CommunityPost post, {
     bool showCommentAction = true,
   }) {
     final user = _firebaseAuth.currentUser;
+    final authorName = _communityAuthorName(post.authorId, post.authorName);
     final likeDocStream = user == null
         ? null
         : _firestore
@@ -9180,12 +10364,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.1)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.24),
+            color: Colors.black.withValues(alpha: 0.12),
             blurRadius: 16,
             offset: const Offset(0, 8),
           ),
@@ -9200,12 +10384,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 width: 32,
                 height: 32,
                 decoration: BoxDecoration(
-                  gradient: _avatarGradient(post.authorName),
+                  gradient: _avatarGradient(authorName),
                   shape: BoxShape.circle,
                 ),
                 alignment: Alignment.center,
                 child: Text(
-                  _communityAvatarSeed(post.authorName),
+                  _communityAvatarSeed(authorName),
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w800,
@@ -9218,9 +10402,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      post.authorName,
+                      authorName,
                       style: const TextStyle(
-                        color: Colors.white,
+                        color: AgakColors.ink,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -9229,7 +10413,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           ? 'Just now'
                           : _formatDate(post.createdAt!),
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.62),
+                        color: AgakColors.ink.withValues(alpha: 0.55),
                         fontSize: 11,
                       ),
                     ),
@@ -9243,13 +10427,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.08),
+                    color: AgakColors.ink.withValues(alpha: 0.06),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
                     post.mountainName,
                     style: const TextStyle(
-                      color: Color(0xFF7CF9A2),
+                      color: AgakColors.maroon,
                       fontSize: 11,
                       fontWeight: FontWeight.w600,
                     ),
@@ -9257,12 +10441,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               if (user != null && user.uid == post.authorId)
                 PopupMenuButton<String>(
-                  icon: const Icon(
+                  icon: Icon(
                     Icons.more_vert_rounded,
-                    color: Colors.white54,
+                    color: AgakColors.ink.withValues(alpha: 0.54),
                     size: 20,
                   ),
-                  color: const Color(0xFF0F2A1E),
+                  color: Colors.white,
                   onSelected: (value) {
                     if (value == 'edit') {
                       unawaited(_editCommunityPost(post));
@@ -9275,14 +10459,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       value: 'edit',
                       child: Text(
                         'Edit',
-                        style: TextStyle(color: Colors.white),
+                        style: TextStyle(color: AgakColors.ink),
                       ),
                     ),
                     PopupMenuItem(
                       value: 'delete',
                       child: Text(
                         'Delete',
-                        style: TextStyle(color: Color(0xFFE05555)),
+                        style: TextStyle(color: AgakColors.maroon),
                       ),
                     ),
                   ],
@@ -9293,7 +10477,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           if (post.content.trim().isNotEmpty) ...[
             Text(
               post.content,
-              style: const TextStyle(color: Colors.white, height: 1.35),
+              style: const TextStyle(color: AgakColors.ink, height: 1.35),
             ),
             const SizedBox(height: 10),
           ],
@@ -9311,17 +10495,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     alignment: Alignment.center,
                     child: const CircularProgressIndicator(
                       strokeWidth: 2,
-                      color: Color(0xFF7CF9A2),
+                      color: AgakColors.maroon,
                     ),
                   );
                 },
                 errorBuilder: (context, error, stackTrace) => Container(
                   height: 120,
                   alignment: Alignment.center,
-                  color: Colors.white.withValues(alpha: 0.05),
-                  child: const Icon(
+                  color: AgakColors.ink.withValues(alpha: 0.05),
+                  child: Icon(
                     Icons.broken_image_outlined,
-                    color: Colors.white38,
+                    color: AgakColors.ink.withValues(alpha: 0.38),
                   ),
                 ),
               ),
@@ -9334,7 +10518,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 _communityActionText(
                   icon: Icons.favorite_border_rounded,
                   label: '${post.likeCount}',
-                  color: Colors.white70,
+                  color: AgakColors.ink.withValues(alpha: 0.6),
                   onTap: () => _toggleCommunityPostLike(post),
                 )
               else
@@ -9347,7 +10531,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           ? Icons.favorite_rounded
                           : Icons.favorite_border_rounded,
                       label: '${post.likeCount}',
-                      color: liked ? const Color(0xFF53D97A) : Colors.white70,
+                      color: liked
+                          ? AgakColors.maroon
+                          : AgakColors.ink.withValues(alpha: 0.6),
                       onTap: () => _toggleCommunityPostLike(post),
                     );
                   },
@@ -9357,21 +10543,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 _communityActionText(
                   icon: Icons.chat_bubble_outline_rounded,
                   label: '${post.commentCount}',
-                  color: Colors.white70,
+                  color: AgakColors.ink.withValues(alpha: 0.6),
                   onTap: () => unawaited(_openCommunityPostDetails(post)),
                 )
               else
                 Row(
                   children: [
-                    const Icon(
+                    Icon(
                       Icons.chat_bubble_outline_rounded,
-                      color: Colors.white70,
+                      color: AgakColors.ink.withValues(alpha: 0.6),
                       size: 18,
                     ),
                     const SizedBox(width: 4),
                     Text(
                       '${post.commentCount}',
-                      style: const TextStyle(color: Colors.white70),
+                      style: TextStyle(
+                        color: AgakColors.ink.withValues(alpha: 0.6),
+                      ),
                     ),
                   ],
                 ),
@@ -9448,7 +10636,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           builder: (context, scrollController) {
             return Container(
               decoration: const BoxDecoration(
-                color: Color(0xFF02130E),
+                color: AgakColors.cream,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
               ),
               child: Column(
@@ -9458,7 +10646,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     width: 44,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.white24,
+                      color: AgakColors.ink.withValues(alpha: 0.18),
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
@@ -9466,11 +10654,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
                     child: Row(
                       children: [
-                        Expanded(
+                        const Expanded(
                           child: Text(
                             'All Nearby Trails',
                             style: TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 20,
                               fontWeight: FontWeight.w700,
                             ),
@@ -9480,9 +10668,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           onPressed: () {
                             Navigator.of(sheetContext).pop();
                           },
-                          icon: const Icon(
+                          icon: Icon(
                             Icons.close_rounded,
-                            color: Colors.white70,
+                            color: AgakColors.ink.withValues(alpha: 0.68),
                           ),
                         ),
                       ],
@@ -9495,7 +10683,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       child: Text(
                         '${_nearbyTrails.length} trails found ${_distanceContextLabel()}',
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.72),
+                          color: AgakColors.ink.withValues(alpha: 0.72),
                           fontSize: 13,
                         ),
                       ),
@@ -9543,7 +10731,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Center(
           child: CircularProgressIndicator(
             strokeWidth: 2.2,
-            color: Color(0xFF7CF9A2),
+            color: AgakColors.maroon,
           ),
         ),
       );
@@ -9573,12 +10761,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
+        color: AgakColors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(14),
       ),
       child: Text(
         message,
-        style: TextStyle(color: Colors.white.withValues(alpha: 0.88)),
+        style: TextStyle(color: AgakColors.ink.withValues(alpha: 0.75)),
       ),
     );
   }
@@ -9592,7 +10780,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.06),
+            color: AgakColors.ink.withValues(alpha: 0.05),
             borderRadius: BorderRadius.circular(14),
           ),
           child: Row(
@@ -9602,7 +10790,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Container(
                   width: 70,
                   height: 50,
-                  color: const Color(0xFF0F2A1E),
+                  color: AgakColors.surfaceRaised,
                   child: _trailImage(trail),
                 ),
               ),
@@ -9619,7 +10807,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 16,
                               fontWeight: FontWeight.w700,
                             ),
@@ -9632,8 +10820,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: trail.status == 'Open'
-                                ? const Color(0xFF53D97A)
-                                : const Color(0xFFFF8A8A),
+                                ? AgakColors.olive
+                                : AgakColors.maroon,
                           ),
                         ),
                       ],
@@ -9642,7 +10830,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Text(
                       _displayDistanceText(trail),
                       style: const TextStyle(
-                        color: Color(0xFF7CF9A2),
+                        color: AgakColors.maroon,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -9652,14 +10840,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.72),
+                          color: AgakColors.ink.withValues(alpha: 0.6),
                           fontSize: 12,
                         ),
                       ),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded, color: Colors.white70),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: AgakColors.ink.withValues(alpha: 0.7),
+              ),
             ],
           ),
         ),
@@ -9669,13 +10860,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Widget _trailImage(_NearbyTrail trail) {
     if (trail.imageUrl == null || trail.imageUrl!.isEmpty) {
-      return const Icon(Icons.terrain_rounded, color: Color(0xFF7CF9A2));
+      return const Icon(Icons.terrain_rounded, color: AgakColors.maroon);
     }
     return Image.network(
       trail.imageUrl!,
       fit: BoxFit.cover,
       errorBuilder: (_, _, _) {
-        return const Icon(Icons.terrain_rounded, color: Color(0xFF7CF9A2));
+        return const Icon(Icons.terrain_rounded, color: AgakColors.maroon);
       },
       loadingBuilder: (context, child, loadingProgress) {
         if (loadingProgress == null) {
@@ -9687,7 +10878,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             height: 16,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: Color(0xFF7CF9A2),
+              color: AgakColors.maroon,
             ),
           ),
         );
@@ -9700,8 +10891,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     VoidCallback? onTap,
   }) {
     final statusColor = session.reachedSummit
-        ? const Color(0xFF7CF9A2)
-        : const Color(0xFF48D1FF);
+        ? AgakColors.maroon
+        : AgakColors.olive;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -9709,7 +10900,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         borderRadius: BorderRadius.circular(18),
         child: Container(
           decoration: BoxDecoration(
-            color: const Color(0xFF061F16),
+            color: Colors.white,
             borderRadius: BorderRadius.circular(18),
             border: Border.all(color: statusColor.withValues(alpha: 0.22)),
             boxShadow: [
@@ -9744,7 +10935,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           child: Container(
                             width: 54,
                             height: 54,
-                            color: const Color(0xFF0F2A1E),
+                            color: AgakColors.surfaceRaised,
                             child: _trailImage(session.trail),
                           ),
                         ),
@@ -9758,7 +10949,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
-                                  color: Colors.white,
+                                  color: AgakColors.ink,
                                   fontSize: 17,
                                   fontWeight: FontWeight.w900,
                                 ),
@@ -9766,9 +10957,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               const SizedBox(height: 4),
                               Row(
                                 children: [
-                                  const Icon(
+                                  Icon(
                                     Icons.calendar_month_rounded,
-                                    color: Colors.white54,
+                                    color: AgakColors.ink.withValues(
+                                      alpha: 0.54,
+                                    ),
                                     size: 15,
                                   ),
                                   const SizedBox(width: 5),
@@ -9778,7 +10971,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        color: Colors.white.withValues(
+                                        color: AgakColors.ink.withValues(
                                           alpha: 0.65,
                                         ),
                                         fontSize: 12,
@@ -9819,19 +11012,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       children: [
                         _myHikesChip(
                           label: '${session.distanceKm.toStringAsFixed(2)} km',
-                          color: const Color(0xFF48D1FF),
+                          color: AgakColors.olive,
                         ),
                         _myHikesChip(
                           label: _formatDuration(session.duration),
-                          color: Colors.white.withValues(alpha: 0.82),
+                          color: AgakColors.ink.withValues(alpha: 0.85),
                         ),
                         _myHikesChip(
                           label: '+${session.elevationGainMasl} m',
-                          color: const Color(0xFFFFD76A),
+                          color: AgakColors.maroon,
                         ),
                         _myHikesChip(
                           label: '${session.maxElevationMasl} MASL',
-                          color: const Color(0xFF7CF9A2),
+                          color: AgakColors.olive,
                         ),
                       ],
                     ),
@@ -9848,7 +11041,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             session.totalCheckpoints)
                                         .clamp(0.0, 1.0),
                               minHeight: 7,
-                              backgroundColor: Colors.white.withValues(
+                              backgroundColor: AgakColors.ink.withValues(
                                 alpha: 0.08,
                               ),
                               valueColor: AlwaysStoppedAnimation<Color>(
@@ -9861,7 +11054,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Text(
                           '${session.checkpointsReached}/${session.totalCheckpoints} checkpoints',
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.68),
+                            color: AgakColors.ink.withValues(alpha: 0.68),
                             fontSize: 12,
                             fontWeight: FontWeight.w700,
                           ),
@@ -9924,84 +11117,91 @@ class _DashboardScreenState extends State<DashboardScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, sheetSetState) {
-            final trailStatus = (communityTrail?.status ?? 'none').toLowerCase();
+            final trailStatus = (communityTrail?.status ?? 'none')
+                .toLowerCase();
             final mappedRouteCount = routeOptions.length;
-        final hasMappedRoutes = mappedRouteCount > 0;
-        final hasCommunityRoute =
-            (trailStatus == 'verified' || trailStatus == 'provisional') &&
-            (communityTrail?.points.length ?? 0) >= 2;
-        final hasAnyUsableRoute = hasMappedRoutes || hasCommunityRoute;
-        final trailStatusLabel = switch (trailStatus) {
-          'verified' => 'Community Verified',
-          'provisional' => 'Community Recorded',
-          'pending' => 'Checking',
-          _ =>
-            hasMappedRoutes ? 'Mapped ($mappedRouteCount routes)' : 'No Data',
-        };
-        final trailStatusColor = switch (trailStatus) {
-          'verified' => const Color(0xFF53D97A),
-          'provisional' => const Color(0xFFFFD76A),
-          'pending' => const Color(0xFFFFD76A),
-          _ => hasMappedRoutes ? const Color(0xFF84E6A2) : Colors.white70,
-        };
-        Future<void> loadHikeWeather(
-          StateSetter sheetSetState,
-          DateTime date,
-        ) async {
-          sheetSetState(() {
-            isHikeWeatherLoading = true;
-            hikeWeatherError = null;
-          });
-          try {
-            final forecast = await _fetchHikeWeatherForecast(trail, date);
-            if (!mounted || !sheetActive) {
-              return;
+            final hasMappedRoutes = mappedRouteCount > 0;
+            final hasCommunityRoute =
+                (trailStatus == 'verified' || trailStatus == 'provisional') &&
+                (communityTrail?.points.length ?? 0) >= 2;
+            final hasAnyUsableRoute = hasMappedRoutes || hasCommunityRoute;
+            final trailStatusLabel = switch (trailStatus) {
+              'verified' => 'Community Verified',
+              'provisional' => 'Community Recorded',
+              'pending' => 'Checking',
+              _ =>
+                hasMappedRoutes
+                    ? 'Mapped ($mappedRouteCount routes)'
+                    : 'No Data',
+            };
+            final trailStatusColor = switch (trailStatus) {
+              'verified' => AgakColors.olive,
+              'provisional' => AgakColors.goldDark,
+              'pending' => AgakColors.goldDark,
+              _ =>
+                hasMappedRoutes
+                    ? AgakColors.olive
+                    : AgakColors.ink.withValues(alpha: 0.6),
+            };
+            Future<void> loadHikeWeather(
+              StateSetter sheetSetState,
+              DateTime date,
+            ) async {
+              sheetSetState(() {
+                isHikeWeatherLoading = true;
+                hikeWeatherError = null;
+              });
+              try {
+                final forecast = await _fetchHikeWeatherForecast(trail, date);
+                if (!mounted || !sheetActive) {
+                  return;
+                }
+                sheetSetState(() {
+                  hikeWeatherForecast = forecast;
+                  isHikeWeatherLoading = false;
+                });
+              } on _WeatherForecastException catch (error) {
+                if (!mounted || !sheetActive) {
+                  return;
+                }
+                sheetSetState(() {
+                  hikeWeatherError = error.message;
+                  hikeWeatherForecast = null;
+                  isHikeWeatherLoading = false;
+                });
+              } catch (_) {
+                if (!mounted || !sheetActive) {
+                  return;
+                }
+                sheetSetState(() {
+                  hikeWeatherError =
+                      'Weather forecast is unavailable right now.';
+                  hikeWeatherForecast = null;
+                  isHikeWeatherLoading = false;
+                });
+              }
             }
-            sheetSetState(() {
-              hikeWeatherForecast = forecast;
-              isHikeWeatherLoading = false;
-            });
-          } on _WeatherForecastException catch (error) {
-            if (!mounted || !sheetActive) {
-              return;
-            }
-            sheetSetState(() {
-              hikeWeatherError = error.message;
-              hikeWeatherForecast = null;
-              isHikeWeatherLoading = false;
-            });
-          } catch (_) {
-            if (!mounted || !sheetActive) {
-              return;
-            }
-            sheetSetState(() {
-              hikeWeatherError = 'Weather forecast is unavailable right now.';
-              hikeWeatherForecast = null;
-              isHikeWeatherLoading = false;
-            });
-          }
-        }
 
-        Future<void> selectHikeDate(
-          StateSetter sheetSetState,
-          DateTime date,
-        ) async {
-          final today = _dateOnly(DateTime.now());
-          final lastForecastDate = today.add(const Duration(days: 9));
-          final picked = _dateOnly(date);
-          if (picked.isBefore(today) ||
-              picked.isAfter(lastForecastDate) ||
-              !sheetActive) {
-            return;
-          }
-          sheetSetState(() {
-            selectedHikeDate = picked;
-            visibleHikeMonth = DateTime(picked.year, picked.month);
-            hikeWeatherForecast = null;
-            hikeWeatherError = null;
-          });
-          await loadHikeWeather(sheetSetState, selectedHikeDate);
-        }
+            Future<void> selectHikeDate(
+              StateSetter sheetSetState,
+              DateTime date,
+            ) async {
+              final today = _dateOnly(DateTime.now());
+              final lastForecastDate = today.add(const Duration(days: 9));
+              final picked = _dateOnly(date);
+              if (picked.isBefore(today) ||
+                  picked.isAfter(lastForecastDate) ||
+                  !sheetActive) {
+                return;
+              }
+              sheetSetState(() {
+                selectedHikeDate = picked;
+                visibleHikeMonth = DateTime(picked.year, picked.month);
+                hikeWeatherForecast = null;
+                hikeWeatherError = null;
+              });
+              await loadHikeWeather(sheetSetState, selectedHikeDate);
+            }
 
             if (!hasRequestedInitialDetailsLoad) {
               hasRequestedInitialDetailsLoad = true;
@@ -10012,7 +11212,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             return Container(
               height: MediaQuery.of(context).size.height * 0.88,
               decoration: const BoxDecoration(
-                color: Color(0xFF02130E),
+                color: AgakColors.cream,
                 borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
               ),
               child: Column(
@@ -10024,7 +11224,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       width: 46,
                       height: 4,
                       decoration: BoxDecoration(
-                        color: Colors.white24,
+                        color: AgakColors.ink.withValues(alpha: 0.24),
                         borderRadius: BorderRadius.circular(8),
                       ),
                     ),
@@ -10039,10 +11239,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         width: double.infinity,
                         child: trail.imageUrl == null || trail.imageUrl!.isEmpty
                             ? Container(
-                                color: const Color(0xFF0F2A1E),
+                                color: AgakColors.surfaceRaised,
                                 child: const Icon(
                                   Icons.terrain_rounded,
-                                  color: Color(0xFF7CF9A2),
+                                  color: AgakColors.maroon,
                                   size: 70,
                                 ),
                               )
@@ -10051,10 +11251,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 fit: BoxFit.cover,
                                 errorBuilder: (_, _, _) {
                                   return Container(
-                                    color: const Color(0xFF0F2A1E),
+                                    color: AgakColors.surfaceRaised,
                                     child: const Icon(
                                       Icons.terrain_rounded,
-                                      color: Color(0xFF7CF9A2),
+                                      color: AgakColors.maroon,
                                       size: 70,
                                     ),
                                   );
@@ -10077,7 +11277,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 child: Text(
                                   trail.name,
                                   style: const TextStyle(
-                                    color: Colors.white,
+                                    color: AgakColors.ink,
                                     fontSize: 32,
                                     fontWeight: FontWeight.w800,
                                   ),
@@ -10112,8 +11312,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       ? Icons.bookmark_rounded
                                       : Icons.bookmark_border_rounded,
                                   color: isBookmarked
-                                      ? const Color(0xFF53D97A)
-                                      : Colors.white70,
+                                      ? AgakColors.maroon
+                                      : AgakColors.ink.withValues(alpha: 0.6),
                                 ),
                               ),
                             ],
@@ -10122,7 +11322,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Text(
                             '${trail.elevationMasl} MASL',
                             style: const TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 20,
                               fontWeight: FontWeight.w700,
                             ),
@@ -10131,7 +11331,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Text(
                             trail.provinceOrCity,
                             style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.82),
+                              color: AgakColors.ink.withValues(alpha: 0.7),
                               fontSize: 16,
                             ),
                           ),
@@ -10142,7 +11342,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               vertical: 6,
                             ),
                             decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.06),
+                              color: AgakColors.ink.withValues(alpha: 0.05),
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
@@ -10159,7 +11359,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             const Text(
                               'Available Trail Routes',
                               style: TextStyle(
-                                color: Color(0xFF7CF9A2),
+                                color: AgakColors.maroon,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w700,
                               ),
@@ -10183,8 +11383,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       color:
                                           selectedRoute?.assetPath ==
                                               route.assetPath
-                                          ? const Color(0xFF103827)
-                                          : Colors.white.withValues(
+                                          ? AgakColors.maroon.withValues(
+                                              alpha: 0.12,
+                                            )
+                                          : AgakColors.ink.withValues(
                                               alpha: 0.04,
                                             ),
                                       borderRadius: BorderRadius.circular(12),
@@ -10192,8 +11394,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         color:
                                             selectedRoute?.assetPath ==
                                                 route.assetPath
-                                            ? const Color(0xFF53D97A)
-                                            : Colors.white.withValues(
+                                            ? AgakColors.maroon
+                                            : AgakColors.ink.withValues(
                                                 alpha: 0.12,
                                               ),
                                       ),
@@ -10205,7 +11407,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         Text(
                                           route.routeName,
                                           style: const TextStyle(
-                                            color: Colors.white,
+                                            color: AgakColors.ink,
                                             fontWeight: FontWeight.w700,
                                           ),
                                         ),
@@ -10213,8 +11415,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         Text(
                                           'Jump-off: ${route.jumpOffLabel}',
                                           style: TextStyle(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.82,
+                                            color: AgakColors.ink.withValues(
+                                              alpha: 0.7,
                                             ),
                                             fontSize: 12,
                                           ),
@@ -10223,8 +11425,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                         Text(
                                           'Start point: ${_formatLatLngCompact(route.startPoint)}',
                                           style: TextStyle(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.65,
+                                            color: AgakColors.ink.withValues(
+                                              alpha: 0.6,
                                             ),
                                             fontSize: 11,
                                           ),
@@ -10240,7 +11442,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               width: double.infinity,
                               padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.05),
+                                color: AgakColors.ink.withValues(alpha: 0.05),
                                 borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
@@ -10248,7 +11450,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     ? 'A community ${trailStatusLabel.toLowerCase()} route is available and will be used in Hiking Mode.'
                                     : 'No mapped trail routes found for this mountain yet.',
                                 style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.82),
+                                  color: AgakColors.ink.withValues(alpha: 0.7),
                                   fontSize: 12,
                                 ),
                               ),
@@ -10259,12 +11461,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 width: double.infinity,
                                 padding: const EdgeInsets.all(14),
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFF12301F),
+                                  color: AgakColors.maroon.withValues(
+                                    alpha: 0.08,
+                                  ),
                                   borderRadius: BorderRadius.circular(14),
                                   border: Border.all(
-                                    color: const Color(
-                                      0xFF53D97A,
-                                    ).withValues(alpha: 0.36),
+                                    color: AgakColors.maroon.withValues(
+                                      alpha: 0.36,
+                                    ),
                                   ),
                                 ),
                                 child: Column(
@@ -10273,7 +11477,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     const Text(
                                       'Help Map This Trail',
                                       style: TextStyle(
-                                        color: Colors.white,
+                                        color: AgakColors.ink,
                                         fontWeight: FontWeight.w800,
                                         fontSize: 15,
                                       ),
@@ -10282,8 +11486,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                     Text(
                                       'Record the real path while hiking. Agakbay checks the route automatically before other users see it as a community trail.',
                                       style: TextStyle(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.78,
+                                        color: AgakColors.ink.withValues(
+                                          alpha: 0.68,
                                         ),
                                         height: 1.35,
                                         fontSize: 12,
@@ -10309,11 +11513,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                           ),
                                         ),
                                         style: OutlinedButton.styleFrom(
-                                          foregroundColor: const Color(
-                                            0xFF7CF9A2,
-                                          ),
+                                          foregroundColor: AgakColors.maroon,
                                           side: const BorderSide(
-                                            color: Color(0xFF7CF9A2),
+                                            color: AgakColors.maroon,
                                           ),
                                           shape: RoundedRectangleBorder(
                                             borderRadius: BorderRadius.circular(
@@ -10333,10 +11535,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             width: double.infinity,
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF042117),
+                              color: Colors.white,
                               borderRadius: BorderRadius.circular(14),
                               border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.12),
+                                color: AgakColors.ink.withValues(alpha: 0.12),
                               ),
                             ),
                             child: Row(
@@ -10346,8 +11548,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       ? Icons.check_circle_rounded
                                       : Icons.cancel_rounded,
                                   color: trail.status == 'Open'
-                                      ? const Color(0xFF53D97A)
-                                      : const Color(0xFFFF8A8A),
+                                      ? AgakColors.olive
+                                      : AgakColors.maroon,
                                 ),
                                 const SizedBox(width: 10),
                                 Text(
@@ -10356,8 +11558,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       : 'CURRENTLY CLOSED',
                                   style: TextStyle(
                                     color: trail.status == 'Open'
-                                        ? const Color(0xFF53D97A)
-                                        : const Color(0xFFFF8A8A),
+                                        ? AgakColors.olive
+                                        : AgakColors.maroon,
                                     fontSize: 16,
                                     fontWeight: FontWeight.w700,
                                   ),
@@ -10449,7 +11651,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           const Text(
                             'Description',
                             style: TextStyle(
-                              color: Color(0xFF7CF9A2),
+                              color: AgakColors.maroon,
                               fontSize: 14,
                               fontWeight: FontWeight.w700,
                             ),
@@ -10458,7 +11660,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Text(
                             trail.description,
                             style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.9),
+                              color: AgakColors.ink.withValues(alpha: 0.85),
                               height: 1.4,
                             ),
                           ),
@@ -10467,10 +11669,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             width: double.infinity,
                             padding: const EdgeInsets.all(14),
                             decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.04),
+                              color: AgakColors.ink.withValues(alpha: 0.04),
                               borderRadius: BorderRadius.circular(14),
                               border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.1),
+                                color: AgakColors.ink.withValues(alpha: 0.1),
                               ),
                             ),
                             child: Column(
@@ -10522,9 +11724,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 ),
                               ),
                               style: OutlinedButton.styleFrom(
-                                foregroundColor: const Color(0xFFFFD76A),
+                                foregroundColor: AgakColors.goldDark,
                                 side: const BorderSide(
-                                  color: Color(0xFFFFD76A),
+                                  color: AgakColors.goldDark,
                                 ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(16),
@@ -10548,10 +11750,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               style: TextStyle(fontWeight: FontWeight.w800),
                             ),
                             style: OutlinedButton.styleFrom(
-                              foregroundColor: const Color(0xFF53D97A),
-                              side: const BorderSide(
-                                color: Color(0xFF53D97A),
-                              ),
+                              foregroundColor: AgakColors.olive,
+                              side: const BorderSide(color: AgakColors.olive),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(16),
                               ),
@@ -10564,6 +11764,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           width: double.infinity,
                           child: ElevatedButton.icon(
                             onPressed: () async {
+                              if (!hasAnyUsableRoute) {
+                                final shouldRecord =
+                                    await _showNoTrailRouteDialog(trail.name);
+                                if (!mounted || !shouldRecord) {
+                                  return;
+                                }
+                              }
                               final communityTrail = await _fetchCommunityTrail(
                                 trail,
                               );
@@ -10590,36 +11797,51 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               if (!mounted || session == null) {
                                 return;
                               }
+                              // Only counts as "completed" — badge, list,
+                              // milestone — once the summit is actually
+                              // reached, even for trails auto-recorded
+                              // because they had no mapped route yet.
                               setState(() {
                                 _rememberTrail(trail);
-                                _completedTrailIds.add(trail.placeId);
-                                _completedHikeSessions.insert(
-                                  0,
-                                  _CompletedHikeSession(
-                                    trail: trail,
-                                    completedAt: DateTime.now(),
-                                    distanceKm: session.distanceKm,
-                                    duration: session.duration,
-                                    elevationGainMasl:
-                                        session.elevationGainMasl,
-                                    maxElevationMasl: session.maxElevationMasl,
-                                    checkpointsReached:
-                                        session.checkpointsReached,
-                                    totalCheckpoints: session.totalCheckpoints,
-                                    reachedSummit: session.reachedSummit,
-                                  ),
-                                );
+                                if (session.reachedSummit) {
+                                  _completedTrailIds.add(trail.placeId);
+                                  _completedHikeSessions.insert(
+                                    0,
+                                    _CompletedHikeSession(
+                                      trail: trail,
+                                      completedAt: DateTime.now(),
+                                      distanceKm: session.distanceKm,
+                                      duration: session.duration,
+                                      elevationGainMasl:
+                                          session.elevationGainMasl,
+                                      maxElevationMasl:
+                                          session.maxElevationMasl,
+                                      checkpointsReached:
+                                          session.checkpointsReached,
+                                      totalCheckpoints:
+                                          session.totalCheckpoints,
+                                      reachedSummit: session.reachedSummit,
+                                    ),
+                                  );
+                                }
                               });
-                              sheetSetState(() => hasCompletedBefore = true);
-                              _showDashboardSnackBar(
-                                '${trail.name} hike saved to My Hikes.',
-                              );
+                              if (session.reachedSummit) {
+                                sheetSetState(() => hasCompletedBefore = true);
+                                _showDashboardSnackBar(
+                                  '${trail.name} hike completed! Great work.',
+                                );
+                                _recordAgakHikeCompletion(trail, session);
+                              } else {
+                                _showDashboardSnackBar(
+                                  '${trail.name} trail route saved. Reach '
+                                  'the summit next time to complete it!',
+                                );
+                              }
+                              unawaited(_recordHikeAttempt(trail, session));
                               unawaited(
                                 _updateLeaderboardStats(trail, session),
                               );
-                              unawaited(
-                                _recordAgakHikeCompletion(trail, session),
-                              );
+                              _pushPostHikeCompanionMessage(trail, session);
                               unawaited(
                                 _submitTrailRouteIfAccepted(trail, session),
                               );
@@ -10639,10 +11861,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               ),
                             ),
                             style: ElevatedButton.styleFrom(
-                              foregroundColor: Colors.black,
-                              backgroundColor: hasCompletedBefore
-                                  ? const Color(0xFF61DF86)
-                                  : const Color(0xFF53D97A),
+                              foregroundColor: AgakColors.cream,
+                              backgroundColor: AgakColors.maroon,
                               elevation: 0,
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(16),
@@ -10671,7 +11891,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// catalog), falls back to asking Gemini for one short fact; silently
   /// does nothing if that's unavailable or fails, same as every other
   /// AI-enhancement in this app.
-  Future<void> _pushMountainTriviaTip(_NearbyTrail trail, String matchKey) async {
+  Future<void> _pushMountainTriviaTip(
+    _NearbyTrail trail,
+    String matchKey,
+  ) async {
     try {
       final catalog = await AgakBehaviorDatabase.instance.getCatalog();
       final catalogMatches = catalog
@@ -10770,9 +11993,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         width: 38,
                         height: 38,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF2F8C5A).withValues(
-                            alpha: 0.14,
-                          ),
+                          color: const Color(
+                            0xFF2F8C5A,
+                          ).withValues(alpha: 0.14),
                           borderRadius: BorderRadius.circular(11),
                         ),
                         child: const Icon(
@@ -10884,9 +12107,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Expanded(
                           child: Text(
                             _formatHikeDate(chosenDate),
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                            ),
+                            style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                         ),
                         TextButton(
@@ -10978,9 +12199,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (!mounted) {
         return;
       }
-      _showDashboardSnackBar(
-        "Couldn't save that hike — please try again.",
-      );
+      _showDashboardSnackBar("Couldn't save that hike — please try again.");
     }
   }
 
@@ -10988,7 +12207,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
+        color: AgakColors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(
@@ -10997,7 +12216,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Text(
             label,
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.7),
+              color: AgakColors.ink.withValues(alpha: 0.6),
               fontSize: 12,
             ),
           ),
@@ -11005,7 +12224,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Text(
             value,
             style: const TextStyle(
-              color: Colors.white,
+              color: AgakColors.ink,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -11028,7 +12247,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     required VoidCallback onCheckWeather,
   }) {
     final riskColor = forecast == null
-        ? const Color(0xFF7CF9A2)
+        ? AgakColors.maroon
         : _weatherRiskColor(forecast.risk);
     final canGoPrevious = _monthHasForecastableDates(
       DateTime(visibleMonth.year, visibleMonth.month - 1),
@@ -11045,7 +12264,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: const Color(0xFF042117),
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: riskColor.withValues(alpha: 0.34)),
       ),
@@ -11055,7 +12274,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           const Text(
             'Select Hike Date',
             style: TextStyle(
-              color: Colors.white,
+              color: AgakColors.ink,
               fontSize: 13,
               fontWeight: FontWeight.w800,
             ),
@@ -11077,9 +12296,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             width: double.infinity,
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: const Color(0xFF031B13),
+              color: AgakColors.surfaceRaised,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -11109,7 +12328,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           const Text(
                             'Weather Forecast',
                             style: TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 15,
                               fontWeight: FontWeight.w800,
                             ),
@@ -11118,7 +12337,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Text(
                             _formatHikeDate(selectedDate),
                             style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.68),
+                              color: AgakColors.ink.withValues(alpha: 0.68),
                               fontSize: 12,
                             ),
                           ),
@@ -11136,14 +12355,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         height: 18,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: Color(0xFF53D97A),
+                          color: AgakColors.maroon,
                         ),
                       ),
                       const SizedBox(width: 10),
                       Text(
                         'Checking mountain weather...',
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.82),
+                          color: AgakColors.ink.withValues(alpha: 0.82),
                         ),
                       ),
                     ],
@@ -11162,7 +12381,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         child: Text(
                           _temperatureRangeLabel(forecast),
                           style: const TextStyle(
-                            color: Colors.white,
+                            color: AgakColors.ink,
                             fontSize: 22,
                             fontWeight: FontWeight.w900,
                           ),
@@ -11193,7 +12412,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   Text(
                     forecast.summary,
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.88),
+                      color: AgakColors.ink.withValues(alpha: 0.88),
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
                     ),
@@ -11245,7 +12464,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Text(
                           forecast.adviceDetail,
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.82),
+                            color: AgakColors.ink.withValues(alpha: 0.82),
                             height: 1.25,
                             fontSize: 12,
                           ),
@@ -11258,7 +12477,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     Text(
                       errorMessage,
                       style: const TextStyle(
-                        color: Color(0xFFFFD76A),
+                        color: AgakColors.goldDark,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -11271,11 +12490,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       icon: const Icon(Icons.cloud_sync_rounded),
                       label: const Text('Check Weather'),
                       style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFF7CF9A2),
+                        foregroundColor: AgakColors.maroon,
                         side: BorderSide(
-                          color: const Color(
-                            0xFF7CF9A2,
-                          ).withValues(alpha: 0.55),
+                          color: AgakColors.maroon.withValues(alpha: 0.55),
                         ),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -11312,9 +12529,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: const Color(0xFF031B13),
+        color: AgakColors.surfaceRaised,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.08)),
       ),
       child: Column(
         children: [
@@ -11330,7 +12547,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: Text(
                     _formatMonthYear(visibleMonth),
                     style: const TextStyle(
-                      color: Colors.white,
+                      color: AgakColors.ink,
                       fontSize: 13,
                       fontWeight: FontWeight.w800,
                     ),
@@ -11345,8 +12562,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           const SizedBox(height: 8),
-          Row(
-            children: const [
+          const Row(
+            children: [
               _WeekdayLabel('SUN'),
               _WeekdayLabel('MON'),
               _WeekdayLabel('TUE'),
@@ -11380,7 +12597,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: Text(
               'Available through ${_formatHikeDate(lastDate)}',
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.56),
+                color: AgakColors.ink.withValues(alpha: 0.56),
                 fontSize: 10,
               ),
             ),
@@ -11402,8 +12619,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         onPressed: enabled ? onPressed : null,
         icon: Icon(icon, size: 18),
         padding: EdgeInsets.zero,
-        color: const Color(0xFF7CF9A2),
-        disabledColor: Colors.white.withValues(alpha: 0.18),
+        color: AgakColors.maroon,
+        disabledColor: AgakColors.ink.withValues(alpha: 0.18),
       ),
     );
   }
@@ -11439,25 +12656,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: isSelected
-                  ? const Color(0xFF53D97A)
+                  ? AgakColors.maroon
                   : isToday
-                  ? const Color(0xFF53D97A).withValues(alpha: 0.16)
+                  ? AgakColors.maroon.withValues(alpha: 0.16)
                   : Colors.transparent,
               borderRadius: BorderRadius.circular(9),
               border: isToday && !isSelected
-                  ? Border.all(
-                      color: const Color(0xFF53D97A).withValues(alpha: 0.55),
-                    )
+                  ? Border.all(color: AgakColors.maroon.withValues(alpha: 0.55))
                   : null,
             ),
             child: Text(
               dayNumber.toString(),
               style: TextStyle(
                 color: !isEnabled
-                    ? Colors.white.withValues(alpha: 0.18)
+                    ? AgakColors.ink.withValues(alpha: 0.18)
                     : isSelected
-                    ? const Color(0xFF02130E)
-                    : Colors.white,
+                    ? AgakColors.cream
+                    : AgakColors.ink,
                 fontSize: 11,
                 fontWeight: isSelected || isToday
                     ? FontWeight.w900
@@ -11474,7 +12689,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Text(
       '$label  $value',
       style: TextStyle(
-        color: Colors.white.withValues(alpha: 0.72),
+        color: AgakColors.ink.withValues(alpha: 0.72),
         fontSize: 10,
         fontWeight: FontWeight.w700,
       ),
@@ -11491,7 +12706,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.055),
+        color: AgakColors.ink.withValues(alpha: 0.055),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Row(
@@ -11510,7 +12725,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   '${outlook.label} (${outlook.timeRange})',
                   style: const TextStyle(
-                    color: Colors.white,
+                    color: AgakColors.ink,
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
                   ),
@@ -11519,7 +12734,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 Text(
                   '${outlook.summary}, ${outlook.temperatureLabel}$rainText',
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.74),
+                    color: AgakColors.ink.withValues(alpha: 0.74),
                     fontSize: 11,
                     height: 1.25,
                   ),
@@ -11534,9 +12749,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Color _weatherRiskColor(_HikeWeatherRisk risk) {
     return switch (risk) {
-      _HikeWeatherRisk.good => const Color(0xFF53D97A),
-      _HikeWeatherRisk.caution => const Color(0xFFFFD76A),
-      _HikeWeatherRisk.unsafe => const Color(0xFFFF7A7A),
+      _HikeWeatherRisk.good => AgakColors.olive,
+      _HikeWeatherRisk.caution => AgakColors.goldDark,
+      _HikeWeatherRisk.unsafe => AgakColors.maroon,
     };
   }
 
@@ -11615,7 +12830,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           child: Text(
             label,
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.78),
+              color: AgakColors.ink.withValues(alpha: 0.68),
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -11624,7 +12839,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Expanded(
           child: Text(
             value.isEmpty ? '-' : value,
-            style: const TextStyle(color: Colors.white),
+            style: const TextStyle(color: AgakColors.ink),
           ),
         ),
       ],
@@ -11719,6 +12934,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   final List<LatLng> _trackPoints = <LatLng>[];
   final List<_TrailTrackPoint> _rawTrackPoints = <_TrailTrackPoint>[];
   final Set<String> _reachedCheckpoints = <String>{};
+  final Set<String> _approachingAnnounced = <String>{};
   final OfflineActivityDatabase _activityDatabase =
       OfflineActivityDatabase.instance;
 
@@ -11756,6 +12972,12 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   DateTime _lastMovementAt = DateTime.now();
   DateTime? _lastStillCheckInAt;
 
+  // Rough max footprint (bubble + gap + character) used only to keep the
+  // draggable Kyrielle presence fully within the map area — doesn't need
+  // to be pixel-exact, same idea as the dashboard's _agakFootprint.
+  static const Size _kyrielleFootprint = Size(260, 320);
+  Offset? _kyrielleOffset;
+
   static const _motivationMessages = <String>[
     "You're doing amazing out there — keep that pace up!",
     "Every step counts. Enjoy the trail!",
@@ -11769,7 +12991,17 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   static const _minSpeedForHeadingMps = 0.6;
   static const _maxAccuracyForHeadingMeters = 30.0;
   static const _wrongWayAngleThresholdDegrees = 110.0;
+  // Smaller drift gets a gentle "turn left/right" nudge rather than the
+  // full "wrong way, turn around" — reads like a companion correcting your
+  // line, not alarming you over a normal switchback.
+  static const _driftAngleThresholdDegrees = 35.0;
   static const _wrongWayCooldown = Duration(minutes: 2);
+
+  // How far out (along the route, or straight-line as a fallback) Kyrielle
+  // gives a heads-up that the next station is coming up — well before the
+  // tighter arrival threshold in the checkpoint loop below actually marks
+  // it reached, so it reads as "almost there" rather than "you're here."
+  static const _approachingThresholdMeters = 500.0;
 
   // How long without meaningful movement before AGAK checks in — and, if
   // the hiker stays put, how often it asks again afterward.
@@ -11791,7 +13023,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       if (_elapsed.inSeconds > 0 && _elapsed.inSeconds % 60 == 0) {
         _pushMinuteMotivationTip();
       }
-      if (_elapsed.inSeconds > 0 && _elapsed.inSeconds % 900 == 0) {
+      if (_elapsed.inSeconds > 0 && _elapsed.inSeconds % 600 == 0) {
         unawaited(_checkMidHikeWeather());
       }
       _maybePushStillCheckIn();
@@ -11918,7 +13150,56 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         _initializing = false;
         _errorMessage = null;
       });
-    } catch (_) {
+      debugPrint(
+        'DEBUG hike-start: about to push greeting, bus version before push '
+        'is ${AgakTipBus.instance.version}',
+      );
+      AgakTipBus.instance.push(
+        AgakTip(
+          emotion: AgakEmotionState.pointingSuggestion,
+          message:
+              'Ready to take on ${widget.trail.name}? I\'ll be right '
+              'here with you the whole way up!',
+          choices: [
+            AgakTipChoice(
+              label: "Let's go!",
+              onSelected: () {
+                final packingPreview = buildPackingList(
+                  difficulty: widget.trail.difficulty,
+                  elevationMasl: widget.trail.elevationMasl,
+                ).take(3).join(', ');
+                AgakTipBus.instance.push(
+                  AgakTip(
+                    emotion: AgakEmotionState.encouragement,
+                    message:
+                        "That's the spirit! CAW-CAW — let's climb! Quick "
+                        'check before you go: $packingPreview, and the '
+                        'usual essentials.',
+                    scope: AgakTipScope.hikingOnly,
+                  ),
+                );
+              },
+            ),
+            AgakTipChoice(
+              label: 'Give me a sec',
+              onSelected: () => AgakTipBus.instance.push(
+                const AgakTip(
+                  emotion: AgakEmotionState.pointingSuggestion,
+                  message: "Take your time — I'm not going anywhere.",
+                  scope: AgakTipScope.hikingOnly,
+                ),
+              ),
+            ),
+          ],
+          scope: AgakTipScope.hikingOnly,
+        ),
+      );
+      debugPrint(
+        'DEBUG hike-start: greeting pushed, bus version after push is '
+        '${AgakTipBus.instance.version}',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Hiking Mode failed to start: $error\n$stackTrace');
       if (!mounted) {
         return;
       }
@@ -12791,7 +14072,11 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         _motivationMessages[_motivationTipIndex % _motivationMessages.length];
     _motivationTipIndex++;
     AgakTipBus.instance.push(
-      AgakTip(emotion: AgakEmotionState.encouragement, message: message),
+      AgakTip(
+        emotion: AgakEmotionState.encouragement,
+        message: message,
+        scope: AgakTipScope.hikingOnly,
+      ),
     );
   }
 
@@ -12825,6 +14110,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
             onSelected: () => _respondToStillCheckIn(imOkay: false),
           ),
         ],
+        scope: AgakTipScope.hikingOnly,
       ),
     );
   }
@@ -12838,11 +14124,12 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         message: imOkay
             ? "Good to hear! Whenever you're ready, I'll be right here."
             : "Take all the time you need — I'll keep an eye on things.",
+        scope: AgakTipScope.hikingOnly,
       ),
     );
   }
 
-  /// Re-checks weather at the live hike location every ~15 minutes so a
+  /// Re-checks weather at the live hike location every ~10 minutes so a
   /// change in conditions (rain moving in) gets flagged mid-hike, not just
   /// once back on the dashboard before the hike even started. Silently
   /// skipped offline or if there's nothing actionable to say — this never
@@ -12866,6 +14153,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
             message:
                 '${snapshot.headline}! Consider finding shelter or heading '
                 'back if it gets worse.',
+            scope: AgakTipScope.hikingOnly,
           ),
         );
       } else if (snapshot.isCaution) {
@@ -12875,6 +14163,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
             message:
                 '${snapshot.headline} — rain could be on the way. Might '
                 'be a good time to put on your rain gear!',
+            scope: AgakTipScope.hikingOnly,
           ),
         );
       }
@@ -12890,6 +14179,19 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         message: km == 1
             ? "You've hiked 1 km! Great start, keep it up!"
             : '$km km down! Your pace is solid — keep going!',
+        scope: AgakTipScope.hikingOnly,
+      ),
+    );
+  }
+
+  void _pushApproachingCheckpointTip(_HikeCheckpoint checkpoint) {
+    AgakTipBus.instance.push(
+      AgakTip(
+        emotion: AgakEmotionState.encouragement,
+        message: checkpoint.isSummit
+            ? "Almost there! The peak — ${checkpoint.name} — is coming up. You've got this!"
+            : "Almost there! ${checkpoint.name} is coming up — keep going!",
+        scope: AgakTipScope.hikingOnly,
       ),
     );
   }
@@ -12902,6 +14204,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
           message:
               'CAW-CAW! You made it to the peak — ${checkpoint.name} '
               'conquered! Incredible work!',
+          scope: AgakTipScope.hikingOnly,
         ),
       );
     } else {
@@ -12909,17 +14212,19 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         AgakTip(
           emotion: AgakEmotionState.rewardReveal,
           message: 'Checkpoint reached: ${checkpoint.name}! Nice progress.',
+          scope: AgakTipScope.hikingOnly,
         ),
       );
     }
   }
 
-  /// Coarse "you might be off course" check — compares the direction
-  /// you're actually walking (GPS course-over-ground) against the bearing
-  /// toward a point further up the planned trail. Deliberately not
-  /// precise turn-by-turn guidance: it only fires when the two directions
-  /// are wildly different (roughly facing away from the trail), and only
-  /// once every couple of minutes, so a single noisy reading can't nag.
+  /// Turn-by-turn-style course check — compares the direction you're
+  /// actually walking (GPS course-over-ground) against the bearing toward
+  /// a point further up the planned trail, and speaks up like a real hiking
+  /// buddy: a gentle "turn left/right a bit" for normal drift, escalating
+  /// to "wrong way, turn around" only when you're basically facing away
+  /// from the trail. Only once every couple of minutes, so a single noisy
+  /// GPS reading can't nag.
   void _checkWrongDirection(Position position) {
     if (_plannedRoutePoints.isEmpty) {
       return;
@@ -12956,19 +14261,34 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     );
     final normalizedBearing = (bearingToTarget + 360) % 360;
     final normalizedHeading = (position.heading + 360) % 360;
-    var diff = (normalizedBearing - normalizedHeading).abs();
-    if (diff > 180) {
-      diff = 360 - diff;
+    // Signed delta in (-180, 180]: positive means the trail is clockwise
+    // from where you're facing (turn right), negative means counter-
+    // clockwise (turn left).
+    var delta = normalizedBearing - normalizedHeading;
+    if (delta > 180) {
+      delta -= 360;
+    } else if (delta < -180) {
+      delta += 360;
     }
+    final diff = delta.abs();
 
     if (diff >= _wrongWayAngleThresholdDegrees) {
       _lastWrongWayWarningAt = now;
       AgakTipBus.instance.push(
         const AgakTip(
           emotion: AgakEmotionState.discouraging,
-          message:
-              "You might be heading the wrong way — double-check your "
-              'position against the trail!',
+          message: "Whoa, wrong way! Turn around and head back onto the trail.",
+          scope: AgakTipScope.hikingOnly,
+        ),
+      );
+    } else if (diff >= _driftAngleThresholdDegrees) {
+      _lastWrongWayWarningAt = now;
+      final direction = delta > 0 ? 'right' : 'left';
+      AgakTipBus.instance.push(
+        AgakTip(
+          emotion: AgakEmotionState.pointingSuggestion,
+          message: "Turn $direction a bit — you're drifting off the trail.",
+          scope: AgakTipScope.hikingOnly,
         ),
       );
     }
@@ -12984,6 +14304,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     var shouldPersistPoint = false;
     int? kmJustReached;
     _HikeCheckpoint? checkpointJustReached;
+    _HikeCheckpoint? checkpointNowApproaching;
     final previous = _lastPosition;
     if (previous != null) {
       segmentMeters = Geolocator.distanceBetween(
@@ -13109,15 +14430,31 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
           checkpoint.location.longitude,
         );
         final threshold = checkpoint.isSummit ? 160.0 : 120.0;
-        if (alongRouteMeters <= threshold || directMeters <= threshold) {
+        // The summit specifically requires genuine movement this session —
+        // otherwise a mountain whose (possibly placeholder/inaccurate)
+        // target coordinate happens to sit near wherever the hike started
+        // gets credited as "summited" on the very first GPS fix, before
+        // any actual hiking happened.
+        final meaningfulDistanceWalked =
+            !checkpoint.isSummit || _trackedDistanceMeters >= 100;
+        if (meaningfulDistanceWalked &&
+            (alongRouteMeters <= threshold || directMeters <= threshold)) {
           _reachedCheckpoints.add(checkpoint.name);
+          _approachingAnnounced.add(checkpoint.name);
           checkpointJustReached ??= checkpoint;
+        } else if ((alongRouteMeters <= _approachingThresholdMeters ||
+                directMeters <= _approachingThresholdMeters) &&
+            _approachingAnnounced.add(checkpoint.name)) {
+          checkpointNowApproaching ??= checkpoint;
         }
       }
     });
 
     if (kmJustReached != null) {
       _pushKmMilestoneTip(kmJustReached!);
+    }
+    if (checkpointNowApproaching != null) {
+      _pushApproachingCheckpointTip(checkpointNowApproaching!);
     }
     if (checkpointJustReached != null) {
       _pushCheckpointTip(checkpointJustReached!);
@@ -13221,37 +14558,24 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     await HapticFeedback.heavyImpact();
     if (!mounted) return;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Send SOS Alert?'),
-        content: Text(
-          'This will prepare an emergency SOS with your identity and GPS coordinates.\n\n'
+    final confirmed = await _showAgakConfirmDialog(
+      context,
+      icon: Icons.sos_rounded,
+      title: 'Send SOS Alert?',
+      message:
+          'This will prepare an emergency SOS with your identity and GPS '
+          'coordinates.\n\n'
           'Hiker: ${_sosSenderName()}\n'
           'Trail: ${widget.trail.name}\n'
           'Latitude: ${location.latitude.toStringAsFixed(6)}\n'
           'Longitude: ${location.longitude.toStringAsFixed(6)}\n\n'
           'Bluetooth/LoRa transmission will be connected in the next step.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton.icon(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            icon: const Icon(Icons.sos_rounded),
-            label: const Text('Send SOS'),
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFFD84334),
-              foregroundColor: Colors.white,
-            ),
-          ),
-        ],
-      ),
+      cancelLabel: 'Cancel',
+      confirmLabel: 'Send SOS',
+      confirmIcon: Icons.sos_rounded,
     );
 
-    if (confirmed == true) {
+    if (confirmed) {
       await _prepareSosPayload(location);
     }
   }
@@ -13289,7 +14613,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
               ? 'SOS sent to your Tour Guide through the hike room.'
               : 'No active internet room received the SOS. Heltec/LoRa is not connected yet.',
         ),
-        backgroundColor: const Color(0xFFD84334),
+        backgroundColor: AgakColors.maroon,
       ),
     );
   }
@@ -13481,6 +14805,11 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     if (_reachedCheckpoints.contains('Peak')) {
       return true;
     }
+    // Same guard as the checkpoint loop — no crediting a finish you never
+    // actually walked to.
+    if (_trackedDistanceMeters < 100) {
+      return false;
+    }
     final currentLocation = _currentLocation;
     final target = _hikeTarget ?? widget.trail.location;
     if (currentLocation == null) {
@@ -13503,26 +14832,17 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     final remainingText = remainingKm == null
         ? 'the finish'
         : 'about ${remainingKm.toStringAsFixed(2)} km from the finish';
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Finish not reached'),
-        content: Text(
-          'You are not yet at the route finish or summit. If you stop now, this hike will not be recorded as completed. You are $remainingText.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Keep Hiking'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Stop Anyway'),
-          ),
-        ],
-      ),
+    return _showAgakConfirmDialog(
+      context,
+      icon: Icons.flag_circle_rounded,
+      title: 'Finish Not Reached',
+      message:
+          'You are not yet at the route finish or summit — you are '
+          '$remainingText. If you stop now, this hike will not be '
+          'recorded as completed.',
+      cancelLabel: 'Keep Hiking',
+      confirmLabel: 'Stop Anyway',
     );
-    return confirmed == true;
   }
 
   Future<void> _endHike() async {
@@ -13588,9 +14908,9 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.08),
+          color: AgakColors.surface,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+          border: Border.all(color: AgakColors.ink.withValues(alpha: 0.1)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -13598,17 +14918,18 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
             Text(
               label,
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.7),
+                color: AgakColors.ink.withValues(alpha: 0.6),
                 fontSize: 11,
+                fontWeight: FontWeight.w600,
               ),
             ),
             const SizedBox(height: 2),
             Text(
               value,
               style: const TextStyle(
-                color: Colors.white,
+                color: AgakColors.ink,
                 fontSize: 16,
-                fontWeight: FontWeight.w700,
+                fontWeight: FontWeight.w800,
               ),
             ),
           ],
@@ -13629,286 +14950,324 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         ? 'GPS Active - map online'
         : 'Offline GPS Active - tracking locally';
     final trackingStatusColor = _hasNetworkConnection
-        ? const Color(0xFF7CCBFF)
-        : const Color(0xFF7CF9A2);
+        ? AgakColors.olive
+        : AgakColors.goldDark;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF04140E),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.arrow_back_rounded),
-                    color: Colors.white,
-                  ),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.recordingNewTrail
-                              ? 'Trail Recording'
-                              : 'Hiking Mode',
-                          style: const TextStyle(
-                            color: Color(0xFF7CF9A2),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.8,
-                          ),
-                        ),
-                        Text(
-                          widget.trail.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        Text(
-                          widget.recordingNewTrail
-                              ? 'Recording your walked GPS trail'
-                              : _usingCommunityTrail
-                              ? 'Trail source: Community (${widget.communityTrail?.status ?? 'unknown'})'
-                              : _usingGpxTrail
-                              ? () {
-                                  final label = widget.selectedRouteLabel
-                                      ?.trim();
-                                  final source =
-                                      (label != null && label.isNotEmpty)
-                                      ? label
-                                      : (_gpxTrailAssetPath?.split('/').last ??
-                                            'mapped');
-                                  if (_trailJoinDistanceMeters > 60) {
-                                    return 'Trail source: GPX ($source) | Connected from your location';
-                                  }
-                                  return 'Trail source: GPX ($source)';
-                                }()
-                              : _usingResolvedPeak
-                              ? 'Target: mapped mountain peak'
-                              : 'Target: selected place (peak data unavailable)',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.7),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
+      body: Container(
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.arrow_back_rounded),
+                      color: AgakColors.ink,
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  _metricCard(
-                    'To Mountain',
-                    remainingDistanceKm == null
-                        ? '--'
-                        : '${remainingDistanceKm.toStringAsFixed(2)} km',
-                  ),
-                  const SizedBox(width: 8),
-                  _metricCard(
-                    'Distance Hiked',
-                    '${(_trackedDistanceMeters / 1000).toStringAsFixed(2)} km',
-                  ),
-                  const SizedBox(width: 8),
-                  _metricCard('Elapsed', _durationLabel(_elapsed)),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: Stack(
-                    children: [
-                      OfflineMapWidget(
-                        key: ValueKey(
-                          '${cameraTarget.latitude},${cameraTarget.longitude},${_trackPoints.length},$_hasNetworkConnection',
-                        ),
-                        initialLatitude: cameraTarget.latitude,
-                        initialLongitude: cameraTarget.longitude,
-                        initialZoom: 15,
-                        markers: _buildOfflineHikeMarkers(),
-                        polylines: _buildOfflineHikePolylines(),
-                        showScaleLayer: false,
-                        allowNetworkFallback: _hasNetworkConnection,
-                      ),
-                      Positioned(
-                        top: 10,
-                        left: 10,
-                        right: 10,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.62),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: trackingStatusColor.withValues(
-                                alpha: 0.55,
-                              ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.recordingNewTrail
+                                ? 'Trail Recording'
+                                : 'Hiking Mode',
+                            style: const TextStyle(
+                              color: AgakColors.maroon,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.8,
                             ),
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.gps_fixed_rounded,
-                                color: trackingStatusColor,
-                                size: 18,
+                          Text(
+                            widget.trail.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AgakColors.ink,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Text(
+                            widget.recordingNewTrail
+                                ? 'Recording your walked GPS trail'
+                                : _usingCommunityTrail
+                                ? 'Trail source: Community (${widget.communityTrail?.status ?? 'unknown'})'
+                                : _usingGpxTrail
+                                ? () {
+                                    final label = widget.selectedRouteLabel
+                                        ?.trim();
+                                    final source =
+                                        (label != null && label.isNotEmpty)
+                                        ? label
+                                        : (_gpxTrailAssetPath
+                                                  ?.split('/')
+                                                  .last ??
+                                              'mapped');
+                                    if (_trailJoinDistanceMeters > 60) {
+                                      return 'Trail source: GPX ($source) | Connected from your location';
+                                    }
+                                    return 'Trail source: GPX ($source)';
+                                  }()
+                                : _usingResolvedPeak
+                                ? 'Target: mapped mountain peak'
+                                : 'Target: selected place (peak data unavailable)',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: AgakColors.ink.withValues(alpha: 0.62),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    _metricCard(
+                      'To Mountain',
+                      remainingDistanceKm == null
+                          ? '--'
+                          : '${remainingDistanceKm.toStringAsFixed(2)} km',
+                    ),
+                    const SizedBox(width: 8),
+                    _metricCard(
+                      'Distance Hiked',
+                      '${(_trackedDistanceMeters / 1000).toStringAsFixed(2)} km',
+                    ),
+                    const SizedBox(width: 8),
+                    _metricCard('Elapsed', _durationLabel(_elapsed)),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: LayoutBuilder(
+                      builder: (context, mapConstraints) {
+                        final mapSize = mapConstraints.biggest;
+                        _kyrielleOffset ??= const Offset(10, 56);
+                        return Stack(
+                          children: [
+                            OfflineMapWidget(
+                              key: ValueKey(
+                                '${cameraTarget.latitude},${cameraTarget.longitude},${_trackPoints.length},$_hasNetworkConnection',
                               ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  trackingStatusText,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 12,
+                              initialLatitude: cameraTarget.latitude,
+                              initialLongitude: cameraTarget.longitude,
+                              initialZoom: 15,
+                              markers: _buildOfflineHikeMarkers(),
+                              polylines: _buildOfflineHikePolylines(),
+                              showScaleLayer: false,
+                              allowNetworkFallback: _hasNetworkConnection,
+                            ),
+                            Positioned(
+                              top: 10,
+                              left: 10,
+                              right: 10,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: AgakColors.ink.withValues(alpha: 0.72),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: trackingStatusColor.withValues(
+                                      alpha: 0.7,
+                                    ),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.gps_fixed_rounded,
+                                      color: trackingStatusColor,
+                                      size: 18,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        trackingStatusText,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              left: _kyrielleOffset!.dx,
+                              top: _kyrielleOffset!.dy,
+                              child: AgakTipPopup(
+                                onDragDelta: (delta) {
+                                  setState(() {
+                                    final maxX =
+                                        mapSize.width -
+                                        _kyrielleFootprint.width -
+                                        4;
+                                    final maxY =
+                                        mapSize.height -
+                                        _kyrielleFootprint.height -
+                                        4;
+                                    _kyrielleOffset = Offset(
+                                      (_kyrielleOffset!.dx + delta.dx).clamp(
+                                        4.0,
+                                        maxX < 4.0 ? 4.0 : maxX,
+                                      ),
+                                      (_kyrielleOffset!.dy + delta.dy).clamp(
+                                        4.0,
+                                        maxY < 4.0 ? 4.0 : maxY,
+                                      ),
+                                    );
+                                  });
+                                },
+                              ),
+                            ),
+                            if (_initializing)
+                              Container(
+                                color: AgakColors.ink.withValues(alpha: 0.45),
+                                alignment: Alignment.center,
+                                child: const CircularProgressIndicator(
+                                  color: AgakColors.gold,
+                                ),
+                              ),
+                            if (_errorMessage != null)
+                              Positioned(
+                                top: 58,
+                                left: 10,
+                                right: 10,
+                                child: Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: AgakColors.maroon.withValues(
+                                      alpha: 0.92,
+                                    ),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                      color: AgakColors.gold.withValues(
+                                        alpha: 0.7,
+                                      ),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    _errorMessage!,
+                                    style: const TextStyle(
+                                      color: AgakColors.cream,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const Positioned(
-                        top: 56,
-                        left: 10,
-                        right: 10,
-                        child: AgakTipPopup(),
-                      ),
-                      if (_initializing)
-                        Container(
-                          color: Colors.black45,
-                          alignment: Alignment.center,
-                          child: const CircularProgressIndicator(
-                            color: Color(0xFF7CF9A2),
-                          ),
-                        ),
-                      if (_errorMessage != null)
-                        Positioned(
-                          top: 58,
-                          left: 10,
-                          right: 10,
-                          child: Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: const Color(
-                                0xFF3A1616,
-                              ).withValues(alpha: 0.9),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: const Color(
-                                  0xFFFF8A8A,
-                                ).withValues(alpha: 0.7),
-                              ),
-                            ),
-                            child: Text(
-                              _errorMessage!,
-                              style: const TextStyle(color: Colors.white),
-                            ),
-                          ),
-                        ),
-                      Positioned(
-                        left: 10,
-                        right: 10,
-                        bottom: 10,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.55),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  'Current Elev: $currentElevationText',
-                                  style: const TextStyle(color: Colors.white),
+                            Positioned(
+                              left: 10,
+                              right: 10,
+                              bottom: 10,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: AgakColors.ink.withValues(alpha: 0.72),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Current Elev: $currentElevationText',
+                                        style: const TextStyle(
+                                          color: AgakColors.cream,
+                                        ),
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: Text(
+                                        'Peak: $peakMasl MASL',
+                                        textAlign: TextAlign.right,
+                                        style: const TextStyle(
+                                          color: AgakColors.cream,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              Expanded(
-                                child: Text(
-                                  'Peak: $peakMasl MASL',
-                                  textAlign: TextAlign.right,
-                                  style: const TextStyle(color: Colors.white),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
+                            ),
+                          ],
+                        );
+                      },
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed: (_sendingSos || _ending)
-                          ? null
-                          : _showSosConfirmation,
-                      icon: const Icon(Icons.warning_amber_rounded),
-                      label: Text(
-                        _sendingSos ? 'Sending...' : 'SOS',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.6,
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: (_sendingSos || _ending)
+                            ? null
+                            : _showSosConfirmation,
+                        icon: const Icon(Icons.warning_amber_rounded),
+                        label: Text(
+                          _sendingSos ? 'Sending...' : 'SOS',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.6,
+                          ),
                         ),
-                      ),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: const Color(0xFFD84334),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _ending ? null : _endHike,
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      label: Text(
-                        _ending ? 'Saving...' : 'End Hike',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 0.4,
-                        ),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF26352D),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AgakColors.maroon,
+                          foregroundColor: AgakColors.cream,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _ending ? null : _endHike,
+                        icon: const Icon(Icons.stop_circle_outlined),
+                        label: Text(
+                          _ending ? 'Saving...' : 'End Hike',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AgakColors.ink,
+                          foregroundColor: AgakColors.cream,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -13996,13 +15355,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF04140E), Color(0xFF072519), Color(0xFF03110C)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: SafeArea(
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -14018,14 +15371,14 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                       IconButton(
                         onPressed: () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.arrow_back_rounded),
-                        color: Colors.white,
+                        color: AgakColors.ink,
                       ),
                       const SizedBox(height: 12),
                       Text(
                         'Forgot Password',
                         style: Theme.of(context).textTheme.headlineMedium
                             ?.copyWith(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontWeight: FontWeight.w800,
                             ),
                       ),
@@ -14033,7 +15386,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                       Text(
                         'Enter your registered email. We will send a secure reset link.',
                         style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: const Color(0xFF82CFA5),
+                          color: AgakColors.maroon,
                           height: 1.4,
                         ),
                       ),
@@ -14051,8 +15404,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                         child: ElevatedButton(
                           onPressed: _isSubmitting ? null : _sendResetEmail,
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF45D972),
-                            foregroundColor: Colors.black,
+                            backgroundColor: AgakColors.maroon,
+                            foregroundColor: AgakColors.cream,
                             padding: const EdgeInsets.symmetric(vertical: 18),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(18),
@@ -14064,7 +15417,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                                   height: 24,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2.4,
-                                    color: Colors.black,
+                                    color: AgakColors.cream,
                                   ),
                                 )
                               : const Text(
@@ -14209,9 +15562,9 @@ class _SignUpScreenState extends State<SignUpScreen> {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
+        color: AgakColors.ink.withValues(alpha: 0.05),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.12)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -14219,7 +15572,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
           Text(
             'Choose account type',
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.82),
+              color: AgakColors.ink.withValues(alpha: 0.82),
               fontSize: 13,
               fontWeight: FontWeight.w700,
             ),
@@ -14272,20 +15625,22 @@ class _SignUpScreenState extends State<SignUpScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
             color: isSelected
-                ? const Color(0xFF53D97A).withValues(alpha: 0.18)
-                : Colors.white.withValues(alpha: 0.04),
+                ? AgakColors.maroon.withValues(alpha: 0.16)
+                : AgakColors.ink.withValues(alpha: 0.04),
             borderRadius: BorderRadius.circular(14),
             border: Border.all(
               color: isSelected
-                  ? const Color(0xFF53D97A)
-                  : Colors.white.withValues(alpha: 0.1),
+                  ? AgakColors.maroon
+                  : AgakColors.ink.withValues(alpha: 0.1),
             ),
           ),
           child: Row(
             children: [
               Icon(
                 icon,
-                color: isSelected ? const Color(0xFF53D97A) : Colors.white70,
+                color: isSelected
+                    ? AgakColors.maroon
+                    : AgakColors.ink.withValues(alpha: 0.7),
                 size: 22,
               ),
               const SizedBox(width: 8),
@@ -14295,7 +15650,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: isSelected ? const Color(0xFF7CF9A2) : Colors.white,
+                    color: isSelected ? AgakColors.maroon : AgakColors.ink,
                     fontSize: 13,
                     fontWeight: FontWeight.w800,
                   ),
@@ -14312,13 +15667,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF04140E), Color(0xFF072519), Color(0xFF03110C)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: SafeArea(
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -14334,7 +15683,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                       IconButton(
                         onPressed: () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.arrow_back_rounded),
-                        color: Colors.white,
+                        color: AgakColors.ink,
                       ),
                       const SizedBox(height: 8),
                       Center(
@@ -14345,7 +15694,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(24),
                             gradient: const LinearGradient(
-                              colors: [Color(0xFF38D86E), Color(0xFF2CB95F)],
+                              colors: [AgakColors.olive, AgakColors.maroon],
                             ),
                           ),
                           child: ClipRRect(
@@ -14364,7 +15713,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           style: Theme.of(context).textTheme.headlineSmall
                               ?.copyWith(
                                 fontWeight: FontWeight.w800,
-                                color: Colors.white,
+                                color: AgakColors.ink,
                               ),
                         ),
                       ),
@@ -14373,7 +15722,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                         child: Text(
                           'Fill in your details to get started.',
                           style: Theme.of(context).textTheme.bodyLarge
-                              ?.copyWith(color: const Color(0xFF82CFA5)),
+                              ?.copyWith(color: AgakColors.maroon),
                         ),
                       ),
                       const SizedBox(height: 28),
@@ -14417,7 +15766,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                             _obscurePassword
                                 ? Icons.visibility_outlined
                                 : Icons.visibility_off_outlined,
-                            color: Colors.white.withValues(alpha: 0.66),
+                            color: AgakColors.ink.withValues(alpha: 0.66),
                           ),
                         ),
                       ),
@@ -14439,7 +15788,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                             _obscureConfirmPassword
                                 ? Icons.visibility_outlined
                                 : Icons.visibility_off_outlined,
-                            color: Colors.white.withValues(alpha: 0.66),
+                            color: AgakColors.ink.withValues(alpha: 0.66),
                           ),
                         ),
                       ),
@@ -14451,8 +15800,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
                               ? null
                               : _handleSaveAndVerify,
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF45D972),
-                            foregroundColor: Colors.black,
+                            backgroundColor: AgakColors.maroon,
+                            foregroundColor: AgakColors.cream,
                             padding: const EdgeInsets.symmetric(vertical: 18),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(18),
@@ -14464,7 +15813,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                   height: 24,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2.4,
-                                    color: Colors.black,
+                                    color: AgakColors.cream,
                                   ),
                                 )
                               : const Text(
@@ -14555,7 +15904,21 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
       }
       if (verified) {
         _showSnackBar('Email verified successfully.');
-        Navigator.of(context).popUntil((route) => route.isFirst);
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        final onboarded = uid == null
+            ? true
+            : await OnboardingService().hasCompletedOnboarding(uid);
+        if (!mounted) {
+          return;
+        }
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute<void>(
+            builder: (context) => onboarded
+                ? const DashboardScreen()
+                : const OnboardingFlowScreen(),
+          ),
+          (route) => false,
+        );
       } else {
         _showSnackBar('Not verified yet. Check your email and tap the link.');
       }
@@ -14591,13 +15954,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF04140E), Color(0xFF072519), Color(0xFF03110C)],
-          ),
-        ),
+        decoration: BoxDecoration(gradient: AgakColors.screenBackground),
         child: SafeArea(
           child: LayoutBuilder(
             builder: (context, constraints) {
@@ -14612,14 +15969,14 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                       IconButton(
                         onPressed: () => Navigator.of(context).pop(),
                         icon: const Icon(Icons.arrow_back_rounded),
-                        color: Colors.white,
+                        color: AgakColors.ink,
                       ),
                       const SizedBox(height: 10),
                       Text(
                         'Verify Your Email',
                         style: Theme.of(context).textTheme.headlineMedium
                             ?.copyWith(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontWeight: FontWeight.w800,
                             ),
                       ),
@@ -14627,14 +15984,14 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                       Text(
                         'Click the verification link sent to:',
                         style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: const Color(0xFF82CFA5),
+                          color: AgakColors.maroon,
                         ),
                       ),
                       const SizedBox(height: 6),
                       Text(
                         widget.email,
                         style: const TextStyle(
-                          color: Colors.white,
+                          color: AgakColors.ink,
                           fontWeight: FontWeight.w700,
                           fontSize: 17,
                         ),
@@ -14644,16 +16001,16 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                         width: double.infinity,
                         padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.05),
+                          color: AgakColors.ink.withValues(alpha: 0.05),
                           borderRadius: BorderRadius.circular(16),
                           border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.15),
+                            color: AgakColors.ink.withValues(alpha: 0.15),
                           ),
                         ),
                         child: Text(
                           'After tapping the link in your email, return here and press "I HAVE VERIFIED".',
                           style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.85),
+                            color: AgakColors.ink.withValues(alpha: 0.85),
                             height: 1.4,
                           ),
                         ),
@@ -14666,7 +16023,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                                 ? 'Resend email in $_secondsLeft s.'
                                 : 'Didn\'t receive the code?',
                             style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.66),
+                              color: AgakColors.ink.withValues(alpha: 0.66),
                               fontSize: 15,
                             ),
                           ),
@@ -14687,8 +16044,8 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                               ? null
                               : _checkVerification,
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF45D972),
-                            foregroundColor: Colors.black,
+                            backgroundColor: AgakColors.maroon,
+                            foregroundColor: AgakColors.cream,
                             padding: const EdgeInsets.symmetric(vertical: 18),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(18),
@@ -14700,7 +16057,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                                   height: 24,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2.4,
-                                    color: Colors.black,
+                                    color: AgakColors.cream,
                                   ),
                                 )
                               : const Text(
@@ -14750,22 +16107,22 @@ class _AuthInput extends StatelessWidget {
       obscureText: obscureText,
       keyboardType: keyboardType,
       textInputAction: textInputAction,
-      style: const TextStyle(color: Colors.white, fontSize: 21),
-      cursorColor: const Color(0xFF45D972),
+      style: const TextStyle(color: AgakColors.ink, fontSize: 21),
+      cursorColor: AgakColors.olive,
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.58)),
-        prefixIcon: Icon(icon, color: const Color(0xFF4FD972), size: 25),
+        hintStyle: TextStyle(color: AgakColors.ink.withValues(alpha: 0.48)),
+        prefixIcon: Icon(icon, color: AgakColors.olive, size: 25),
         suffixIcon: suffix,
         filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.04),
+        fillColor: Colors.white.withValues(alpha: 0.55),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(18),
-          borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.24)),
+          borderSide: BorderSide(color: AgakColors.ink.withValues(alpha: 0.18)),
         ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(18),
-          borderSide: const BorderSide(color: Color(0xFF4FD972)),
+        focusedBorder: const OutlineInputBorder(
+          borderRadius: BorderRadius.all(Radius.circular(18)),
+          borderSide: BorderSide(color: AgakColors.olive),
         ),
       ),
     );
@@ -14784,18 +16141,18 @@ class _InfoChip extends StatelessWidget {
       width: 142,
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.1),
+        color: Colors.white.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
         children: [
-          Icon(icon, color: const Color(0xFF86FFBC), size: 18),
+          Icon(icon, color: AgakColors.olive, size: 18),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               label,
               style: const TextStyle(
-                color: Colors.white,
+                color: AgakColors.ink,
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
               ),

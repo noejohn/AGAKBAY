@@ -26,6 +26,12 @@
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Agakbay lets you choose a profile photo from your library.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Agakbay uses your microphone so you can talk to Kyrielle, your trail companion.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Agakbay converts your speech to text so Kyrielle can understand what you're asking.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Agakbay connects to your paired Heltec device over Bluetooth to send SOS alerts and location when there is no cell signal.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
