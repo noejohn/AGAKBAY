@@ -18,7 +18,12 @@ import 'agak_speech_bubble.dart';
 /// Two distinct taps:
 ///  - tapping AGAK's body is a poke — a playful bounce and a one-off reaction
 ///    line, purely for delight, then it settles back to what it was saying.
+///    If the bubble had already faded, this also brings it back.
 ///  - tapping the speech bubble opens the full AGAK screen.
+///
+/// No manual close button — the bubble simply fades on its own once its
+/// hold duration is up (see [_holdDurationFor]), the same "she just goes
+/// quiet, tap her to hear it again" behavior as Hiking Mode's presence.
 ///
 /// Content comes straight from the two sources that already feed AGAK
 /// elsewhere: [AgakTipBus] (event-driven — trivia on opening a mountain,
@@ -26,6 +31,12 @@ import 'agak_speech_bubble.dart';
 /// when something has been pushed, falling back to [AgakController]'s
 /// standing recommendation message. Neither source needs new plumbing —
 /// this widget just gives them a permanent, non-intrusive home.
+///
+/// Only [AgakTipScope.global] tips are eligible here — [AgakTipScope.
+/// hikingOnly] tips (pace cheers, checkpoint nudges, turn-by-turn warnings)
+/// are Hiking Mode's own live-tracking chatter and are filtered out, or
+/// this permanent, no-expiry slot would get stuck showing "Stay hydrated!"
+/// long after the hike that said it has ended.
 ///
 /// On cold start those two sources can each fire more than once within a
 /// couple of seconds (a local greeting, then an AI-rephrased version of the
@@ -59,15 +70,21 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
   static const double _bubbleMaxWidth = 260;
 
   static const String _initialGreeting =
-      "Hi there! I'm AGAK — how are you doing today?";
+      "Hi there! I'm Kyrielle — how are you doing today?";
 
-  static const List<String> _pokeReactions = [
-    "Hehe, that tickles!",
-    "Ready for an adventure?",
-    "You called? I'm here!",
-    "Tap my bubble if you want to really talk!",
-    "Squawk! Hi there!",
-    "Let's climb something today.",
+  /// Message + the emotion art to show while that specific reaction is
+  /// up — null keeps whatever AGAK was already displaying, for the two
+  /// reactions that don't have a dedicated pose of their own.
+  static const List<(String, AgakEmotionState?)> _pokeReactions = [
+    ('Hehe, that tickles!', AgakEmotionState.tickled),
+    ('Ready for an adventure?', AgakEmotionState.readyForAdventure),
+    ("You called? I'm here!", AgakEmotionState.youCalledMe),
+    (
+      'Tap my bubble if you want to really talk!',
+      AgakEmotionState.encouragement,
+    ),
+    ('Squawk! Hi there!', AgakEmotionState.youCalledMe),
+    ("Let's climb something today.", null),
   ];
 
   String _displayedMessage = _initialGreeting;
@@ -77,7 +94,14 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
   bool _bubblePressed = false;
   bool _characterPressed = false;
 
+  /// Whether the bubble is currently shown. Goes false on its own once
+  /// [_fadeTimer] fires (no manual close) — reset to true whenever a new
+  /// message is adopted or the character is tapped.
+  bool _bubbleVisible = true;
+  Timer? _fadeTimer;
+
   String? _pokeReaction;
+  AgakEmotionState? _pokeEmotion;
   Timer? _pokeTimer;
   final _random = Random();
 
@@ -109,6 +133,7 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
   void dispose() {
     _pendingSwapTimer?.cancel();
     _pokeTimer?.cancel();
+    _fadeTimer?.cancel();
     _idleController.dispose();
     _pokeController.dispose();
     super.dispose();
@@ -121,6 +146,17 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
   Duration _holdDurationFor(String message) {
     final millis = (message.length * 70).clamp(5000, 11000);
     return Duration(milliseconds: millis);
+  }
+
+  /// Starts (or restarts) the countdown to fading the bubble out on its
+  /// own — no manual close button, she just goes quiet after she's had her
+  /// say. Tapping her (see [_poke]) or a new message arriving both reset it.
+  void _scheduleFade(String message) {
+    _fadeTimer?.cancel();
+    _fadeTimer = Timer(_holdDurationFor(message), () {
+      if (!mounted) return;
+      setState(() => _bubbleVisible = false);
+    });
   }
 
   void _maybeAdopt(String message, AgakEmotionState emotion) {
@@ -136,7 +172,9 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
         _displayedMessage = message;
         _displayedEmotion = emotion;
         _lastChangeAt = now;
+        _bubbleVisible = true;
       });
+      _scheduleFade(message);
       return;
     }
 
@@ -147,32 +185,48 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
         _displayedMessage = message;
         _displayedEmotion = emotion;
         _lastChangeAt = DateTime.now();
+        _bubbleVisible = true;
       });
+      _scheduleFade(message);
     });
   }
 
+  /// Tapping Kyrielle — a playful poke, and (if the bubble had already
+  /// faded) also her "what did you say?" recall gesture.
   void _poke() {
     _pokeController.forward(from: 0);
     _pokeTimer?.cancel();
+    final reaction = _pokeReactions[_random.nextInt(_pokeReactions.length)];
     setState(() {
-      _pokeReaction = _pokeReactions[_random.nextInt(_pokeReactions.length)];
+      _pokeReaction = reaction.$1;
+      _pokeEmotion = reaction.$2;
+      _bubbleVisible = true;
     });
+    _scheduleFade(_displayedMessage);
     _pokeTimer = Timer(const Duration(seconds: 2), () {
       if (!mounted) return;
-      setState(() => _pokeReaction = null);
+      setState(() {
+        _pokeReaction = null;
+        _pokeEmotion = null;
+      });
     });
   }
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: Listenable.merge([AgakController.instance, AgakTipBus.instance]),
+      animation: Listenable.merge([
+        AgakController.instance,
+        AgakTipBus.instance,
+      ]),
       builder: (context, _) {
-        final tip = AgakTipBus.instance.pending;
+        final rawTip = AgakTipBus.instance.pending;
+        final tip = rawTip?.scope == AgakTipScope.hikingOnly ? null : rawTip;
         final moment = AgakController.instance.current;
         final latestEmotion =
             tip?.emotion ?? moment?.emotion ?? AgakEmotionState.encouragement;
-        final latestMessage = tip?.message ?? moment?.message ?? _initialGreeting;
+        final latestMessage =
+            tip?.message ?? moment?.message ?? _initialGreeting;
         WidgetsBinding.instance.addPostFrameCallback(
           (_) => _maybeAdopt(latestMessage, latestEmotion),
         );
@@ -207,11 +261,13 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
                           child: child,
                         ),
                       ),
-                      child: AgakSpeechBubble(
-                        key: ValueKey(bubbleText),
-                        message: bubbleText,
-                        playful: _pokeReaction != null,
-                      ),
+                      child: !_bubbleVisible
+                          ? const SizedBox.shrink(key: ValueKey('faded'))
+                          : AgakSpeechBubble(
+                              key: ValueKey(bubbleText),
+                              message: bubbleText,
+                              playful: _pokeReaction != null,
+                            ),
                     ),
                   ),
                 ),
@@ -224,7 +280,10 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
                 onTapUp: (_) => setState(() => _characterPressed = false),
                 behavior: HitTestBehavior.opaque,
                 child: AnimatedBuilder(
-                  animation: Listenable.merge([_idleController, _pokeController]),
+                  animation: Listenable.merge([
+                    _idleController,
+                    _pokeController,
+                  ]),
                   builder: (context, child) {
                     final breathe = 1.0 + (_idleController.value * 0.035);
                     final pokeBounce =
@@ -240,16 +299,21 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
                   },
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 280),
-                    child: Image.asset(
-                      _displayedEmotion.assetPath,
-                      key: ValueKey(_displayedEmotion),
-                      width: _characterWidth,
-                      fit: BoxFit.contain,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const SizedBox(
-                            width: _characterWidth,
-                            height: _characterWidth,
-                          ),
+                    child: Builder(
+                      builder: (context) {
+                        final shownEmotion = _pokeEmotion ?? _displayedEmotion;
+                        return Image.asset(
+                          shownEmotion.assetPath,
+                          key: ValueKey(shownEmotion),
+                          width: _characterWidth,
+                          fit: BoxFit.contain,
+                          errorBuilder: (context, error, stackTrace) =>
+                              const SizedBox(
+                                width: _characterWidth,
+                                height: _characterWidth,
+                              ),
+                        );
+                      },
                     ),
                   ),
                 ),

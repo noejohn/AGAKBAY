@@ -1,34 +1,58 @@
 import 'package:flutter/material.dart';
 
-/// Shared visual language for AGAK's companion surfaces — the home card,
-/// the full AGAK screen, the emotion showcase, and the scheduled-hikes
-/// list. One place for the dark, nature-green palette (reusing the same
-/// hex values already established in main.dart — `0xFF53D97A` as the
-/// primary accent, `0xFF2F8C5A` as the AGAK border/icon green, etc.) so
-/// these four screens read as one feature instead of four independently
-/// eyeballed ones.
+/// Shared visual language for Kyrielle's companion surfaces — the home
+/// card, the full companion screen, the emotion showcase, and the
+/// scheduled-hikes list. One place for the app's cream/gold/olive/maroon
+/// palette so these four screens read as one feature instead of four
+/// independently eyeballed ones.
+///
+/// Text/icon colors are NOT re-exported here on purpose (see [AgakText]) —
+/// but since this palette flipped from dark to light, every caller that
+/// still hardcodes `Colors.white` for text on these surfaces needs to move
+/// to [ink] instead, or it'll be invisible against the new background.
 class AgakColors {
   AgakColors._();
 
-  /// Base card/container fill.
-  static const Color surface = Color(0xFF0B241A);
+  /// Warm off-white — the palette's background tone.
+  static const Color cream = Color(0xFFFDF8DC);
 
-  /// Slightly lighter fill for nested containers (chips, inset panels).
-  static const Color surfaceRaised = Color(0xFF12231A);
+  /// Golden-yellow — secondary/highlight tone. Backgrounds/fills only —
+  /// too pale for reliable text/icon contrast, use [goldDark] for those.
+  static const Color gold = Color(0xFFF6DA78);
+
+  /// Deeper amber — same gold family, dark enough to use as text, icons,
+  /// or an outline border on a light surface.
+  static const Color goldDark = Color(0xFFAD7A0C);
+
+  /// Olive green — primary accent (borders, "good"/active signals).
+  static const Color olive = Color(0xFF8FBF5A);
+
+  /// Deep maroon-red — strongest accent, CTAs and alerts.
+  static const Color maroon = Color(0xFF97070A);
+
+  /// Dark warm-brown ink — body text/icons on any surface in this
+  /// palette (matches the tone already used on Kyrielle's chat screen).
+  static const Color ink = Color(0xFF2B2117);
+
+  /// Base card/container fill.
+  static const Color surface = Colors.white;
+
+  /// Slightly tinted fill for nested containers (chips, inset panels).
+  static const Color surfaceRaised = Color(0xFFFBEFC7);
 
   /// Screen background gradient stops (top → bottom).
-  static const Color backgroundTop = Color(0xFF15432D);
-  static const Color backgroundMid = Color(0xFF082A1C);
-  static const Color backgroundBottom = Color(0xFF020D09);
+  static const Color backgroundTop = cream;
+  static const Color backgroundMid = Color(0xFFFCF0C4);
+  static const Color backgroundBottom = gold;
 
-  /// AGAK's signature border/icon green.
-  static const Color border = Color(0xFF2F8C5A);
+  /// Signature border/icon color.
+  static const Color border = olive;
 
   /// Primary bright accent — CTAs, active state, "good" signals.
-  static const Color accent = Color(0xFF53D97A);
+  static const Color accent = maroon;
 
-  /// Softer accent for secondary text/labels on dark surfaces.
-  static const Color accentSoft = Color(0xFF7FE0A9);
+  /// Softer accent for secondary text/labels.
+  static const Color accentSoft = olive;
 
   static LinearGradient get screenBackground => const LinearGradient(
     begin: Alignment.topCenter,
