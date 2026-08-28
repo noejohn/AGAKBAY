@@ -59,7 +59,7 @@ class OfflineMapService {
       }
 
       await file.parent.create(recursive: true);
-      return file.writeAsBytes(response.bodyBytes, flush: true);
+      return await file.writeAsBytes(response.bodyBytes, flush: true);
     } catch (e) {
       debugPrint('Error getting tile: $e');
       rethrow;
@@ -156,7 +156,7 @@ class OfflineMapService {
     if (!_isInitialized) await initialize();
 
     try {
-      return File(tilePath(_offlineMapDir.path, x, y, z)).exists();
+      return await File(tilePath(_offlineMapDir.path, x, y, z)).exists();
     } catch (e) {
       return false;
     }

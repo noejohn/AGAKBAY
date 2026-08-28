@@ -85,6 +85,7 @@ class AuthDatabaseService {
   /// onboarding flow (skill level, weather preference) the same as an
   /// email/password signup would.
   Future<UserCredential> signInWithGoogle() async {
+    await _googleSignIn.signOut();
     final googleUser = await _googleSignIn.signIn();
     if (googleUser == null) {
       throw FirebaseAuthException(
