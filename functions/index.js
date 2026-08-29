@@ -16,6 +16,7 @@ function randomSixDigitCode() {
   // just uniformly distributed.
   return String(crypto.randomInt(100000, 1000000));
 }
+exports.randomSixDigitCode = randomSixDigitCode;
 
 function hashCode({ code, uid }) {
   return crypto
@@ -23,6 +24,7 @@ function hashCode({ code, uid }) {
     .update(`${uid}:${code}`)
     .digest("hex");
 }
+exports.hashCode = hashCode;
 
 function sanitizeRoutePoints(points) {
   if (!Array.isArray(points)) {
@@ -52,6 +54,7 @@ function sanitizeRoutePoints(points) {
   }
   return cleaned;
 }
+exports.sanitizeRoutePoints = sanitizeRoutePoints;
 
 async function sendEmailWithResend({ to, code }) {
   const apiKey = process.env.RESEND_API_KEY;
@@ -218,6 +221,7 @@ function isFiniteNumberInRange(value, min, max) {
   const num = Number(value);
   return Number.isFinite(num) && num >= min && num <= max;
 }
+exports.isFiniteNumberInRange = isFiniteNumberInRange;
 
 exports.sendSosEvent = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
@@ -329,6 +333,7 @@ function weatherCodeFromGoogleCondition(conditionType) {
   if (type.includes("CLEAR") || type.includes("SUNNY")) return 0;
   return 3;
 }
+exports.weatherCodeFromGoogleCondition = weatherCodeFromGoogleCondition;
 
 function isWetWeatherCode(weatherCode) {
   return (
@@ -337,6 +342,7 @@ function isWetWeatherCode(weatherCode) {
     weatherCode >= 95
   );
 }
+exports.isWetWeatherCode = isWetWeatherCode;
 
 // Same thresholds as weather_service.dart's _hikeWeatherRisk — this is now
 // the single source of truth; the Dart copy is deleted once the client
@@ -373,6 +379,7 @@ function hikeWeatherRisk({
   }
   return "good";
 }
+exports.hikeWeatherRisk = hikeWeatherRisk;
 
 exports.fetchWeatherSnapshot = onCall(
   { timeoutSeconds: 30, memory: "256MiB", secrets: ["WEATHER_API_KEY"] },
