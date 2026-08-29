@@ -86,3 +86,6 @@ id_rsa.pub
 /ERD.txt
 /DATA_FLOW_DIAGRAM.md
 /terminal-test.txt
+
+# Stray JDK install that ended up inside the firmware sketch folder — not project source
+firmware/agakbay_heltec/oracleJdk-26/

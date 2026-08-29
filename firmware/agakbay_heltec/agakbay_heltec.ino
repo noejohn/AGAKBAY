@@ -81,6 +81,15 @@ char loraRxBuffer[LORA_BUFFER_SIZE];
 // keeps every radio call on the one task that owns Radio.IrqProcess().
 volatile bool sosPending = false;
 String pendingSosName = "Hiker";
+// The phone's own GPS supplies these — the onboard GNSS module is
+// unreliable on the current hardware, so this board just relays the
+// phone's coordinates over LoRa instead of measuring its own location.
+double pendingSosLat = 0;
+double pendingSosLng = 0;
+// False only for a malformed/legacy write with no coordinates — the app
+// itself refuses to call sendSos() without a real phone GPS fix, so this
+// should be true in practice, but the firmware doesn't assume that.
+bool pendingSosHasFix = false;
 
 String lastRelayHikerName = "";
 bool lastRelayHasFix = false;
@@ -160,16 +169,34 @@ class ServerCallbacks : public BLEServerCallbacks {
 
 class SosCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *characteristic) override {
-    // Phone writes "SOS|<hikerName>". Older app builds wrote a single
-    // 0x01 byte with no name — fall back to "Hiker" for those.
+    // Phone writes "SOS|<hikerName>|<lat>|<lng>" — coordinates come from
+    // the PHONE's own GPS now, not this board's (unreliable) onboard
+    // GNSS module. Falls back to "Hiker"/0,0 for any malformed/older
+    // write so a bad parse never silently drops the SOS trigger itself.
     String value = String(characteristic->getValue().c_str());
     String hikerName = "Hiker";
-    int sep = value.indexOf('|');
-    if (sep != -1 && sep + 1 < (int)value.length()) {
-      hikerName = value.substring(sep + 1);
+    double lat = 0;
+    double lng = 0;
+    bool hasFix = false;
+    int p1 = value.indexOf('|');
+    if (p1 != -1) {
+      int p2 = value.indexOf('|', p1 + 1);
+      int p3 = p2 == -1 ? -1 : value.indexOf('|', p2 + 1);
+      if (p2 != -1 && p3 != -1) {
+        hikerName = value.substring(p1 + 1, p2);
+        lat = value.substring(p2 + 1, p3).toDouble();
+        lng = value.substring(p3 + 1).toDouble();
+        hasFix = true;
+      } else if (p1 + 1 < (int)value.length()) {
+        hikerName = value.substring(p1 + 1);
+      }
     }
-    Serial.println("SOS triggered from phone app: " + hikerName);
+    Serial.printf("SOS triggered from phone app: %s at %.6f,%.6f (fix=%s)\n",
+                  hikerName.c_str(), lat, lng, hasFix ? "yes" : "NO");
     pendingSosName = hikerName;
+    pendingSosLat = lat;
+    pendingSosLng = lng;
+    pendingSosHasFix = hasFix;
     sosPending = true;
   }
 };
@@ -399,19 +426,20 @@ void loop() {
   // so every Radio.* call happens on this one task, alongside IrqProcess.
   if (sosPending && radioState == RADIO_RX) {
     sosPending = false;
-    bool hasFix = gps.location.isValid();
-    double lat = hasFix ? gps.location.lat() : 0.0;
-    double lng = hasFix ? gps.location.lng() : 0.0;
+    // Coordinates come from the triggering phone's own GPS (see
+    // SosCallbacks::onWrite) — this board's onboard GNSS module is
+    // unreliable on the current hardware, so it's not used here at all.
     // hasFix is sent explicitly (0/1) rather than inferred from 0.0,0.0 on
     // the receiving end — a real GPS fix at exactly null island is
     // astronomically unlikely, but "0.0,0.0 means no fix" is still a
     // fragile assumption to bake into the receiver.
     snprintf(loraTxBuffer, LORA_BUFFER_SIZE, "SOS|%s|%d|%.6f|%.6f",
-             pendingSosName.c_str(), hasFix ? 1 : 0, lat, lng);
+             pendingSosName.c_str(), pendingSosHasFix ? 1 : 0, pendingSosLat,
+             pendingSosLng);
     Serial.print("LoRa: sending SOS -> ");
     Serial.println(loraTxBuffer);
-    if (!hasFix) {
-      Serial.println("LoRa: WARNING - no GPS fix yet, sending without location.");
+    if (!pendingSosHasFix) {
+      Serial.println("LoRa: WARNING - no location from phone, sending without one.");
     }
     Radio.Sleep();
     Radio.Send((uint8_t *)loraTxBuffer, strlen(loraTxBuffer));

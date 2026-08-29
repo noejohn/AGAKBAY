@@ -216,8 +216,17 @@ class HeltecBleService extends ChangeNotifier {
   }
 
   /// Writes an SOS trigger to the Heltec so it broadcasts the alert over
-  /// LoRa even though this phone has no internet connection.
-  Future<bool> sendSos({String hikerName = 'Hiker'}) async {
+  /// LoRa even though this phone has no internet connection. Coordinates
+  /// come from THIS phone's own GPS, not the device's — the Heltec's
+  /// onboard GPS module is unreliable on the current hardware, so the
+  /// device just relays these numbers over LoRa rather than measuring
+  /// its own location. The phone's GPS works with zero signal too, so
+  /// this doesn't compromise the "no internet needed" requirement.
+  Future<bool> sendSos({
+    String hikerName = 'Hiker',
+    required double latitude,
+    required double longitude,
+  }) async {
     final characteristic = _sosChar;
     if (characteristic == null) {
       _lastError = 'Not connected to a Heltec device.';
@@ -226,7 +235,9 @@ class HeltecBleService extends ChangeNotifier {
     }
     try {
       await characteristic.write(
-        utf8.encode('SOS|$hikerName'),
+        utf8.encode(
+          'SOS|$hikerName|${latitude.toStringAsFixed(6)}|${longitude.toStringAsFixed(6)}',
+        ),
         withoutResponse: false,
       );
       return true;

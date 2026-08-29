@@ -156,24 +156,29 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
     }
   }
 
+  /// Shared by both SOS paths — the phone's own GPS works with zero
+  /// signal (satellite-based, same as a dedicated GPS module would be),
+  /// so this is safe to use for the offline device path too.
+  Future<Position> _getPhoneLocation() async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      throw StateError('Turn on location services before sending SOS.');
+    }
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      throw StateError('Location permission is required for SOS.');
+    }
+    return Geolocator.getCurrentPosition(
+      locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+    );
+  }
+
   Future<void> _sendSos(String roomId) async {
     await _run(() async {
-      if (!await Geolocator.isLocationServiceEnabled()) {
-        throw StateError('Turn on location services before sending SOS.');
-      }
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied ||
-          permission == LocationPermission.deniedForever) {
-        throw StateError('Location permission is required for SOS.');
-      }
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high,
-        ),
-      );
+      final position = await _getPhoneLocation();
       await _service.sendSos(
         roomId: roomId,
         latitude: position.latitude,
@@ -189,12 +194,23 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
       _message('Connect a Heltec device first to send SOS with no signal.');
       return;
     }
-    final sent = await ble.sendSos(hikerName: _displayName);
-    if (sent) {
-      _message('SOS sent over the device — no internet needed.');
-    } else {
-      _message(ble.lastError ?? 'Failed to send SOS to the device.');
-    }
+    await _run(() async {
+      // The Heltec's own onboard GPS module is unreliable on the current
+      // hardware, so the phone's GPS supplies the coordinates instead —
+      // the device just relays them over LoRa rather than measuring its
+      // own location. Still works with zero signal either way.
+      final position = await _getPhoneLocation();
+      final sent = await ble.sendSos(
+        hikerName: _displayName,
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+      if (sent) {
+        _message('SOS sent over the device — no internet needed.');
+      } else {
+        throw StateError(ble.lastError ?? 'Failed to send SOS to the device.');
+      }
+    });
   }
 
   Future<void> _run(Future<void> Function() operation) async {
