@@ -310,7 +310,7 @@ class HikeRoomService {
     }
     final code = await _generateUniqueCode();
     final roomRef = _firestore.collection('hike_rooms').doc();
-    final guideName = _displayName(profile);
+    final guideName = displayName(profile);
     final batch = _firestore.batch();
     batch.set(roomRef, {
       'roomCode': code,
@@ -371,7 +371,7 @@ class HikeRoomService {
     final batch = _firestore.batch();
     batch.set(_roomRef(room.id).collection('participants').doc(user.uid), {
       'userId': user.uid,
-      'name': _displayName(profile),
+      'name': displayName(profile),
       'role': 'hiker',
       'deviceStatus': 'not_connected',
       'membershipStatus': 'active',
@@ -559,7 +559,10 @@ class HikeRoomService {
     throw StateError('Unable to generate a room code. Try again.');
   }
 
-  String _displayName(Map<String, dynamic> profile) {
+  /// Public so callers that already have a profile Map (e.g. the room
+  /// screen, when sending an offline SOS) can resolve the same display
+  /// name used everywhere else, instead of re-deriving their own copy.
+  String displayName(Map<String, dynamic> profile) {
     final fullName = profile['fullName']?.toString().trim() ?? '';
     if (fullName.isNotEmpty) return fullName;
     final displayName = _user.displayName?.trim() ?? '';

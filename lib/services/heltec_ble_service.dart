@@ -15,7 +15,13 @@ class HeltecBleService extends ChangeNotifier {
 
   static final HeltecBleService instance = HeltecBleService._();
 
-  static const String deviceName = 'AGAKBAY-Heltec';
+  // Two boards, two distinct advertised names — flashed permanently onto
+  // whichever physical unit takes that role (see firmware/agakbay_heltec's
+  // DEVICE_NAME). A phone connects to the name matching its OWN user's
+  // role, so a hiker's phone never accidentally pairs with a nearby
+  // tour guide's unit, or vice versa.
+  static const String hikerDeviceName = 'AGAKBAY-Hiker';
+  static const String guideDeviceName = 'AGAKBAY-TourGuide';
   static final Guid _serviceUuid = Guid(
     'd64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0001',
   );
@@ -28,12 +34,19 @@ class HeltecBleService extends ChangeNotifier {
   static final Guid _hikeInfoCharUuid = Guid(
     'd64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0004',
   );
+  // Notified by the firmware when THIS board receives a neighbor's SOS
+  // over LoRa — the offline hiker-to-guide relay path, no internet
+  // involved anywhere in the chain.
+  static final Guid _sosRelayCharUuid = Guid(
+    'd64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0005',
+  );
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _sosChar;
   BluetoothCharacteristic? _hikeInfoChar;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
   StreamSubscription<List<int>>? _locationSub;
+  StreamSubscription<List<int>>? _sosRelaySub;
   StreamSubscription<List<ScanResult>>? _scanSub;
 
   BluetoothConnectionState _connectionState =
@@ -44,6 +57,14 @@ class HeltecBleService extends ChangeNotifier {
   DateTime? _lastFixAt;
   String? _lastError;
 
+  // The most recent SOS relayed to this board over LoRa from another
+  // Heltec — set with zero internet/cellular signal involved.
+  String? _lastRelaySenderName;
+  bool _lastRelayHasFix = false;
+  double? _lastRelayLatitude;
+  double? _lastRelayLongitude;
+  DateTime? _lastRelayAt;
+
   bool get isConnected =>
       _connectionState == BluetoothConnectionState.connected;
   bool get isScanning => _isScanning;
@@ -51,9 +72,23 @@ class HeltecBleService extends ChangeNotifier {
   double? get lastLongitude => _lastLongitude;
   DateTime? get lastFixAt => _lastFixAt;
   String? get lastError => _lastError;
+  String? get lastRelaySenderName => _lastRelaySenderName;
+  // False means the sender's device had no GPS fix yet when it sent this
+  // SOS — treat lastRelayLatitude/Longitude as meaningless (0,0) in that
+  // case, never as a real location.
+  bool get lastRelayHasFix => _lastRelayHasFix;
+  double? get lastRelayLatitude => _lastRelayLatitude;
+  double? get lastRelayLongitude => _lastRelayLongitude;
+  DateTime? get lastRelayAt => _lastRelayAt;
 
-  Future<void> connect({Duration timeout = const Duration(seconds: 12)}) async {
+  /// [isGuide] picks which physical unit's name to scan for — a tour
+  /// guide's phone must never pair with a hiker's device, or vice versa.
+  Future<void> connect({
+    required bool isGuide,
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
     if (isConnected || _isScanning) return;
+    final targetName = isGuide ? guideDeviceName : hikerDeviceName;
     _lastError = null;
     if (!await FlutterBluePlus.isSupported) {
       _lastError = 'This phone does not support Bluetooth Low Energy.';
@@ -69,8 +104,8 @@ class HeltecBleService extends ChangeNotifier {
 
       _scanSub = FlutterBluePlus.scanResults.listen((results) {
         for (final result in results) {
-          if (result.device.platformName == deviceName ||
-              result.advertisementData.advName == deviceName) {
+          if (result.device.platformName == targetName ||
+              result.advertisementData.advName == targetName) {
             if (!foundDevice.isCompleted) {
               foundDevice.complete(result.device);
             }
@@ -80,7 +115,7 @@ class HeltecBleService extends ChangeNotifier {
       });
 
       await FlutterBluePlus.startScan(
-        withNames: [deviceName],
+        withNames: [targetName],
         timeout: timeout,
       );
 
@@ -93,7 +128,7 @@ class HeltecBleService extends ChangeNotifier {
       _isScanning = false;
 
       if (device == null) {
-        _lastError = 'No Heltec device found nearby. Make sure it is on.';
+        _lastError = 'No $targetName found nearby. Make sure it is on.';
         notifyListeners();
         return;
       }
@@ -125,6 +160,9 @@ class HeltecBleService extends ChangeNotifier {
         _sosChar = characteristic;
       } else if (characteristic.uuid == _hikeInfoCharUuid) {
         _hikeInfoChar = characteristic;
+      } else if (characteristic.uuid == _sosRelayCharUuid) {
+        await characteristic.setNotifyValue(true);
+        _sosRelaySub = characteristic.lastValueStream.listen(_onSosRelayData);
       }
     }
   }
@@ -135,6 +173,7 @@ class HeltecBleService extends ChangeNotifier {
       _sosChar = null;
       _hikeInfoChar = null;
       unawaited(_locationSub?.cancel());
+      unawaited(_sosRelaySub?.cancel());
     }
     notifyListeners();
   }
@@ -154,9 +193,31 @@ class HeltecBleService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Firmware sends "hikerName|hasFix|lat|lon" the moment this board
+  /// receives an SOS relayed over LoRa from another Heltec — this is the
+  /// entire offline hiker-to-guide path arriving with zero internet
+  /// involved. hasFix is "0" or "1": the sender's device may not have had
+  /// a GPS lock yet, in which case lat/lon are meaningless placeholders
+  /// (0,0) that must not be shown or plotted as a real location.
+  void _onSosRelayData(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    final text = utf8.decode(bytes, allowMalformed: true);
+    final parts = text.split('|');
+    if (parts.length != 4) return;
+    final lat = double.tryParse(parts[2]);
+    final lon = double.tryParse(parts[3]);
+    if (lat == null || lon == null) return;
+    _lastRelaySenderName = parts[0];
+    _lastRelayHasFix = parts[1] == '1';
+    _lastRelayLatitude = lat;
+    _lastRelayLongitude = lon;
+    _lastRelayAt = DateTime.now();
+    notifyListeners();
+  }
+
   /// Writes an SOS trigger to the Heltec so it broadcasts the alert over
   /// LoRa even though this phone has no internet connection.
-  Future<bool> sendSos() async {
+  Future<bool> sendSos({String hikerName = 'Hiker'}) async {
     final characteristic = _sosChar;
     if (characteristic == null) {
       _lastError = 'Not connected to a Heltec device.';
@@ -164,7 +225,10 @@ class HeltecBleService extends ChangeNotifier {
       return false;
     }
     try {
-      await characteristic.write([0x01], withoutResponse: false);
+      await characteristic.write(
+        utf8.encode('SOS|$hikerName'),
+        withoutResponse: false,
+      );
       return true;
     } catch (error) {
       _lastError = 'Failed to send SOS over BLE: $error';
@@ -208,6 +272,7 @@ class HeltecBleService extends ChangeNotifier {
 
   Future<void> disconnect() async {
     await _locationSub?.cancel();
+    await _sosRelaySub?.cancel();
     await _connectionSub?.cancel();
     await _device?.disconnect();
     _device = null;

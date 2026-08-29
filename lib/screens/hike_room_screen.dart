@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
@@ -22,6 +24,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
 
   HikeRoom? _room;
   String _accountType = 'hiker';
+  String _displayName = 'Hiker';
   bool _loading = true;
   bool _submitting = false;
 
@@ -46,6 +49,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
       if (!mounted) return;
       setState(() {
         _accountType = _service.accountTypeFromProfile(profile);
+        _displayName = _service.displayName(profile);
         _room = room;
         _loading = false;
       });
@@ -177,6 +181,20 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
       );
       _message('SOS sent to the Tour Guide through the internet.');
     });
+  }
+
+  Future<void> _sendDeviceSos() async {
+    final ble = HeltecBleService.instance;
+    if (!ble.isConnected) {
+      _message('Connect a Heltec device first to send SOS with no signal.');
+      return;
+    }
+    final sent = await ble.sendSos(hikerName: _displayName);
+    if (sent) {
+      _message('SOS sent over the device — no internet needed.');
+    } else {
+      _message(ble.lastError ?? 'Failed to send SOS to the device.');
+    }
   }
 
   Future<void> _run(Future<void> Function() operation) async {
@@ -328,7 +346,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
             ),
           ],
           const SizedBox(height: 24),
-          const _HeltecStatusCard(),
+          _HeltecStatusCard(isGuide: _isGuide),
         ],
       ),
     );
@@ -390,7 +408,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
           ),
           if (room.routePoints.length >= 2) ...[
             const SizedBox(height: 12),
-            _SharedRouteMap(room: room),
+            _SharedRouteMap(room: room, service: _service, roomId: room.id),
           ],
           const SizedBox(height: 10),
           _HeltecStatusCard(
@@ -400,6 +418,12 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
             service: _service,
             roomId: room.id,
           ),
+          if (_isGuide)
+            _GuideParticipantCountSync(
+              mountainName: room.mountainName,
+              service: _service,
+              roomId: room.id,
+            ),
           const SizedBox(height: 18),
           Text(
             'Participants',
@@ -465,17 +489,16 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
               );
             },
           ),
-          if (_isGuide) ...[
-            const SizedBox(height: 20),
-            Text(
-              'SOS Alerts',
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 8),
-            _SosList(roomId: room.id, service: _service),
-          ],
+          const SizedBox(height: 20),
+          Text(
+            'SOS Alerts',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          _SosList(roomId: room.id, service: _service, isGuide: _isGuide),
+          const _OfflineSosRelayCard(),
           const SizedBox(height: 22),
           if (_isGuide && room.status == HikeRoomStatus.waiting)
             FilledButton.icon(
@@ -505,7 +528,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
                 foregroundColor: Colors.redAccent,
               ),
             ),
-          if (!_isGuide && room.status == HikeRoomStatus.active)
+          if (room.status == HikeRoomStatus.active) ...[
             OutlinedButton.icon(
               onPressed: _submitting ? null : () => _sendSos(room.id),
               icon: const Icon(Icons.sos_rounded),
@@ -514,6 +537,29 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
                 foregroundColor: Colors.redAccent,
               ),
             ),
+            const SizedBox(height: 10),
+            ListenableBuilder(
+              listenable: HeltecBleService.instance,
+              builder: (context, _) {
+                final connected = HeltecBleService.instance.isConnected;
+                return FilledButton.icon(
+                  onPressed: (_submitting || !connected)
+                      ? null
+                      : _sendDeviceSos,
+                  icon: const Icon(Icons.sos_rounded),
+                  label: Text(
+                    connected
+                        ? 'Send SOS via Device (No Signal)'
+                        : 'Connect Device to Enable Offline SOS',
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.redAccent,
+                    foregroundColor: Colors.white,
+                  ),
+                );
+              },
+            ),
+          ],
           if (!_isGuide && room.status == HikeRoomStatus.waiting)
             OutlinedButton.icon(
               onPressed: _submitting ? null : () => _leaveRoom(room.id),
@@ -527,16 +573,23 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
 }
 
 class _SharedRouteMap extends StatelessWidget {
-  const _SharedRouteMap({required this.room});
+  const _SharedRouteMap({required this.room, this.service, this.roomId});
 
   final HikeRoom room;
+
+  /// When set, pulls live SOS pins onto the map for every participant —
+  /// the internet-sourced ones from Firestore and the offline one from
+  /// [HeltecBleService]'s LoRa relay. Anyone in the room can be the one
+  /// who needs help, hiker or guide, so this isn't role-restricted.
+  final HikeRoomService? service;
+  final String? roomId;
 
   @override
   Widget build(BuildContext context) {
     final points = room.routePoints
         .map((point) => ll.LatLng(point.latitude, point.longitude))
         .toList(growable: false);
-    final markers = <fm.Marker>[
+    final baseMarkers = <fm.Marker>[
       fm.Marker(
         point: points.first,
         width: 42,
@@ -558,6 +611,80 @@ class _SharedRouteMap extends StatelessWidget {
         ),
       ),
     ];
+
+    Widget buildMap(List<fm.Marker> sosMarkers) {
+      return SizedBox(
+        height: 300,
+        child: OfflineMapWidget(
+          initialLatitude: points.first.latitude,
+          initialLongitude: points.first.longitude,
+          initialZoom: 14,
+          markers: [...baseMarkers, ...sosMarkers],
+          polylines: [
+            fm.Polyline(
+              points: points,
+              color: const Color(0xFF53D97A),
+              strokeWidth: 5,
+            ),
+          ],
+          showScaleLayer: false,
+        ),
+      );
+    }
+
+    Widget mapArea;
+    final svc = service;
+    final id = roomId;
+    if (svc != null && id != null) {
+      mapArea = StreamBuilder<List<RoomSosEvent>>(
+        stream: svc.watchSosEvents(id),
+        builder: (context, sosSnapshot) {
+          final internetSosMarkers = (sosSnapshot.data ?? const [])
+              .where((event) => event.status != 'acknowledged')
+              .map(
+                (event) => fm.Marker(
+                  point: ll.LatLng(event.latitude, event.longitude),
+                  width: 42,
+                  height: 42,
+                  child: const Icon(
+                    Icons.sos_rounded,
+                    color: Colors.redAccent,
+                    size: 34,
+                  ),
+                ),
+              )
+              .toList();
+
+          return ListenableBuilder(
+            listenable: HeltecBleService.instance,
+            builder: (context, _) {
+              final ble = HeltecBleService.instance;
+              final relayLat = ble.lastRelayLatitude;
+              final relayLon = ble.lastRelayLongitude;
+              final offlineSosMarkers = <fm.Marker>[
+                // No GPS fix yet on the sender's device means lat/lon are
+                // meaningless placeholders — don't plot a pin at all.
+                if (ble.lastRelayHasFix && relayLat != null && relayLon != null)
+                  fm.Marker(
+                    point: ll.LatLng(relayLat, relayLon),
+                    width: 42,
+                    height: 42,
+                    child: const Icon(
+                      Icons.settings_input_antenna_rounded,
+                      color: Colors.deepOrangeAccent,
+                      size: 34,
+                    ),
+                  ),
+              ];
+              return buildMap([...internetSosMarkers, ...offlineSosMarkers]);
+            },
+          );
+        },
+      );
+    } else {
+      mapArea = buildMap(const []);
+    }
+
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Column(
@@ -579,23 +706,7 @@ class _SharedRouteMap extends StatelessWidget {
               ],
             ),
           ),
-          SizedBox(
-            height: 300,
-            child: OfflineMapWidget(
-              initialLatitude: points.first.latitude,
-              initialLongitude: points.first.longitude,
-              initialZoom: 14,
-              markers: markers,
-              polylines: [
-                fm.Polyline(
-                  points: points,
-                  color: const Color(0xFF53D97A),
-                  strokeWidth: 5,
-                ),
-              ],
-              showScaleLayer: false,
-            ),
-          ),
+          mapArea,
           const Padding(
             padding: EdgeInsets.all(10),
             child: Text('This route was selected by your Tour Guide.'),
@@ -632,7 +743,7 @@ class _HeltecStatusCard extends StatelessWidget {
 
   Future<void> _connect() async {
     final ble = HeltecBleService.instance;
-    await ble.connect();
+    await ble.connect(isGuide: isGuide);
     if (!ble.isConnected) return;
 
     final mountain = mountainName;
@@ -696,11 +807,102 @@ class _HeltecStatusCard extends StatelessWidget {
   }
 }
 
+/// Shows an SOS relayed to THIS phone's Heltec over LoRa from another
+/// hiker's Heltec — sourced entirely from [HeltecBleService], never from
+/// Firestore, since this is exactly the path meant to work with zero
+/// internet/cellular signal. Sits alongside [_SosList] (the internet path)
+/// rather than replacing it.
+class _OfflineSosRelayCard extends StatelessWidget {
+  const _OfflineSosRelayCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: HeltecBleService.instance,
+      builder: (context, _) {
+        final ble = HeltecBleService.instance;
+        final name = ble.lastRelaySenderName;
+        final lat = ble.lastRelayLatitude;
+        final lon = ble.lastRelayLongitude;
+        final at = ble.lastRelayAt;
+        if (name == null || lat == null || lon == null) {
+          return const SizedBox.shrink();
+        }
+        final minutesAgo = at == null
+            ? null
+            : DateTime.now().difference(at).inMinutes;
+        final hasFix = ble.lastRelayHasFix;
+        return Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Card(
+            color: Colors.red.withValues(alpha: 0.18),
+            child: ListTile(
+              leading: const Icon(Icons.sos_rounded, color: Colors.redAccent),
+              title: Text('$name sent SOS — Offline (LoRa relay)'),
+              subtitle: Text(
+                '${hasFix ? '${lat.toStringAsFixed(6)}, ${lon.toStringAsFixed(6)}' : 'Location unavailable — sender device had no GPS fix yet'}\n'
+                '${minutesAgo == null ? 'Just now' : '$minutesAgo min ago'} • no internet used',
+              ),
+              isThreeLine: true,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// [_HeltecStatusCard] only sends the guide's Heltec a hiker-count
+/// snapshot at the moment it connects — without this, the OLED goes
+/// stale the instant anyone joins or leaves afterward. This has no UI
+/// of its own; it just keeps re-sending the current count over BLE
+/// every time the live participant list actually changes.
+class _GuideParticipantCountSync extends StatelessWidget {
+  const _GuideParticipantCountSync({
+    required this.mountainName,
+    required this.service,
+    required this.roomId,
+  });
+
+  final String mountainName;
+  final HikeRoomService service;
+  final String roomId;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<HikeRoomParticipant>>(
+      stream: service.watchParticipants(roomId),
+      builder: (context, snapshot) {
+        final participants = snapshot.data;
+        final ble = HeltecBleService.instance;
+        if (participants != null && ble.isConnected) {
+          unawaited(
+            ble.sendGuideInfo(
+              mountainName: mountainName,
+              participantCount: participants.length,
+            ),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+}
+
 class _SosList extends StatelessWidget {
-  const _SosList({required this.roomId, required this.service});
+  const _SosList({
+    required this.roomId,
+    required this.service,
+    required this.isGuide,
+  });
 
   final String roomId;
   final HikeRoomService service;
+
+  /// Only the room's guide can actually acknowledge an SOS — enforced
+  /// server-side by firestore.rules, mirrored here so a hiker sees a
+  /// plain status instead of a button that would just fail.
+  final bool isGuide;
 
   @override
   Widget build(BuildContext context) {
@@ -737,6 +939,8 @@ class _SosList extends StatelessWidget {
                     ),
                     trailing: acknowledged
                         ? const Text('ACKNOWLEDGED')
+                        : !isGuide
+                        ? const Text('PENDING')
                         : FilledButton(
                             onPressed: () async {
                               try {
