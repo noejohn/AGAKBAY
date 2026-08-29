@@ -11,7 +11,10 @@ const CODE_EXPIRY_MINUTES = 10;
 const RESEND_COOLDOWN_SECONDS = 45;
 
 function randomSixDigitCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  // crypto.randomInt (not Math.random) — this code gates email
+  // verification, so it needs to be unpredictable to an attacker, not
+  // just uniformly distributed.
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 function hashCode({ code, uid }) {
