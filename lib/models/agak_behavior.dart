@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 /// User behavior events AGAK learns from. Each entry denormalizes enough
 /// mountain data (name/region/difficulty/elevation) to stay useful even
 /// when `mountainId` doesn't resolve to a `MountainCatalogEntry`.
@@ -191,6 +193,7 @@ class ScheduledHikeEntry {
   final DateTime scheduledDate;
   final String? notes;
   final DateTime createdAt;
+  final List<String> customPackingItems;
 
   const ScheduledHikeEntry({
     this.id,
@@ -202,6 +205,7 @@ class ScheduledHikeEntry {
     required this.scheduledDate,
     this.notes,
     required this.createdAt,
+    this.customPackingItems = const [],
   });
 
   /// Whole days from today until the hike; 0 = today, negative = past.
@@ -231,7 +235,26 @@ class ScheduledHikeEntry {
       createdAt: DateTime.fromMillisecondsSinceEpoch(
         map['created_at'] as int,
       ),
+      customPackingItems: decodeCustomPackingItems(
+        map['custom_packing_items'] as String?,
+      ),
     );
+  }
+
+  static List<String> decodeCustomPackingItems(String? raw) {
+    if (raw == null || raw.isEmpty) {
+      return const [];
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.map((item) => item.toString()).toList();
+      }
+    } catch (_) {
+      // Corrupt/unexpected data — treat as no custom items rather than
+      // crashing the whole scheduled-hikes list over one bad row.
+    }
+    return const [];
   }
 
   Map<String, Object?> toDbMap({String userId = 'local'}) => {
@@ -243,6 +266,7 @@ class ScheduledHikeEntry {
     'elevation_masl': elevationMasl,
     'scheduled_date': scheduledDate.millisecondsSinceEpoch,
     'notes': notes,
+    'custom_packing_items': jsonEncode(customPackingItems),
     'created_at': createdAt.millisecondsSinceEpoch,
   };
 }

@@ -1,5 +1,5 @@
-group 'dev.fluttercommunity.plus.packageinfo'
-version '1.0-SNAPSHOT'
+group = 'dev.fluttercommunity.plus.packageinfo'
+version = '1.0-SNAPSHOT'
 
 rootProject.allprojects {
     repositories {
@@ -9,6 +9,7 @@ rootProject.allprojects {
 }
 
 apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 android {
     namespace 'dev.fluttercommunity.plus.packageinfo'

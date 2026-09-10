@@ -10,6 +10,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter_map/flutter_map.dart' as fm;
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
@@ -27,6 +28,8 @@ import 'package:tunga/screens/hike_room_screen.dart';
 import 'package:tunga/screens/onboarding/onboarding_flow_screen.dart';
 import 'package:tunga/services/activity_sync_service.dart';
 import 'package:tunga/services/auth_database_service.dart';
+import 'package:auth0_flutter/auth0_flutter.dart';
+import 'package:tunga/services/auth0_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
 import 'package:tunga/services/onboarding_service.dart';
 import 'package:tunga/models/agak_mountain.dart';
@@ -39,6 +42,7 @@ import 'package:tunga/services/agak_tip_bus.dart';
 import 'package:tunga/services/agak_emotion_selector.dart';
 import 'package:tunga/services/gemini_client.dart';
 import 'package:tunga/services/offline_activity_database.dart';
+import 'package:tunga/services/offline_map_service.dart';
 import 'package:tunga/widgets/agak_floating_companion.dart';
 import 'package:tunga/widgets/agak_theme.dart';
 import 'package:tunga/widgets/agak_tip_popup.dart';
@@ -95,17 +99,23 @@ class _SplashScreenState extends State<SplashScreen> {
       await Firebase.initializeApp(
         options: DefaultFirebaseOptions.currentPlatform,
       );
-      // Registering the Android app for Play Integrity (Firebase Console
-      // → App Check) is a manual step outside this code — until that's
-      // done, activation here is harmless (tokens just won't attest
-      // successfully yet). No Cloud Function enforces App Check yet either
-      // (see functions/index.js); that's a deliberate later step, since
-      // turning on enforcement before real traffic reliably produces valid
-      // tokens would lock out genuine users.
+      // Play Integrity only attests correctly for a real Play Store /
+      // signed release build — it does not work reliably for a debug
+      // build like the ones used during development, which is exactly why
+      // enforcement stays off in functions/index.js until this is proven
+      // to produce valid tokens. Debug builds use App Check's Debug
+      // provider instead: it logs a token (via logcat, on first launch)
+      // that has to be registered once in Firebase Console → App Check →
+      // this app → Manage debug tokens. Release builds keep using
+      // Play Integrity / DeviceCheck as before.
       try {
         await FirebaseAppCheck.instance.activate(
-          androidProvider: AndroidProvider.playIntegrity,
-          appleProvider: AppleProvider.deviceCheck,
+          androidProvider: kDebugMode
+              ? AndroidProvider.debug
+              : AndroidProvider.playIntegrity,
+          appleProvider: kDebugMode
+              ? AppleProvider.debug
+              : AppleProvider.deviceCheck,
         );
       } catch (_) {
         // Non-fatal — App Check is defense-in-depth, not required for the
@@ -457,6 +467,7 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _authDatabaseService = AuthDatabaseService();
+  final _auth0Service = Auth0Service();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
@@ -543,6 +554,11 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  // Goes through Auth0 (via its `connection: google-oauth2` parameter,
+  // set in Auth0Service.signInWithGoogle) rather than straight to Firebase
+  // — Auth0 verifies the Google login and exchangeAuth0Token bridges the
+  // result into a Firebase session, so this still ends up signed into
+  // Firebase exactly as before from the rest of the app's point of view.
   Future<void> _handleGoogleSignIn() async {
     if (!widget.firebaseReady) {
       _showSnackBar('Firebase is not configured yet.');
@@ -550,12 +566,16 @@ class _LoginScreenState extends State<LoginScreen> {
     }
     setState(() => _isSubmitting = true);
     try {
-      final credential = await _authDatabaseService.signInWithGoogle();
+      final result = await _auth0Service.signInWithGoogle();
+      if (!mounted) {
+        return;
+      }
+      await _promptAccountTypeIfNew(result);
       if (!mounted) {
         return;
       }
       final onboarded = await OnboardingService().hasCompletedOnboarding(
-        credential.user!.uid,
+        result.credential.user!.uid,
       );
       if (!mounted) {
         return;
@@ -567,16 +587,93 @@ class _LoginScreenState extends State<LoginScreen> {
               : const OnboardingFlowScreen(),
         ),
       );
-    } on FirebaseAuthException catch (error) {
-      if (error.code == 'sign-in-canceled') {
+    } on WebAuthenticationException catch (error) {
+      if (error.isUserCancelledException) {
         return;
       }
-      _showSnackBar(error.message ?? 'Google sign-in failed. Please try again.');
+      _showSnackBar('Google sign-in failed: ${error.message}');
     } catch (error) {
       _showSnackBar('Google sign-in failed: $error');
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  // The Google/Auth0 redirect has no room to ask hiker-vs-guide the way the
+  // email/password signup screen does, so this asks right after — but only
+  // for a genuinely new account (exchangeAuth0Token's isNewUser), never on
+  // a returning user's login. setInitialAccountType refuses to run twice
+  // server-side, so this is safe to call at most once per account.
+  Future<void> _promptAccountTypeIfNew(Auth0SignInResult result) async {
+    if (!result.isNewUser) {
+      return;
+    }
+    final chosen = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => SimpleDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
+        title: const Text(
+          'One quick thing...',
+          style: TextStyle(fontWeight: FontWeight.w900, fontSize: 19),
+        ),
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+            child: Text(
+              'Are you joining as a hiker, or a tour guide?',
+              style: TextStyle(color: AgakColors.ink.withValues(alpha: 0.7)),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(dialogContext).pop('hiker'),
+            child: const Row(
+              children: [
+                Icon(Icons.hiking_rounded, color: AgakColors.olive),
+                SizedBox(width: 12),
+                Text(
+                  'Hiker',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: AgakColors.ink,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(dialogContext).pop('tour_guide'),
+            child: const Row(
+              children: [
+                Icon(Icons.groups_rounded, color: AgakColors.maroon),
+                SizedBox(width: 12),
+                Text(
+                  'Tour Guide',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: AgakColors.ink,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (chosen == null || !mounted) {
+      return;
+    }
+    try {
+      await _auth0Service.setInitialAccountType(chosen);
+    } catch (error) {
+      if (mounted) {
+        _showSnackBar(
+          'Could not save your account type — you can update this later.',
+        );
       }
     }
   }
@@ -1110,90 +1207,61 @@ class _MountainOrganizer {
   final bool isExternalSuggestion;
 }
 
-class _AssistantMessage {
-  const _AssistantMessage({required this.role, required this.text});
-
-  final String role;
-  final String text;
-}
-
-class _HikeAssistantScreen extends StatefulWidget {
-  const _HikeAssistantScreen({
+/// A single ask-and-answer box, embedded directly on the Kyrielle screen —
+/// no message history of its own. The answer is handed to [onAnswer] (the
+/// same hero-bubble mechanism Kyrielle uses to react to added packing-list
+/// items), styled with the host screen's own palette rather than a separate
+/// chat theme, since it's meant to read as part of that screen, not a
+/// distinct app section.
+class _AskKyrielleBox extends StatefulWidget {
+  const _AskKyrielleBox({
     // ignore: unused_element_parameter
     super.key,
     this.initialTrail,
     required this.searchMountainInMindanao,
     required this.fetchMountainOrganizers,
+    required this.onAnswer,
   });
 
   final _NearbyTrail? initialTrail;
   final Future<_NearbyTrail?> Function(String query) searchMountainInMindanao;
   final Future<List<_MountainOrganizer>> Function(_NearbyTrail trail)
   fetchMountainOrganizers;
+  final ValueChanged<String> onAnswer;
 
   @override
-  State<_HikeAssistantScreen> createState() => _HikeAssistantScreenState();
+  State<_AskKyrielleBox> createState() => _AskKyrielleBoxState();
 }
 
-class _HikeAssistantScreenState extends State<_HikeAssistantScreen> {
+class _AskKyrielleBoxState extends State<_AskKyrielleBox> {
   final TextEditingController _questionController = TextEditingController();
-  final ScrollController _scrollController = ScrollController();
-  final List<_AssistantMessage> _messages = [];
-  bool _isSearching = false;
+  bool _isAsking = false;
   String _aiApiKey = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _loadAiApiKey();
-    _addAssistantMessage(
-      'Hi! Ask me anything about a hike — elevation, difficulty, weather, '
-      'gear, or organizers for a specific mountain.',
-    );
-  }
 
   @override
   void dispose() {
     _questionController.dispose();
-    _scrollController.dispose();
     super.dispose();
   }
 
-  void _addAssistantMessage(String text) {
-    _messages.add(const _AssistantMessage(role: 'assistant', text: ''));
-    final lastIndex = _messages.length - 1;
-    _messages[lastIndex] = _AssistantMessage(role: 'assistant', text: text);
-  }
-
-  Future<void> _sendQuestion() async {
-    final question = _questionController.text.trim();
-    if (question.isEmpty) {
+  Future<void> _loadAiApiKey() async {
+    if (_aiApiKey.isNotEmpty) {
       return;
     }
+    _aiApiKey = await loadGeminiApiKey();
+  }
+
+  Future<void> _ask() async {
+    final question = _questionController.text.trim();
+    if (question.isEmpty || _isAsking) {
+      return;
+    }
+    setState(() => _isAsking = true);
+    _questionController.clear();
+    FocusScope.of(context).unfocus();
 
     await _loadAiApiKey();
-
-    setState(() {
-      _messages.add(_AssistantMessage(role: 'user', text: question));
-      _questionController.clear();
-      _isSearching = true;
-    });
-    _scrollToBottom();
-
-    final answer = await _buildAssistantResponse(question);
-    if (!mounted) {
-      return;
-    }
-
-    setState(() {
-      _messages.add(_AssistantMessage(role: 'assistant', text: answer));
-      _isSearching = false;
-    });
-    _scrollToBottom();
-  }
-
-  Future<String> _buildAssistantResponse(String question) {
-    return _answerHikeAssistantQuestion(
+    final answer = await _answerHikeAssistantQuestion(
       question: question,
       initialTrail: widget.initialTrail,
       searchMountainInMindanao: widget.searchMountainInMindanao,
@@ -1209,153 +1277,49 @@ class _HikeAssistantScreenState extends State<_HikeAssistantScreen> {
           'asks about finding one or contact info is provided '
           'to you.',
     );
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) {
-        return;
-      }
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-      );
-    });
-  }
-
-  Future<void> _loadAiApiKey() async {
-    if (_aiApiKey.isNotEmpty) {
+    if (!mounted) {
       return;
     }
-    _aiApiKey = await loadGeminiApiKey();
+    setState(() => _isAsking = false);
+    widget.onAnswer(answer);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Hike Assistant'),
-        backgroundColor: const Color(0xFF02130E),
-      ),
-      backgroundColor: const Color(0xFF02130E),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.all(16),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final message = _messages[index];
-                  final isUser = message.role == 'user';
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    alignment: isUser
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft,
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: isUser
-                            ? const Color(0xFF53D97A)
-                            : const Color(0xFF041B13).withValues(alpha: 0.95),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: isUser
-                              ? const Color(0xFF53D97A)
-                              : Colors.white.withValues(alpha: 0.12),
-                        ),
-                      ),
-                      child: Text(
-                        message.text,
-                        style: TextStyle(
-                          color: isUser ? Colors.black : Colors.white,
-                          height: 1.4,
-                        ),
-                      ),
-                    ),
-                  );
-                },
+    return Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: _questionController,
+            enabled: !_isAsking,
+            textInputAction: TextInputAction.send,
+            onSubmitted: (_) => _ask(),
+            decoration: InputDecoration(
+              hintText: 'Ask about gear, weather, organizers...',
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                vertical: 10,
+                horizontal: 12,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
               ),
             ),
-            if (_isSearching)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 10),
-                child: CircularProgressIndicator(color: Color(0xFF7CF9A2)),
-              ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF02130E),
-                border: Border(
-                  top: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _questionController,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _sendQuestion(),
-                      style: const TextStyle(color: Colors.white),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        hintText:
-                            'Ask about organizers, trails, or this mountain...',
-                        hintStyle: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.55),
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(
-                            color: Colors.white.withValues(alpha: 0.14),
-                          ),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: BorderSide(
-                            color: Colors.white.withValues(alpha: 0.14),
-                          ),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          borderSide: const BorderSide(
-                            color: Color(0xFF53D97A),
-                          ),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 12,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Material(
-                    color: const Color(0xFF53D97A),
-                    borderRadius: BorderRadius.circular(16),
-                    child: InkWell(
-                      onTap: _isSearching ? null : _sendQuestion,
-                      borderRadius: BorderRadius.circular(16),
-                      child: const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: Icon(
-                          Icons.send_rounded,
-                          color: Colors.black,
-                          size: 22,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
+        const SizedBox(width: 8),
+        IconButton(
+          onPressed: _isAsking ? null : _ask,
+          icon: _isAsking
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.send_rounded, color: AgakColors.accent),
+          tooltip: 'Ask Kyrielle',
+        ),
+      ],
     );
   }
 }
@@ -1408,6 +1372,25 @@ bool _isLocationQuestion(String normalizedQuestion) {
     "what's my location",
   ];
   return locationPhrases.any(normalizedQuestion.contains);
+}
+
+/// Whether [normalizedQuestion] is asking about a mountain's elevation —
+/// used only in the non-AI fallback path of _answerHikeAssistantQuestion,
+/// so a question like "how high is Mt. Apo" gets its actual answer from
+/// the matched trail's own elevationMasl instead of the generic "found the
+/// trail but no organizers" message, which used to fire for any question
+/// once the AI call came back empty, regardless of what was actually asked.
+bool _isElevationQuestion(String normalizedQuestion) {
+  const elevationPhrases = [
+    'how high',
+    'how tall',
+    'elevation',
+    'altitude',
+    'masl',
+    'meters above sea level',
+    'summit height',
+  ];
+  return elevationPhrases.any(normalizedQuestion.contains);
 }
 
 /// Shared "modern, on-palette" confirm/cancel dialog — cream card, rounded
@@ -1719,6 +1702,11 @@ Answer the user's actual question directly and helpfully, using your general kno
     return 'I could not find a mountain matching that query. Try asking with a more exact name, such as "Mt. Apo" or "Mount Matutum."';
   }
 
+  if (_isElevationQuestion(normalized) && trail.elevationMasl > 0) {
+    return '${trail.name} is about ${trail.elevationMasl} meters above '
+        'sea level (MASL).';
+  }
+
   if (organizers.isEmpty) {
     return 'I found ${trail.name}, but I could not find any matching organizers right now. You can still search again with another mountain name, or use the Explore map to browse nearby trails.';
   }
@@ -1921,7 +1909,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _locationGranted = false;
   bool _isSearching = false;
   bool _isLoadingNearbyTrails = false;
-  _MarkerStatusFilter _markerStatusFilter = _MarkerStatusFilter.all;
+  final _MarkerStatusFilter _markerStatusFilter = _MarkerStatusFilter.all;
   int _selectedNavIndex = 0;
   int _communityFeedFilterIndex = 0;
   _MyHikesView _myHikesView = _MyHikesView.completed;
@@ -3735,6 +3723,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
     messenger.showSnackBar(SnackBar(content: Text(message)));
   }
 
+  // Top-docked confirmation (a MaterialBanner, not a bottom SnackBar) for
+  // moments worth a more visible, deliberate confirmation than a passing
+  // toast — e.g. scheduling a hike. Auto-dismisses after 3 seconds.
+  void _showTopConfirmation(String message) {
+    if (!mounted) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentMaterialBanner();
+    messenger.showMaterialBanner(
+      MaterialBanner(
+        backgroundColor: AgakColors.olive,
+        content: Text(
+          message,
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+        ),
+        leading: const Icon(Icons.check_circle, color: Colors.white),
+        actions: [
+          TextButton(
+            onPressed: () => messenger.hideCurrentMaterialBanner(),
+            child: const Text('OK', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) {
+        messenger.hideCurrentMaterialBanner();
+      }
+    });
+  }
+
   // Popping a dialog route immediately after unfocusing a still-focused
   // TextField can hit a Flutter framework race (`_dependents.isEmpty`
   // assertion in framework.dart) because the keyboard/IME teardown hasn't
@@ -4042,6 +4062,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
           'profilePhotoUrl': url,
           'updatedAt': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
+        // Mirrored into the public name slice too — this is what other
+        // users' community-post avatars actually read from, since
+        // Firestore rules only let a user read their own full profile doc.
+        await _firestore
+            .collection('users')
+            .doc(user.uid)
+            .collection('public')
+            .doc('profile')
+            .set({'profilePhotoUrl': url}, SetOptions(merge: true));
         _showDashboardSnackBar('Profile photo updated.');
       } on FirebaseException catch (error) {
         _showDashboardSnackBar(
@@ -7906,36 +7935,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: Row(
                     children: [
                       _filterChip(
-                        'All',
-                        isActive:
-                            _markerStatusFilter == _MarkerStatusFilter.all,
-                        onTap: () {
-                          setState(() {
-                            _markerStatusFilter = _MarkerStatusFilter.all;
-                          });
-                        },
-                      ),
-                      _filterChip(
-                        'Open',
-                        isActive:
-                            _markerStatusFilter == _MarkerStatusFilter.open,
-                        onTap: () {
-                          setState(() {
-                            _markerStatusFilter = _MarkerStatusFilter.open;
-                          });
-                        },
-                      ),
-                      _filterChip(
-                        'Closed',
-                        isActive:
-                            _markerStatusFilter == _MarkerStatusFilter.closed,
-                        onTap: () {
-                          setState(() {
-                            _markerStatusFilter = _MarkerStatusFilter.closed;
-                          });
-                        },
-                      ),
-                      _filterChip(
                         'My Location',
                         onTap: () {
                           setState(() {
@@ -8121,39 +8120,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Future<void> _openHikeAssistant() async {
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => _HikeAssistantScreen(
-          initialTrail: _searchedTrailAnchor,
-          searchMountainInMindanao: (query) async {
-            final result = await _searchMountainInMindanao(query);
-            unawaited(
-              AgakBehaviorDatabase.instance.logSearch(
-                query: query,
-                matchedMountainId: result == null
-                    ? null
-                    : buildMountainMatchKey(
-                        name: result.name,
-                        region: result.provinceOrCity,
-                      ),
-                matchedMountainName: result?.name,
-                source: 'assistant_chat',
-              ),
-            );
-            return result;
-          },
-          fetchMountainOrganizers: _fetchMountainOrganizers,
-        ),
-      ),
-    );
-  }
-
   Future<void> _openAgakCompanion() async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => AgakCompanionScreen(
-          openHikeAssistantChat: () => _openHikeAssistant(),
+          chatPanelBuilder: (context, onAnswer) => _AskKyrielleBox(
+            initialTrail: _searchedTrailAnchor,
+            searchMountainInMindanao: (query) async {
+              final result = await _searchMountainInMindanao(query);
+              unawaited(
+                AgakBehaviorDatabase.instance.logSearch(
+                  query: query,
+                  matchedMountainId: result == null
+                      ? null
+                      : buildMountainMatchKey(
+                          name: result.name,
+                          region: result.provinceOrCity,
+                        ),
+                  matchedMountainName: result?.name,
+                  source: 'assistant_chat',
+                ),
+              );
+              return result;
+            },
+            fetchMountainOrganizers: _fetchMountainOrganizers,
+            onAnswer: onAnswer,
+          ),
         ),
       ),
     );
@@ -10287,6 +10279,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final Map<String, String> _communityAuthorNameCache = <String, String>{};
   final Set<String> _communityAuthorNameFetching = <String>{};
 
+  /// Same idea as [_communityAuthorNameCache], resolved in the same fetch —
+  /// empty string means "resolved, no photo set" (not "not fetched yet").
+  final Map<String, String> _communityAuthorPhotoCache = <String, String>{};
+
   /// Returns the best name to show for [authorId] right now — your own
   /// live display name if it's you, a cached live lookup if one's already
   /// resolved, otherwise [fallback] (the frozen name stored on the
@@ -10307,6 +10303,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
       unawaited(_fetchCommunityAuthorName(authorId, fallback));
     }
     return fallback;
+  }
+
+  /// Returns the author's live profile photo URL, or '' if they don't have
+  /// one (or it hasn't resolved yet) — same cache/fetch as
+  /// [_communityAuthorName], since both live on the same document.
+  String _communityAuthorPhotoUrl(String authorId) {
+    if (authorId.isEmpty) {
+      return '';
+    }
+    final currentUser = _firebaseAuth.currentUser;
+    if (currentUser != null && authorId == currentUser.uid) {
+      return _profilePhotoUrl();
+    }
+    final cached = _communityAuthorPhotoCache[authorId];
+    if (cached != null) {
+      return cached;
+    }
+    if (_communityAuthorNameFetching.add(authorId)) {
+      unawaited(_fetchCommunityAuthorName(authorId, ''));
+    }
+    return '';
   }
 
   Future<void> _fetchCommunityAuthorName(
@@ -10332,11 +10349,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
           : (displayName != null && displayName.isNotEmpty)
           ? displayName
           : fallback;
+      final photoUrl = data?['profilePhotoUrl']?.toString().trim() ?? '';
       if (!mounted) {
         return;
       }
       setState(() {
         _communityAuthorNameCache[authorId] = resolved;
+        _communityAuthorPhotoCache[authorId] = photoUrl;
       });
     } catch (error) {
       debugPrint('Failed to resolve community author name: $error');
@@ -10351,6 +10370,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }) {
     final user = _firebaseAuth.currentUser;
     final authorName = _communityAuthorName(post.authorId, post.authorName);
+    final authorPhotoUrl = _communityAuthorPhotoUrl(post.authorId);
     final likeDocStream = user == null
         ? null
         : _firestore
@@ -10384,17 +10404,42 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 width: 32,
                 height: 32,
                 decoration: BoxDecoration(
-                  gradient: _avatarGradient(authorName),
+                  gradient: authorPhotoUrl.isEmpty
+                      ? _avatarGradient(authorName)
+                      : null,
                   shape: BoxShape.circle,
                 ),
                 alignment: Alignment.center,
-                child: Text(
-                  _communityAvatarSeed(authorName),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
+                clipBehavior: Clip.antiAlias,
+                child: authorPhotoUrl.isEmpty
+                    ? Text(
+                        _communityAvatarSeed(authorName),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      )
+                    : Image.network(
+                        authorPhotoUrl,
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) =>
+                            DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: _avatarGradient(authorName),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  _communityAvatarSeed(authorName),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                            ),
+                      ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -11972,66 +12017,217 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final chosen = await showDialog<MountainCatalogEntry>(
       context: context,
       builder: (dialogContext) {
-        return SimpleDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(24),
-          ),
-          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
-          title: const Text(
-            'Schedule a Hike',
-            style: TextStyle(fontWeight: FontWeight.w900, fontSize: 19),
-          ),
-          children: [
-            for (final mountain in catalog)
-              SimpleDialogOption(
-                onPressed: () => Navigator.of(dialogContext).pop(mountain),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
+        var searchQuery = '';
+        var isSearchingOnline = false;
+        var onlineSearchFailed = false;
+        _NearbyTrail? onlineResult;
+        final searchController = TextEditingController();
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final filtered = searchQuery.isEmpty
+                ? catalog
+                : catalog.where((mountain) {
+                    final query = searchQuery.toLowerCase();
+                    return mountain.name.toLowerCase().contains(query) ||
+                        mountain.region.toLowerCase().contains(query);
+                  }).toList();
+
+            // Same explicit, submit-triggered search as the dashboard's
+            // "Search place or mountain..." bar (_searchOnMap) — not live
+            // as-you-type. Shows the match as a pickable item; scheduling
+            // still requires the user to tap it, same as a catalog entry.
+            Future<void> performOnlineSearch() async {
+              final query = searchController.text.trim();
+              if (query.isEmpty) {
+                return;
+              }
+              setDialogState(() {
+                isSearchingOnline = true;
+                onlineSearchFailed = false;
+                onlineResult = null;
+              });
+              final result = await _searchMountainInMindanao(query);
+              if (!dialogContext.mounted) {
+                return;
+              }
+              setDialogState(() {
+                isSearchingOnline = false;
+                onlineResult = result;
+                onlineSearchFailed = result == null;
+              });
+            }
+
+            return SimpleDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+              ),
+              titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
+              title: const Text(
+                'Schedule a Hike',
+                style: TextStyle(fontWeight: FontWeight.w900, fontSize: 19),
+              ),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Row(
                     children: [
-                      Container(
-                        width: 38,
-                        height: 38,
-                        decoration: BoxDecoration(
-                          color: const Color(
-                            0xFF2F8C5A,
-                          ).withValues(alpha: 0.14),
-                          borderRadius: BorderRadius.circular(11),
-                        ),
-                        child: const Icon(
-                          Icons.landscape_rounded,
-                          size: 19,
-                          color: Color(0xFF2F8C5A),
+                      Expanded(
+                        child: TextField(
+                          controller: searchController,
+                          textInputAction: TextInputAction.search,
+                          onSubmitted: (_) => performOnlineSearch(),
+                          decoration: InputDecoration(
+                            hintText: 'Search mountain or region...',
+                            prefixIcon: const Icon(Icons.search, size: 20),
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              vertical: 10,
+                              horizontal: 12,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          onChanged: (value) {
+                            setDialogState(() {
+                              searchQuery = value;
+                              onlineResult = null;
+                              onlineSearchFailed = false;
+                            });
+                          },
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              mountain.name,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${mountain.region} · ${mountain.elevationMasl}m · '
-                              '${mountain.difficulty}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey.shade600,
-                              ),
-                            ),
-                          ],
-                        ),
+                      IconButton(
+                        onPressed: isSearchingOnline
+                            ? null
+                            : performOnlineSearch,
+                        icon: isSearchingOnline
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.travel_explore),
+                        tooltip: 'Search Mindanao mountains',
                       ),
                     ],
                   ),
                 ),
-              ),
-          ],
+                const SizedBox(height: 8),
+                if (onlineResult != null)
+                  SimpleDialogOption(
+                    onPressed: () {
+                      Navigator.of(dialogContext).pop();
+                      unawaited(
+                        _openScheduleHikeDialog(
+                          onlineResult!,
+                          _dateOnly(DateTime.now()),
+                        ),
+                      );
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 6,
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.travel_explore,
+                            size: 22,
+                            color: Color(0xFF2F8C5A),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  onlineResult!.name,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                Text(
+                                  onlineResult!.provinceOrCity,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (onlineSearchFailed)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 8,
+                    ),
+                    child: Text(
+                      'No matching mountain found in Mindanao for '
+                      '"${searchController.text.trim()}". Try a more exact name.',
+                      style: TextStyle(color: Colors.red.shade700),
+                    ),
+                  ),
+                for (final mountain in filtered)
+                  SimpleDialogOption(
+                    onPressed: () => Navigator.of(dialogContext).pop(mountain),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 38,
+                            height: 38,
+                            decoration: BoxDecoration(
+                              color: const Color(
+                                0xFF2F8C5A,
+                              ).withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(11),
+                            ),
+                            child: const Icon(
+                              Icons.landscape_rounded,
+                              size: 19,
+                              color: Color(0xFF2F8C5A),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  mountain.name,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${mountain.region} · ${mountain.elevationMasl}m · '
+                                  '${mountain.difficulty}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
         );
       },
     );
@@ -12191,7 +12387,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (!mounted) {
         return;
       }
-      _showDashboardSnackBar(
+      _showTopConfirmation(
         '$mountainName scheduled for ${_formatHikeDate(chosenDate)}.',
       );
     } catch (error) {
@@ -12929,6 +13125,7 @@ class _HikingModeScreen extends StatefulWidget {
 class _HikingModeScreenState extends State<_HikingModeScreen> {
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  GoogleMapController? _googleMapController;
   Timer? _elapsedTimer;
   final DateTime _startedAt = DateTime.now();
   final List<LatLng> _trackPoints = <LatLng>[];
@@ -12937,6 +13134,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   final Set<String> _approachingAnnounced = <String>{};
   final OfflineActivityDatabase _activityDatabase =
       OfflineActivityDatabase.instance;
+  final OfflineMapService _offlineMapService = OfflineMapService();
 
   late List<_HikeCheckpoint> _checkpoints;
   OfflineActivity? _offlineActivity;
@@ -12961,6 +13159,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   double _currentElevationMasl = 0;
   double _maxElevationMasl = 0;
   bool _initializing = true;
+  String? _initializingStatusMessage;
   bool _ending = false;
   bool _sendingSos = false;
   bool _hasNetworkConnection = true;
@@ -13039,6 +13238,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     _elapsedTimer?.cancel();
     _positionSubscription?.cancel();
     _connectivitySubscription?.cancel();
+    _googleMapController?.dispose();
     super.dispose();
   }
 
@@ -13060,6 +13260,69 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     setState(() {
       _hasNetworkConnection = hasConnection;
     });
+  }
+
+  // Best-effort: downloads offline map tiles for the resolved route while
+  // the hiker still has signal at the trailhead, so OfflineMapWidget has
+  // real tiles cached before they hike into a dead zone. Bounded by a
+  // timeout rather than connectivity checks, since a "has connection" flag
+  // doesn't guarantee it's fast enough to finish — either way, hiking mode
+  // proceeds afterward regardless of how many tiles actually downloaded.
+  Future<void> _preCacheOfflineMapTiles(LatLng start) async {
+    final points = <LatLng>[
+      start,
+      ?_hikeTarget,
+      ..._plannedRoutePoints,
+    ];
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _initializingStatusMessage = 'Downloading offline map data...';
+    });
+    try {
+      await _offlineMapService
+          .preCacheTiles(
+            // Zoom 15 first — that's what OfflineMapWidget actually
+            // displays (see initialZoom below); if the timeout cuts this
+            // off partway through, the level that matters is still done.
+            bounds: _offlineCacheBounds(points),
+            zoomLevels: const [15, 14, 16, 13],
+          )
+          .timeout(const Duration(seconds: 30));
+    } catch (_) {
+      // Slow/absent connection just means fewer tiles get cached ahead of
+      // time — OfflineMapWidget already falls back gracefully to blank
+      // tiles for anything not cached, so this never blocks the hike.
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _initializingStatusMessage = null;
+    });
+  }
+
+  // ~1.5km padding around the route's bounding box — covers GPS drift and
+  // minor route deviations, not just the exact plotted line.
+  Map<String, double> _offlineCacheBounds(List<LatLng> points) {
+    const paddingDegrees = 0.015;
+    var minLat = points.first.latitude;
+    var maxLat = points.first.latitude;
+    var minLng = points.first.longitude;
+    var maxLng = points.first.longitude;
+    for (final point in points) {
+      minLat = math.min(minLat, point.latitude);
+      maxLat = math.max(maxLat, point.latitude);
+      minLng = math.min(minLng, point.longitude);
+      maxLng = math.max(maxLng, point.longitude);
+    }
+    return {
+      'minLat': minLat - paddingDegrees,
+      'maxLat': maxLat + paddingDegrees,
+      'minLng': minLng - paddingDegrees,
+      'maxLng': maxLng + paddingDegrees,
+    };
   }
 
   Future<void> _startTracking() async {
@@ -13124,6 +13387,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
           await _refreshRouteAndCheckpoints(startPoint, force: true);
         }
       }
+      await _preCacheOfflineMapTiles(startPoint);
       _offlineActivity = await _activityDatabase.createActivity(
         activityType: 'hike',
         startedAt: _startedAt,
@@ -14788,6 +15052,77 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     return polylines;
   }
 
+  // Google Maps variant, shown instead of the offline map only while there's
+  // a live connection — same underlying data as the offline builders above,
+  // but no LatLng conversion needed since this screen's own LatLng fields
+  // are already google_maps_flutter's type (flutter_map's equivalents are
+  // the ll./fm.-prefixed ones). Markers use plain colored pins rather than
+  // the offline map's custom icon widgets, since GoogleMap markers can't
+  // embed arbitrary widgets the way flutter_map's can.
+  Set<Marker> _buildGoogleHikeMarkers() {
+    final destination = _hikeTarget ?? widget.trail.location;
+    final markers = <Marker>{
+      Marker(
+        markerId: const MarkerId('destination'),
+        position: destination,
+        icon: BitmapDescriptor.defaultMarkerWithHue(
+          BitmapDescriptor.hueGreen,
+        ),
+      ),
+    };
+    final current = _currentLocation;
+    if (current != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('current'),
+          position: current,
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueAzure,
+          ),
+          rotation: _currentHeadingDegrees ?? 0,
+          flat: true,
+          anchor: const Offset(0.5, 0.5),
+        ),
+      );
+    }
+    return markers;
+  }
+
+  Set<Polyline> _buildGoogleHikePolylines() {
+    final polylines = <Polyline>{};
+    if (_plannedRoutePoints.length >= 2) {
+      polylines.add(
+        Polyline(
+          polylineId: const PolylineId('planned_route'),
+          points: _plannedRoutePoints,
+          color: const Color(0xFF00E5FF),
+          width: 4,
+        ),
+      );
+      if (_activeRouteIndex < _plannedRoutePoints.length - 1) {
+        polylines.add(
+          Polyline(
+            polylineId: const PolylineId('remaining_route'),
+            points: _plannedRoutePoints.sublist(_activeRouteIndex),
+            color: const Color(0xFF7CF9A2),
+            width: 5,
+          ),
+        );
+      }
+    }
+    if (_trackPoints.length >= 2) {
+      polylines.add(
+        Polyline(
+          polylineId: const PolylineId('tracked_path'),
+          points: _trackPoints,
+          color: const Color(0xFF2CA9FF),
+          width: 5,
+        ),
+      );
+    }
+    return polylines;
+  }
+
   List<LatLng> _recordedRoutePointsForSubmission() {
     if (_trackPoints.length >= 2) {
       return List<LatLng>.from(_trackPoints);
@@ -15059,18 +15394,47 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                         _kyrielleOffset ??= const Offset(10, 56);
                         return Stack(
                           children: [
-                            OfflineMapWidget(
-                              key: ValueKey(
-                                '${cameraTarget.latitude},${cameraTarget.longitude},${_trackPoints.length},$_hasNetworkConnection',
+                            // A tilted, terrain-style Google Map while
+                            // there's a live connection (Google's tiles
+                            // aren't cacheable for real offline use); the
+                            // moment connectivity drops, this swaps back to
+                            // the pre-cached offline map below — same
+                            // marker/route data either way, just rendered
+                            // through whichever map library is actually
+                            // usable right now.
+                            if (_hasNetworkConnection)
+                              GoogleMap(
+                                key: ValueKey(
+                                  'google-${cameraTarget.latitude},${cameraTarget.longitude}',
+                                ),
+                                initialCameraPosition: CameraPosition(
+                                  target: cameraTarget,
+                                  zoom: 17,
+                                  tilt: 60,
+                                ),
+                                mapType: MapType.terrain,
+                                markers: _buildGoogleHikeMarkers(),
+                                polylines: _buildGoogleHikePolylines(),
+                                myLocationEnabled: false,
+                                myLocationButtonEnabled: false,
+                                zoomControlsEnabled: false,
+                                compassEnabled: true,
+                                onMapCreated: (controller) =>
+                                    _googleMapController = controller,
+                              )
+                            else
+                              OfflineMapWidget(
+                                key: ValueKey(
+                                  '${cameraTarget.latitude},${cameraTarget.longitude},${_trackPoints.length},$_hasNetworkConnection',
+                                ),
+                                initialLatitude: cameraTarget.latitude,
+                                initialLongitude: cameraTarget.longitude,
+                                initialZoom: 15,
+                                markers: _buildOfflineHikeMarkers(),
+                                polylines: _buildOfflineHikePolylines(),
+                                showScaleLayer: false,
+                                allowNetworkFallback: _hasNetworkConnection,
                               ),
-                              initialLatitude: cameraTarget.latitude,
-                              initialLongitude: cameraTarget.longitude,
-                              initialZoom: 15,
-                              markers: _buildOfflineHikeMarkers(),
-                              polylines: _buildOfflineHikePolylines(),
-                              showScaleLayer: false,
-                              allowNetworkFallback: _hasNetworkConnection,
-                            ),
                             Positioned(
                               top: 10,
                               left: 10,
@@ -15144,8 +15508,23 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                               Container(
                                 color: AgakColors.ink.withValues(alpha: 0.45),
                                 alignment: Alignment.center,
-                                child: const CircularProgressIndicator(
-                                  color: AgakColors.gold,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const CircularProgressIndicator(
+                                      color: AgakColors.gold,
+                                    ),
+                                    if (_initializingStatusMessage != null) ...[
+                                      const SizedBox(height: 12),
+                                      Text(
+                                        _initializingStatusMessage!,
+                                        style: const TextStyle(
+                                          color: AgakColors.cream,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
                                 ),
                               ),
                             if (_errorMessage != null)

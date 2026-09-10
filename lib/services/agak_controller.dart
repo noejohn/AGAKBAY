@@ -251,14 +251,18 @@ class AgakController extends ChangeNotifier {
     final catalogMatch = catalogMatches.isEmpty ? null : catalogMatches.first;
 
     return AgakUpcomingHikeReminder(
+      hikeId: next.id,
       mountainName: next.mountainName,
       daysUntil: next.daysUntil,
-      packingList: buildPackingList(
-        difficulty: catalogMatch?.difficulty ?? next.difficulty ?? 'Moderate',
-        elevationMasl: catalogMatch?.elevationMasl ?? next.elevationMasl,
-        trailTypes: catalogMatch?.trailTypes ?? const [],
-        features: catalogMatch?.features ?? const [],
-      ),
+      packingList: [
+        ...buildPackingList(
+          difficulty: catalogMatch?.difficulty ?? next.difficulty ?? 'Moderate',
+          elevationMasl: catalogMatch?.elevationMasl ?? next.elevationMasl,
+          trailTypes: catalogMatch?.trailTypes ?? const [],
+          features: catalogMatch?.features ?? const [],
+        ),
+        ...next.customPackingItems,
+      ],
     );
   }
 

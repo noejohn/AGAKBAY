@@ -66,13 +66,24 @@ class OfflineMapService {
     }
   }
 
-  /// Pre-download map tiles for offline use
+  /// Pre-download map tiles for offline use.
+  ///
   /// [bounds] should be a map with keys: 'minLat', 'maxLat', 'minLng', 'maxLng'
-  /// [zoomLevels] list of zoom levels to cache (e.g., [10, 11, 12, 13])
+  /// [zoomLevels] list of zoom levels to cache, in priority order — earlier
+  /// entries finish first. Callers racing a timeout (e.g. a loading screen
+  /// at the trailhead) should put the zoom level they'll actually display
+  /// first, since a cutoff partway through would otherwise leave whichever
+  /// level was queued last with nothing cached at all.
+  ///
+  /// Downloads within each zoom level run [concurrency] at a time rather
+  /// than one by one — sequential downloads of a multi-hundred-tile area
+  /// can easily blow past a caller's timeout before finishing even the
+  /// first zoom level.
   Future<int> preCacheTiles({
     required Map<String, double> bounds,
     required List<int> zoomLevels,
     void Function(int downloaded, int total)? onProgress,
+    int concurrency = 8,
   }) async {
     if (!_isInitialized) await initialize();
 
@@ -91,14 +102,19 @@ class OfflineMapService {
 
         totalTiles += tiles.length;
 
-        for (final tile in tiles) {
-          try {
-            await getTile(tile['x']!, tile['y']!, z);
-            totalDownloaded++;
-            onProgress?.call(totalDownloaded, totalTiles);
-          } catch (e) {
-            debugPrint('Failed to cache tile: $e');
-          }
+        for (var i = 0; i < tiles.length; i += concurrency) {
+          final batch = tiles.skip(i).take(concurrency);
+          await Future.wait(
+            batch.map((tile) async {
+              try {
+                await getTile(tile['x']!, tile['y']!, z);
+                totalDownloaded++;
+                onProgress?.call(totalDownloaded, totalTiles);
+              } catch (e) {
+                debugPrint('Failed to cache tile: $e');
+              }
+            }),
+          );
         }
       }
     } catch (e) {

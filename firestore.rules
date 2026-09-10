@@ -15,7 +15,26 @@ service cloud.firestore {
         resource.data.accountType == 'tour_guide' ||
         isOwner(userId)
       );
-      allow create, update: if isOwner(userId);
+
+      // Initial self-declaration ("I'm a hiker" / "I'm a tour guide") is
+      // still owner-driven, but guideVerified can never be set true here —
+      // only a trusted server path (exchangeAuth0Token's claims mirror, or
+      // scripts/approveGuide.js) can grant that.
+      allow create: if isOwner(userId)
+        && request.resource.data.guideVerified != true;
+
+      // After creation, role/accountType/guideVerified are frozen from the
+      // client entirely — a self-write here was the whole access-control
+      // hole (any signed-in user could promote themselves to a verified
+      // tour guide). accountTypeConfirmed is locked down for the same
+      // reason: it gates setInitialAccountType's one-time-only check, so a
+      // client resetting it back to false would let them call that
+      // function again and change their role through the back door.
+      // Everything else on the doc (username, profile photo,
+      // onboardingComplete, emergency contact, etc.) stays owner-editable.
+      allow update: if isOwner(userId)
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['role', 'accountType', 'guideVerified', 'accountTypeConfirmed']);
 
       match /notifications/{notificationId} {
         allow read, update, delete: if isOwner(userId);

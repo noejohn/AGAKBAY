@@ -19,7 +19,9 @@ const {
   weatherCodeFromGoogleCondition,
   isWetWeatherCode,
   hikeWeatherRisk,
+  buildWeatherSnapshot,
 } = require("./index");
+const { weatherCacheKey } = require("./redisCache");
 
 describe("randomSixDigitCode", () => {
   it("returns a 6-digit numeric string", () => {
@@ -166,5 +168,75 @@ describe("hikeWeatherRisk", () => {
         windSpeedKmh: 10,
       }),
     ).toBe("good");
+  });
+});
+
+describe("weatherCacheKey", () => {
+  it("rounds coordinates to 2 decimal places", () => {
+    expect(weatherCacheKey(6.98781, 125.27312)).toBe("weather:6.99:125.27");
+  });
+});
+
+describe("buildWeatherSnapshot", () => {
+  const clearSkyResponse = {
+    ok: true,
+    json: () => Promise.resolve({ weatherCondition: { type: "CLEAR" } }),
+  };
+
+  const originalApiKey = process.env.WEATHER_API_KEY;
+  beforeEach(() => {
+    process.env.WEATHER_API_KEY = "test-key";
+  });
+  afterAll(() => {
+    process.env.WEATHER_API_KEY = originalApiKey;
+  });
+
+  it("returns the cached value on a cache hit without calling fetchFn", async () => {
+    const cached = { isSevere: false, isCaution: false, isSunny: true, headline: "cached" };
+    const redis = { get: jest.fn().mockResolvedValue(cached), set: jest.fn() };
+    const fetchFn = jest.fn();
+
+    const result = await buildWeatherSnapshot({ latitude: 7, longitude: 125, redis, fetchFn });
+
+    expect(result).toEqual(cached);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(redis.get).toHaveBeenCalledWith("weather:7.00:125.00");
+  });
+
+  it("calls fetchFn and writes through to redis on a cache miss", async () => {
+    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn().mockResolvedValue("OK") };
+    const fetchFn = jest.fn().mockResolvedValue(clearSkyResponse);
+
+    const result = await buildWeatherSnapshot({ latitude: 7, longitude: 125, redis, fetchFn });
+
+    expect(fetchFn).toHaveBeenCalled();
+    expect(result).toMatchObject({ isSunny: true });
+    expect(redis.set).toHaveBeenCalledWith(
+      "weather:7.00:125.00",
+      expect.any(Object),
+      { ex: 600 },
+    );
+  });
+
+  it("still returns a snapshot when redis is null (cache disabled)", async () => {
+    const fetchFn = jest.fn().mockResolvedValue(clearSkyResponse);
+
+    const result = await buildWeatherSnapshot({ latitude: 7, longitude: 125, redis: null, fetchFn });
+
+    expect(result).toMatchObject({ isSunny: true });
+  });
+
+  it("does not cache a failed upstream response", async () => {
+    const redis = { get: jest.fn().mockResolvedValue(null), set: jest.fn() };
+    const fetchFn = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: jest.fn().mockResolvedValue(""),
+    });
+
+    const result = await buildWeatherSnapshot({ latitude: 7, longitude: 125, redis, fetchFn });
+
+    expect(result).toBeNull();
+    expect(redis.set).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,7 @@ val weatherApiKey = localProperties.getProperty("WEATHER_API_KEY", mapsApiKey)
 val customSearchApiKey = localProperties.getProperty("CUSTOM_SEARCH_API_KEY", "")
 val customSearchEngineId = localProperties.getProperty("CUSTOM_SEARCH_ENGINE_ID", "")
 val aiApiKey = localProperties.getProperty("AI_API_KEY", "")
+val auth0Domain = localProperties.getProperty("AUTH0_DOMAIN", "")
 
 android {
     namespace = "com.example.tunga"
@@ -45,6 +46,15 @@ android {
         manifestPlaceholders["CUSTOM_SEARCH_API_KEY"] = customSearchApiKey
         manifestPlaceholders["CUSTOM_SEARCH_ENGINE_ID"] = customSearchEngineId
         manifestPlaceholders["AI_API_KEY"] = aiApiKey
+        // Auth0 login redirect — custom scheme (the app's own package name)
+        // instead of "https" to avoid needing Android App Links domain
+        // verification, which the auth0_flutter README flags as required
+        // for the https scheme.
+        manifestPlaceholders["auth0Domain"] = auth0Domain
+        // Kept as a literal (not a reference to applicationId above) since
+        // Kotlin can't smart-cast that nullable var here — must stay in
+        // sync with applicationId and Auth0Service's webAuthentication scheme.
+        manifestPlaceholders["auth0Scheme"] = "com.example.tunga"
     }
 
     buildTypes {

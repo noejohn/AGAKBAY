@@ -86,11 +86,13 @@ class AgakMilestoneEvent {
 /// in agak_emotion_selector.dart) — carries just enough to render the
 /// reminder message without the controller reaching back into the DB.
 class AgakUpcomingHikeReminder {
+  final int? hikeId;
   final String mountainName;
   final int daysUntil;
   final List<String> packingList;
 
   const AgakUpcomingHikeReminder({
+    this.hikeId,
     required this.mountainName,
     required this.daysUntil,
     required this.packingList,

@@ -2,8 +2,14 @@ const crypto = require("node:crypto");
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { getRedisClient, weatherCacheKey } = require("./redisCache");
+const { enforceRateLimit } = require("./rateLimit");
+const { exchangeAuth0Token, setInitialAccountType } = require("./auth0Exchange");
 
 admin.initializeApp();
+
+exports.exchangeAuth0Token = exchangeAuth0Token;
+exports.setInitialAccountType = setInitialAccountType;
 
 const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;
@@ -381,8 +387,111 @@ function hikeWeatherRisk({
 }
 exports.hikeWeatherRisk = hikeWeatherRisk;
 
+async function buildWeatherSnapshot({ latitude, longitude, redis, fetchFn }) {
+  const cacheKey = weatherCacheKey(latitude, longitude);
+  if (redis) {
+    const cached = await redis.get(cacheKey).catch(() => null);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const apiKey = process.env.WEATHER_API_KEY;
+  if (!apiKey) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Weather provider is not configured. Set the WEATHER_API_KEY secret.",
+    );
+  }
+
+  const url = new URL("https://weather.googleapis.com/v1/currentConditions:lookup");
+  url.searchParams.set("key", apiKey);
+  url.searchParams.set("location.latitude", latitude.toFixed(6));
+  url.searchParams.set("location.longitude", longitude.toFixed(6));
+
+  let decoded;
+  try {
+    const response = await fetchFn(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) {
+      // Never log `url` here — it carries the API key as a query param.
+      const bodySnippet = await response.text().catch(() => "");
+      console.error(
+        `Weather API returned ${response.status}: ${bodySnippet.slice(0, 300)}`,
+      );
+      return null;
+    }
+    decoded = await response.json();
+  } catch (error) {
+    console.error("Weather API request failed:", error);
+    return null;
+  }
+  if (!decoded || typeof decoded !== "object") {
+    return null;
+  }
+
+  const conditionMap = decoded.weatherCondition;
+  const conditionType =
+    conditionMap && typeof conditionMap === "object" ? conditionMap.type : "";
+  const weatherCode = weatherCodeFromGoogleCondition(conditionType);
+
+  const precipitationMap = decoded.precipitation;
+  const probabilityMap =
+    precipitationMap && typeof precipitationMap === "object"
+      ? precipitationMap.probability
+      : null;
+  const qpfMap =
+    precipitationMap && typeof precipitationMap === "object"
+      ? precipitationMap.qpf
+      : null;
+  const windMap = decoded.wind;
+
+  const risk = hikeWeatherRisk({
+    weatherCode,
+    rainChancePercent:
+      probabilityMap && typeof probabilityMap === "object"
+        ? Number(probabilityMap.percent)
+        : undefined,
+    precipitationMm:
+      qpfMap && typeof qpfMap === "object" ? Number(qpfMap.quantity) : undefined,
+    windSpeedKmh:
+      windMap && typeof windMap === "object" ? Number(windMap.speed) : undefined,
+  });
+
+  const descriptionMap =
+    conditionMap && typeof conditionMap === "object" ? conditionMap.description : null;
+  const descriptionText =
+    descriptionMap && typeof descriptionMap === "object"
+      ? String(descriptionMap.text || "").trim()
+      : "";
+  const fallbackHeadline = {
+    unsafe: "Rough weather is rolling in near you",
+    caution: "Weather looks a bit unsettled near you",
+    good: "Clear skies near you",
+  }[risk];
+
+  const snapshot = {
+    isSevere: risk === "unsafe",
+    isCaution: risk === "caution",
+    isSunny: risk === "good" && weatherCode <= 2,
+    headline: descriptionText || fallbackHeadline,
+  };
+
+  if (redis) {
+    // 10-minute TTL; a write failure should never fail the user-facing
+    // request, so this is fire-and-forget from the caller's perspective.
+    await redis.set(cacheKey, snapshot, { ex: 600 }).catch(() => {});
+  }
+
+  return snapshot;
+}
+exports.buildWeatherSnapshot = buildWeatherSnapshot;
+
 exports.fetchWeatherSnapshot = onCall(
-  { timeoutSeconds: 30, memory: "256MiB", secrets: ["WEATHER_API_KEY"] },
+  {
+    timeoutSeconds: 30,
+    memory: "256MiB",
+    secrets: ["WEATHER_API_KEY", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"],
+  },
   async (request) => {
     if (!request.auth?.uid) {
       throw new HttpsError("unauthenticated", "You must be signed in.");
@@ -397,79 +506,15 @@ exports.fetchWeatherSnapshot = onCall(
       throw new HttpsError("invalid-argument", "Invalid longitude.");
     }
 
-    const apiKey = process.env.WEATHER_API_KEY;
-    if (!apiKey) {
-      throw new HttpsError(
-        "failed-precondition",
-        "Weather provider is not configured. Set the WEATHER_API_KEY secret.",
-      );
-    }
-
-    const url = new URL("https://weather.googleapis.com/v1/currentConditions:lookup");
-    url.searchParams.set("key", apiKey);
-    url.searchParams.set("location.latitude", latitude.toFixed(6));
-    url.searchParams.set("location.longitude", longitude.toFixed(6));
-
-    let decoded;
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      if (!response.ok) {
-        return null;
-      }
-      decoded = await response.json();
-    } catch (_error) {
-      return null;
-    }
-    if (!decoded || typeof decoded !== "object") {
-      return null;
-    }
-
-    const conditionMap = decoded.weatherCondition;
-    const conditionType =
-      conditionMap && typeof conditionMap === "object" ? conditionMap.type : "";
-    const weatherCode = weatherCodeFromGoogleCondition(conditionType);
-
-    const precipitationMap = decoded.precipitation;
-    const probabilityMap =
-      precipitationMap && typeof precipitationMap === "object"
-        ? precipitationMap.probability
-        : null;
-    const qpfMap =
-      precipitationMap && typeof precipitationMap === "object"
-        ? precipitationMap.qpf
-        : null;
-    const windMap = decoded.wind;
-
-    const risk = hikeWeatherRisk({
-      weatherCode,
-      rainChancePercent:
-        probabilityMap && typeof probabilityMap === "object"
-          ? Number(probabilityMap.percent)
-          : undefined,
-      precipitationMm:
-        qpfMap && typeof qpfMap === "object" ? Number(qpfMap.quantity) : undefined,
-      windSpeedKmh:
-        windMap && typeof windMap === "object" ? Number(windMap.speed) : undefined,
+    const redis = getRedisClient();
+    await enforceRateLimit({
+      redis,
+      key: `ratelimit:fetchWeatherSnapshot:${request.auth.uid}`,
+      maxCalls: 30,
+      windowSeconds: 60,
     });
 
-    const descriptionMap =
-      conditionMap && typeof conditionMap === "object" ? conditionMap.description : null;
-    const descriptionText =
-      descriptionMap && typeof descriptionMap === "object"
-        ? String(descriptionMap.text || "").trim()
-        : "";
-    const fallbackHeadline = {
-      unsafe: "Rough weather is rolling in near you",
-      caution: "Weather looks a bit unsettled near you",
-      good: "Clear skies near you",
-    }[risk];
-
-    return {
-      isSevere: risk === "unsafe",
-      isCaution: risk === "caution",
-      isSunny: risk === "good" && weatherCode <= 2,
-      headline: descriptionText || fallbackHeadline,
-    };
+    return buildWeatherSnapshot({ latitude, longitude, redis, fetchFn: fetch });
   },
 );
 

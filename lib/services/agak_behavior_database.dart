@@ -37,7 +37,7 @@ class AgakBehaviorDatabase {
     final path = p.join(dbPath, 'agak_behavior.db');
     final opened = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE mountain_catalog (
@@ -150,6 +150,23 @@ class AgakBehaviorDatabase {
         if (oldVersion < 2) {
           await _createScheduledHikesTable(db);
         }
+        // v2 -> v3: added custom_packing_items. CREATE TABLE IF NOT EXISTS
+        // above doesn't add columns to an already-existing table, so an
+        // explicit ALTER TABLE is needed for installs that already had
+        // scheduled_hikes from v2.
+        if (oldVersion < 3) {
+          final columns = await db.rawQuery(
+            "PRAGMA table_info(scheduled_hikes)",
+          );
+          final hasColumn = columns.any(
+            (column) => column['name'] == 'custom_packing_items',
+          );
+          if (!hasColumn) {
+            await db.execute(
+              'ALTER TABLE scheduled_hikes ADD COLUMN custom_packing_items TEXT',
+            );
+          }
+        }
       },
     );
     _database = opened;
@@ -169,7 +186,8 @@ class AgakBehaviorDatabase {
         elevation_masl INTEGER NOT NULL DEFAULT 0,
         scheduled_date INTEGER NOT NULL,
         notes TEXT,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        custom_packing_items TEXT
       )
     ''');
     await db.execute(
@@ -454,6 +472,37 @@ class AgakBehaviorDatabase {
       'scheduled_hikes',
       where: 'id = ? AND user_id = ?',
       whereArgs: [id, _currentUserId],
+    );
+  }
+
+  /// Appends one user-added item to a scheduled hike's packing list —
+  /// separate from `buildPackingList`'s auto-generated items, which are
+  /// recomputed fresh every time and never stored.
+  Future<void> addCustomPackingItem(int hikeId, String item) async {
+    final trimmed = item.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+    final db = await database;
+    final rows = await db.query(
+      'scheduled_hikes',
+      columns: ['custom_packing_items'],
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [hikeId, _currentUserId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return;
+    }
+    final existing = ScheduledHikeEntry.decodeCustomPackingItems(
+      rows.first['custom_packing_items'] as String?,
+    );
+    final updated = [...existing, trimmed];
+    await db.update(
+      'scheduled_hikes',
+      {'custom_packing_items': jsonEncode(updated)},
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [hikeId, _currentUserId],
     );
   }
 }
