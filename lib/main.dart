@@ -20,7 +20,6 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
-import 'package:tunga/screens/agak_companion_screen.dart';
 import 'package:tunga/screens/kyrielle_companion_chat_screen.dart';
 import 'package:tunga/screens/agak_emotion_showcase_screen.dart';
 import 'package:tunga/screens/agak_scheduled_hikes_screen.dart';
@@ -1207,122 +1206,6 @@ class _MountainOrganizer {
   final bool isExternalSuggestion;
 }
 
-/// A single ask-and-answer box, embedded directly on the Kyrielle screen —
-/// no message history of its own. The answer is handed to [onAnswer] (the
-/// same hero-bubble mechanism Kyrielle uses to react to added packing-list
-/// items), styled with the host screen's own palette rather than a separate
-/// chat theme, since it's meant to read as part of that screen, not a
-/// distinct app section.
-class _AskKyrielleBox extends StatefulWidget {
-  const _AskKyrielleBox({
-    // ignore: unused_element_parameter
-    super.key,
-    this.initialTrail,
-    required this.searchMountainInMindanao,
-    required this.fetchMountainOrganizers,
-    required this.onAnswer,
-  });
-
-  final _NearbyTrail? initialTrail;
-  final Future<_NearbyTrail?> Function(String query) searchMountainInMindanao;
-  final Future<List<_MountainOrganizer>> Function(_NearbyTrail trail)
-  fetchMountainOrganizers;
-  final ValueChanged<String> onAnswer;
-
-  @override
-  State<_AskKyrielleBox> createState() => _AskKyrielleBoxState();
-}
-
-class _AskKyrielleBoxState extends State<_AskKyrielleBox> {
-  final TextEditingController _questionController = TextEditingController();
-  bool _isAsking = false;
-  String _aiApiKey = '';
-
-  @override
-  void dispose() {
-    _questionController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _loadAiApiKey() async {
-    if (_aiApiKey.isNotEmpty) {
-      return;
-    }
-    _aiApiKey = await loadGeminiApiKey();
-  }
-
-  Future<void> _ask() async {
-    final question = _questionController.text.trim();
-    if (question.isEmpty || _isAsking) {
-      return;
-    }
-    setState(() => _isAsking = true);
-    _questionController.clear();
-    FocusScope.of(context).unfocus();
-
-    await _loadAiApiKey();
-    final answer = await _answerHikeAssistantQuestion(
-      question: question,
-      initialTrail: widget.initialTrail,
-      searchMountainInMindanao: widget.searchMountainInMindanao,
-      fetchMountainOrganizers: widget.fetchMountainOrganizers,
-      aiApiKey: _aiApiKey,
-      systemInstruction:
-          'You are a friendly, knowledgeable hiking assistant '
-          'for hikers in Mindanao, Philippines. Answer '
-          'whatever the user actually asks — trail '
-          'difficulty, elevation, weather, safety, gear, or '
-          'general hiking advice — using your own knowledge. '
-          'Only talk about organizers/guides when the user '
-          'asks about finding one or contact info is provided '
-          'to you.',
-    );
-    if (!mounted) {
-      return;
-    }
-    setState(() => _isAsking = false);
-    widget.onAnswer(answer);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: _questionController,
-            enabled: !_isAsking,
-            textInputAction: TextInputAction.send,
-            onSubmitted: (_) => _ask(),
-            decoration: InputDecoration(
-              hintText: 'Ask about gear, weather, organizers...',
-              isDense: true,
-              contentPadding: const EdgeInsets.symmetric(
-                vertical: 10,
-                horizontal: 12,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        IconButton(
-          onPressed: _isAsking ? null : _ask,
-          icon: _isAsking
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.send_rounded, color: AgakColors.accent),
-          tooltip: 'Ask Kyrielle',
-        ),
-      ],
-    );
-  }
-}
 
 /// Whether [normalizedQuestion] is asking about weather/conditions — the
 /// trigger for pulling a live GPS + weather snapshot into the answer
@@ -1355,10 +1238,13 @@ bool _isWeatherQuestion(String normalizedQuestion) {
 }
 
 /// Whether [normalizedQuestion] is asking about the hiker's current
-/// whereabouts — same rationale as [_isWeatherQuestion]: it both triggers
-/// the dedicated GPS-classification context and skips the free-text
-/// mountain-name search, which has nothing useful to match against a
-/// "where am I" question.
+/// whereabouts, OR asking Kyrielle to suggest a mountain to hike — both
+/// route to [_kyrielleLocationAnswer], which already gives a real,
+/// GPS-based answer (either "you're on trail X" or "no trail here, but
+/// mountain Y is N km away") without depending on the general AI call
+/// succeeding. Same rationale as [_isWeatherQuestion]: this both triggers
+/// that dedicated context and skips the free-text mountain-name search,
+/// which has nothing useful to match against either kind of question.
 bool _isLocationQuestion(String normalizedQuestion) {
   const locationPhrases = [
     'where am i',
@@ -1370,6 +1256,18 @@ bool _isLocationQuestion(String normalizedQuestion) {
     'my location',
     'what is my location',
     "what's my location",
+    'nearest mountain',
+    'nearest trail',
+    'nearby mountain',
+    'closest mountain',
+    'recommend a mountain',
+    'recommend me a mountain',
+    'suggest a mountain',
+    'suggest me a mountain',
+    'what mountain should i',
+    'which mountain should i',
+    'where should i hike',
+    'mountain recommendation',
   ];
   return locationPhrases.any(normalizedQuestion.contains);
 }
@@ -7138,13 +7036,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       subtitle: 'Upcoming hikes and packing lists',
                       onTap: () {
                         Navigator.of(dialogContext).pop();
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (context) => AgakScheduledHikesScreen(
-                              onScheduleNewHike: _openScheduleHikeFromCatalog,
-                            ),
-                          ),
-                        );
+                        _openScheduledHikesScreen();
                       },
                     ),
                     _appMenuItem(
@@ -7850,8 +7742,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ),
                     const Spacer(),
                     _circleButton(
-                      icon: Icons.chat_bubble_outline_rounded,
-                      onTap: _openAgakCompanion,
+                      icon: Icons.calendar_month_rounded,
+                      onTap: _openScheduledHikesScreen,
                     ),
                     const SizedBox(width: 10),
                     _circleButton(
@@ -8120,32 +8012,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Future<void> _openAgakCompanion() async {
-    await Navigator.of(context).push<void>(
+  void _openScheduledHikesScreen() {
+    Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => AgakCompanionScreen(
-          chatPanelBuilder: (context, onAnswer) => _AskKyrielleBox(
-            initialTrail: _searchedTrailAnchor,
-            searchMountainInMindanao: (query) async {
-              final result = await _searchMountainInMindanao(query);
-              unawaited(
-                AgakBehaviorDatabase.instance.logSearch(
-                  query: query,
-                  matchedMountainId: result == null
-                      ? null
-                      : buildMountainMatchKey(
-                          name: result.name,
-                          region: result.provinceOrCity,
-                        ),
-                  matchedMountainName: result?.name,
-                  source: 'assistant_chat',
-                ),
-              );
-              return result;
-            },
-            fetchMountainOrganizers: _fetchMountainOrganizers,
-            onAnswer: onAnswer,
-          ),
+        builder: (context) => AgakScheduledHikesScreen(
+          onScheduleNewHike: _openScheduleHikeFromCatalog,
         ),
       ),
     );

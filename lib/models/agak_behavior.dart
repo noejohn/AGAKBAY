@@ -195,6 +195,12 @@ class ScheduledHikeEntry {
   final DateTime createdAt;
   final List<String> customPackingItems;
 
+  /// Text of auto-generated (buildPackingList) items the user removed from
+  /// this hike's checklist. Defaults are recomputed fresh every time
+  /// (never stored themselves), so "removing" one just means excluding a
+  /// matching string from the merged list going forward.
+  final List<String> removedDefaultItems;
+
   const ScheduledHikeEntry({
     this.id,
     this.mountainId,
@@ -206,6 +212,7 @@ class ScheduledHikeEntry {
     this.notes,
     required this.createdAt,
     this.customPackingItems = const [],
+    this.removedDefaultItems = const [],
   });
 
   /// Whole days from today until the hike; 0 = today, negative = past.
@@ -238,6 +245,9 @@ class ScheduledHikeEntry {
       customPackingItems: decodeCustomPackingItems(
         map['custom_packing_items'] as String?,
       ),
+      removedDefaultItems: decodeCustomPackingItems(
+        map['removed_default_items'] as String?,
+      ),
     );
   }
 
@@ -267,6 +277,7 @@ class ScheduledHikeEntry {
     'scheduled_date': scheduledDate.millisecondsSinceEpoch,
     'notes': notes,
     'custom_packing_items': jsonEncode(customPackingItems),
+    'removed_default_items': jsonEncode(removedDefaultItems),
     'created_at': createdAt.millisecondsSinceEpoch,
   };
 }

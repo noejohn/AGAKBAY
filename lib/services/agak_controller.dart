@@ -260,7 +260,7 @@ class AgakController extends ChangeNotifier {
           elevationMasl: catalogMatch?.elevationMasl ?? next.elevationMasl,
           trailTypes: catalogMatch?.trailTypes ?? const [],
           features: catalogMatch?.features ?? const [],
-        ),
+        ).where((item) => !next.removedDefaultItems.contains(item)),
         ...next.customPackingItems,
       ],
     );

@@ -197,6 +197,14 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Organizer/guide contact info per mountain — public read, same as
+    // mountain_trails (there's no client write path for this anywhere in
+    // the app; entries are managed out-of-band).
+    match /mountain_organizers/{organizerId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
     // Written only by reviewTourGuideApplication (functions/adminActions.js)
     // via the Admin SDK — never directly by any client.
     match /admin_actions/{actionId} {

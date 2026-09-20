@@ -37,7 +37,7 @@ class AgakBehaviorDatabase {
     final path = p.join(dbPath, 'agak_behavior.db');
     final opened = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE mountain_catalog (
@@ -167,6 +167,22 @@ class AgakBehaviorDatabase {
             );
           }
         }
+        // v3 -> v4: added removed_default_items, so a user can remove one
+        // of buildPackingList's auto-generated suggestions, not just add
+        // their own — same ALTER TABLE reasoning as the v2 -> v3 step above.
+        if (oldVersion < 4) {
+          final columns = await db.rawQuery(
+            "PRAGMA table_info(scheduled_hikes)",
+          );
+          final hasColumn = columns.any(
+            (column) => column['name'] == 'removed_default_items',
+          );
+          if (!hasColumn) {
+            await db.execute(
+              'ALTER TABLE scheduled_hikes ADD COLUMN removed_default_items TEXT',
+            );
+          }
+        }
       },
     );
     _database = opened;
@@ -187,7 +203,8 @@ class AgakBehaviorDatabase {
         scheduled_date INTEGER NOT NULL,
         notes TEXT,
         created_at INTEGER NOT NULL,
-        custom_packing_items TEXT
+        custom_packing_items TEXT,
+        removed_default_items TEXT
       )
     ''');
     await db.execute(
@@ -501,6 +518,62 @@ class AgakBehaviorDatabase {
     await db.update(
       'scheduled_hikes',
       {'custom_packing_items': jsonEncode(updated)},
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [hikeId, _currentUserId],
+    );
+  }
+
+  /// Removes one user-added item from a scheduled hike's packing list.
+  Future<void> removeCustomPackingItem(int hikeId, String item) async {
+    final db = await database;
+    final rows = await db.query(
+      'scheduled_hikes',
+      columns: ['custom_packing_items'],
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [hikeId, _currentUserId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return;
+    }
+    final existing = ScheduledHikeEntry.decodeCustomPackingItems(
+      rows.first['custom_packing_items'] as String?,
+    );
+    final updated = existing.where((existingItem) => existingItem != item).toList();
+    await db.update(
+      'scheduled_hikes',
+      {'custom_packing_items': jsonEncode(updated)},
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [hikeId, _currentUserId],
+    );
+  }
+
+  /// Hides one of buildPackingList's auto-generated suggestions from this
+  /// hike's checklist going forward. Defaults are never stored themselves
+  /// (recomputed fresh from mountain metadata every time), so "removing"
+  /// one just records its exact text to exclude on future merges.
+  Future<void> removeDefaultPackingItem(int hikeId, String item) async {
+    final db = await database;
+    final rows = await db.query(
+      'scheduled_hikes',
+      columns: ['removed_default_items'],
+      where: 'id = ? AND user_id = ?',
+      whereArgs: [hikeId, _currentUserId],
+      limit: 1,
+    );
+    if (rows.isEmpty) {
+      return;
+    }
+    final existing = ScheduledHikeEntry.decodeCustomPackingItems(
+      rows.first['removed_default_items'] as String?,
+    );
+    if (existing.contains(item)) {
+      return;
+    }
+    final updated = [...existing, item];
+    await db.update(
+      'scheduled_hikes',
+      {'removed_default_items': jsonEncode(updated)},
       where: 'id = ? AND user_id = ?',
       whereArgs: [hikeId, _currentUserId],
     );

@@ -6,7 +6,9 @@ import '../models/agak_behavior.dart';
 import '../models/agak_mountain.dart';
 import '../services/agak_behavior_database.dart';
 import '../services/agak_controller.dart';
+import '../services/agak_item_reaction.dart';
 import '../services/agak_packing_list.dart';
+import '../widgets/agak_speech_bubble.dart';
 import '../widgets/agak_theme.dart';
 
 /// Standalone "My Scheduled Hikes" surface, reached from the hamburger
@@ -157,8 +159,9 @@ class _AgakScheduledHikesScreenState extends State<AgakScheduledHikesScreen> {
                                 children: _hikes.map((hike) {
                                   final catalogMatch = _catalogMatch(hike);
                                   return _ScheduledHikeCard(
+                                    key: ValueKey(hike.id),
                                     hike: hike,
-                                    packingList: buildPackingList(
+                                    defaultPackingList: buildPackingList(
                                       difficulty:
                                           catalogMatch?.difficulty ??
                                           hike.difficulty ??
@@ -301,16 +304,87 @@ class _ErrorState extends StatelessWidget {
   }
 }
 
-class _ScheduledHikeCard extends StatelessWidget {
+class _ScheduledHikeCard extends StatefulWidget {
   const _ScheduledHikeCard({
+    super.key,
     required this.hike,
-    required this.packingList,
+    required this.defaultPackingList,
     required this.onCancel,
   });
 
   final ScheduledHikeEntry hike;
-  final List<String> packingList;
+
+  /// Freshly computed from buildPackingList — NOT yet filtered by
+  /// [ScheduledHikeEntry.removedDefaultItems]; this widget does that
+  /// itself so it can tell a default item apart from a custom one when
+  /// rendering the remove button (defaults get hidden via that list
+  /// rather than deleted from anywhere, customs get deleted for real).
+  final List<String> defaultPackingList;
   final VoidCallback onCancel;
+
+  @override
+  State<_ScheduledHikeCard> createState() => _ScheduledHikeCardState();
+}
+
+class _ScheduledHikeCardState extends State<_ScheduledHikeCard> {
+  final _itemController = TextEditingController();
+  bool _isBusy = false;
+  String? _reaction;
+  Timer? _reactionTimer;
+
+  ScheduledHikeEntry get hike => widget.hike;
+
+  @override
+  void dispose() {
+    _itemController.dispose();
+    _reactionTimer?.cancel();
+    super.dispose();
+  }
+
+  void _showReaction(String text) {
+    _reactionTimer?.cancel();
+    setState(() => _reaction = text);
+    _reactionTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) {
+        setState(() => _reaction = null);
+      }
+    });
+  }
+
+  Future<void> _addItem() async {
+    final id = hike.id;
+    final item = _itemController.text.trim();
+    if (item.isEmpty || id == null || _isBusy) {
+      return;
+    }
+    setState(() => _isBusy = true);
+    _itemController.clear();
+    FocusScope.of(context).unfocus();
+
+    await AgakBehaviorDatabase.instance.addCustomPackingItem(id, item);
+    unawaited(AgakController.instance.refresh(force: true));
+
+    final reaction = await reactionForPackingItem(item);
+    if (!mounted) {
+      return;
+    }
+    setState(() => _isBusy = false);
+    _showReaction(reaction);
+  }
+
+  Future<void> _removeCustomItem(String item) async {
+    final id = hike.id;
+    if (id == null) return;
+    await AgakBehaviorDatabase.instance.removeCustomPackingItem(id, item);
+    unawaited(AgakController.instance.refresh(force: true));
+  }
+
+  Future<void> _removeDefaultItem(String item) async {
+    final id = hike.id;
+    if (id == null) return;
+    await AgakBehaviorDatabase.instance.removeDefaultPackingItem(id, item);
+    unawaited(AgakController.instance.refresh(force: true));
+  }
 
   String get _whenLabel {
     final days = hike.daysUntil;
@@ -398,7 +472,7 @@ class _ScheduledHikeCard extends StatelessWidget {
                   size: 20,
                 ),
                 tooltip: 'Cancel hike',
-                onPressed: onCancel,
+                onPressed: widget.onCancel,
                 visualDensity: VisualDensity.compact,
               ),
               Icon(Icons.expand_more_rounded, color: AgakColors.ink.withValues(alpha: 0.54)),
@@ -425,37 +499,136 @@ class _ScheduledHikeCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  ...packingList.map(
-                    (item) => Padding(
-                      padding: const EdgeInsets.only(bottom: 7),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Icon(
-                            Icons.check_circle_rounded,
-                            size: 16,
-                            color: AgakColors.accent,
-                          ),
-                          const SizedBox(width: 9),
-                          Expanded(
-                            child: Text(
-                              item,
-                              style: TextStyle(
-                                fontSize: 13,
-                                height: 1.35,
-                                color: AgakColors.ink.withValues(alpha: 0.85),
-                              ),
-                            ),
-                          ),
-                        ],
+                  ...widget.defaultPackingList
+                      .where((item) => !hike.removedDefaultItems.contains(item))
+                      .map(
+                        (item) => _PackingItemRow(
+                          item: item,
+                          onRemove: () => _removeDefaultItem(item),
+                        ),
                       ),
+                  ...hike.customPackingItems.map(
+                    (item) => _PackingItemRow(
+                      item: item,
+                      onRemove: () => _removeCustomItem(item),
                     ),
                   ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _itemController,
+                          enabled: !_isBusy,
+                          textInputAction: TextInputAction.done,
+                          onSubmitted: (_) => _addItem(),
+                          decoration: InputDecoration(
+                            hintText: 'Add your own item...',
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(
+                              vertical: 10,
+                              horizontal: 12,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: _isBusy ? null : _addItem,
+                        icon: _isBusy
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.add_circle, color: AgakColors.accent),
+                        tooltip: 'Add item',
+                      ),
+                    ],
+                  ),
+                  if (_reaction != null) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Image.asset(
+                          'assets/images/agak_encouragement_soar.png',
+                          width: 40,
+                          height: 40,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: AgakSpeechBubble(
+                            message: _reaction!,
+                            playful: true,
+                            maxLines: 3,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _PackingItemRow extends StatelessWidget {
+  const _PackingItemRow({required this.item, required this.onRemove});
+
+  final String item;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 3),
+            child: Icon(
+              Icons.check_circle_rounded,
+              size: 16,
+              color: AgakColors.accent,
+            ),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                item,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.35,
+                  color: AgakColors.ink.withValues(alpha: 0.85),
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: Icon(
+              Icons.close_rounded,
+              size: 16,
+              color: AgakColors.ink.withValues(alpha: 0.4),
+            ),
+            tooltip: 'Remove item',
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            onPressed: onRemove,
+          ),
+        ],
       ),
     );
   }
