@@ -151,7 +151,16 @@ exports.exchangeAuth0Token = onCall(
     // persists the role across future silent token refreshes. A custom
     // claim passed only as createCustomToken's additionalClaims would
     // otherwise silently vanish after the token's first refresh (~1 hour).
-    await admin.auth().setCustomUserClaims(uid, { role, accountType, guideVerified });
+    // `admin` is a boolean mirror of role === "admin" so Firestore rules
+    // and Cloud Functions can gate on `request.auth.token.admin` directly
+    // instead of a string comparison — the role is only ever granted via
+    // scripts/grantAdminRole.js (Admin SDK), never through a client write.
+    await admin.auth().setCustomUserClaims(uid, {
+      role,
+      accountType,
+      guideVerified,
+      admin: role === "admin",
+    });
     const firebaseCustomToken = await admin.auth().createCustomToken(uid);
 
     return { firebaseCustomToken, isNewUser: isNew };

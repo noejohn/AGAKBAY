@@ -126,9 +126,29 @@ describe("exchangeAuth0Token", () => {
       role: "tour_guide",
       accountType: "tour_guide",
       guideVerified: true,
+      admin: false,
     });
     expect(mockCreateCustomToken).toHaveBeenCalledWith("guide-uid");
     expect(result.firebaseCustomToken).toBe("fake-custom-token");
+  });
+
+  it("mirrors admin: true only when Firestore role is exactly 'admin'", async () => {
+    mockJwtVerify.mockResolvedValue({
+      payload: { email: "admin@b.com", email_verified: true, name: "Admin Person" },
+    });
+    mockGetUserByEmail.mockResolvedValue({ uid: "admin-uid" });
+    mockDocGet.mockResolvedValue({
+      data: () => ({ role: "admin", accountType: "admin", guideVerified: null }),
+    });
+
+    await callHandler({ idToken: "tok" });
+
+    expect(mockSetCustomUserClaims).toHaveBeenCalledWith("admin-uid", {
+      role: "admin",
+      accountType: "admin",
+      guideVerified: null,
+      admin: true,
+    });
   });
 
   it("bootstraps a fresh hiker doc and default claims for a brand-new user", async () => {
@@ -152,6 +172,7 @@ describe("exchangeAuth0Token", () => {
       role: "hiker",
       accountType: "hiker",
       guideVerified: null,
+      admin: false,
     });
     expect(result.isNewUser).toBe(true);
   });

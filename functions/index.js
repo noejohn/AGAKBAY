@@ -5,11 +5,13 @@ const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { getRedisClient, weatherCacheKey } = require("./redisCache");
 const { enforceRateLimit } = require("./rateLimit");
 const { exchangeAuth0Token, setInitialAccountType } = require("./auth0Exchange");
+const { reviewTourGuideApplication } = require("./adminActions");
 
 admin.initializeApp();
 
 exports.exchangeAuth0Token = exchangeAuth0Token;
 exports.setInitialAccountType = setInitialAccountType;
+exports.reviewTourGuideApplication = reviewTourGuideApplication;
 
 const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;

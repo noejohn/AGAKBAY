@@ -17,10 +17,7 @@ import 'package:flutter/foundation.dart'
 class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) {
-      throw UnsupportedError(
-        'DefaultFirebaseOptions have not been configured for web - '
-        'you can reconfigure this by running the FlutterFire CLI again.',
-      );
+      return web;
     }
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
@@ -64,5 +61,17 @@ class DefaultFirebaseOptions {
     projectId: 'tunga-app-2026',
     storageBucket: 'tunga-app-2026.firebasestorage.app',
     iosBundleId: 'com.example.tunga',
+  );
+
+  // Registered for the Admin Web dashboard (lib/admin_main.dart) — a
+  // separate Firebase Web app from the mobile Android/iOS apps above,
+  // since it's a different deployment target with its own origin.
+  static const FirebaseOptions web = FirebaseOptions(
+    apiKey: 'AIzaSyByB9E6Yo1U_v0_2_ajjMa_Af0tmM7LPWc',
+    appId: '1:41110923671:web:dd1a975aa1503dad237cd2',
+    messagingSenderId: '41110923671',
+    projectId: 'tunga-app-2026',
+    authDomain: 'tunga-app-2026.firebaseapp.com',
+    storageBucket: 'tunga-app-2026.firebasestorage.app',
   );
 }

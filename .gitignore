@@ -34,7 +34,7 @@ migrate_working_dir/
 /coverage/
 **/build/
 **/.gradle/
-functions/node_modules/
+node_modules/
 functions/coverage/
 ios/Flutter/ephemeral/
 tmp_logo_pick/
