@@ -20,16 +20,17 @@ service cloud.firestore {
         isOwner(userId)
       );
 
-      // Initial self-declaration ("I'm a hiker" / "I'm a tour guide") is
-      // still owner-driven, but guideVerified can never be set true here —
-      // only a trusted server path (exchangeAuth0Token's claims mirror, or
-      // scripts/approveGuide.js) can grant that. "admin" is blocked outright
-      // from client creation — that role is only ever granted server-side
-      // via scripts/grantAdminRole.js.
+      // Every account starts as a hiker — there's no more direct "I'm a
+      // tour guide" self-declaration at signup. Becoming a tour guide only
+      // ever happens server-side, via reviewTourGuideApplication approving
+      // a tour_guide_applications doc (see that collection below). "admin"
+      // is blocked the same way — only scripts/grantAdminRole.js grants it.
       allow create: if isOwner(userId)
         && request.resource.data.guideVerified != true
         && request.resource.data.role != 'admin'
-        && request.resource.data.accountType != 'admin';
+        && request.resource.data.accountType != 'admin'
+        && request.resource.data.role != 'tour_guide'
+        && request.resource.data.accountType != 'tour_guide';
 
       // After creation, role/accountType/guideVerified are frozen from the
       // client entirely — a self-write here was the whole access-control
@@ -203,6 +204,21 @@ service cloud.firestore {
     match /mountain_organizers/{organizerId} {
       allow read: if true;
       allow write: if false;
+    }
+
+    // A hiker's "Apply as Tour Guide" submission (ID/certificate photos,
+    // experience). Only the applicant or an admin can read it — it
+    // includes government ID. Status can only move off "pending" via
+    // reviewTourGuideApplication's Admin SDK write (see
+    // functions/adminActions.js) — never directly by any client, which is
+    // what stops an applicant from just marking their own application
+    // approved.
+    match /tour_guide_applications/{applicationId} {
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow update, delete: if false;
     }
 
     // Written only by reviewTourGuideApplication (functions/adminActions.js)

@@ -1,6 +1,8 @@
-const mockDocGet = jest.fn();
-const mockDocUpdate = jest.fn();
+const mockAppDocGet = jest.fn();
+const mockAppDocUpdate = jest.fn();
+const mockUserDocUpdate = jest.fn();
 const mockCollectionAdd = jest.fn();
+const mockNotificationAdd = jest.fn();
 const mockSetCustomUserClaims = jest.fn();
 
 jest.mock("firebase-admin", () => ({
@@ -9,14 +11,23 @@ jest.mock("firebase-admin", () => ({
   })),
   firestore: Object.assign(
     jest.fn(() => ({
-      collection: jest.fn((name) => ({
-        doc: jest.fn(() => ({
-          get: mockDocGet,
-          update: mockDocUpdate,
-        })),
-        add: mockCollectionAdd,
-        __name: name,
-      })),
+      collection: jest.fn((name) => {
+        if (name === "tour_guide_applications") {
+          return { doc: jest.fn(() => ({ get: mockAppDocGet, update: mockAppDocUpdate })) };
+        }
+        if (name === "users") {
+          return {
+            doc: jest.fn(() => ({
+              update: mockUserDocUpdate,
+              collection: jest.fn(() => ({ add: mockNotificationAdd })),
+            })),
+          };
+        }
+        if (name === "admin_actions") {
+          return { add: mockCollectionAdd };
+        }
+        throw new Error(`Unexpected collection in test: ${name}`);
+      }),
     })),
     { FieldValue: { serverTimestamp: jest.fn(() => "SERVER_TIMESTAMP") } },
   ),
@@ -33,56 +44,66 @@ beforeEach(() => {
 
 it("rejects when the caller lacks the admin claim", async () => {
   await expect(
-    callHandler({ uid: "guide-1", decision: "approve" }, { uid: "hiker-uid", token: { admin: false } }),
+    callHandler(
+      { applicationId: "app-1", decision: "approve" },
+      { uid: "hiker-uid", token: { admin: false } },
+    ),
   ).rejects.toMatchObject({ code: "permission-denied" });
-  expect(mockDocGet).not.toHaveBeenCalled();
+  expect(mockAppDocGet).not.toHaveBeenCalled();
 });
 
 it("rejects when not signed in at all", async () => {
-  await expect(callHandler({ uid: "guide-1", decision: "approve" }, null)).rejects.toMatchObject({
-    code: "permission-denied",
-  });
+  await expect(
+    callHandler({ applicationId: "app-1", decision: "approve" }, null),
+  ).rejects.toMatchObject({ code: "permission-denied" });
 });
 
 it("rejects an invalid decision value", async () => {
-  await expect(callHandler({ uid: "guide-1", decision: "maybe" })).rejects.toThrow(
+  await expect(callHandler({ applicationId: "app-1", decision: "maybe" })).rejects.toThrow(
     /approve.*reject/,
   );
 });
 
-it("rejects when the target user doc doesn't exist", async () => {
-  mockDocGet.mockResolvedValue({ exists: false });
+it("rejects when the application doesn't exist", async () => {
+  mockAppDocGet.mockResolvedValue({ exists: false });
 
-  await expect(callHandler({ uid: "ghost-uid", decision: "approve" })).rejects.toThrow(
-    /No user profile/,
+  await expect(callHandler({ applicationId: "ghost-app", decision: "approve" })).rejects.toThrow(
+    /No application/,
   );
 });
 
-it("rejects when the account has no pending application", async () => {
-  mockDocGet.mockResolvedValue({
+it("rejects when the application has already been reviewed", async () => {
+  mockAppDocGet.mockResolvedValue({
     exists: true,
-    data: () => ({ accountType: "hiker", guideVerified: null }),
+    data: () => ({ uid: "guide-1", status: "approved" }),
   });
 
-  await expect(callHandler({ uid: "hiker-1", decision: "approve" })).rejects.toThrow(
-    /no pending tour guide application/,
+  await expect(callHandler({ applicationId: "app-1", decision: "approve" })).rejects.toThrow(
+    /already been reviewed/,
   );
-  expect(mockDocUpdate).not.toHaveBeenCalled();
+  expect(mockAppDocUpdate).not.toHaveBeenCalled();
 });
 
 describe("approve", () => {
   beforeEach(() => {
-    mockDocGet.mockResolvedValue({
+    mockAppDocGet.mockResolvedValue({
       exists: true,
-      data: () => ({ accountType: "tour_guide", guideVerified: false }),
+      data: () => ({ uid: "guide-1", status: "pending" }),
     });
   });
 
-  it("sets guideVerified true and mirrors verified tour_guide claims", async () => {
-    const result = await callHandler({ uid: "guide-1", decision: "approve" });
+  it("marks the application approved and promotes the account to verified tour_guide", async () => {
+    const result = await callHandler({ applicationId: "app-1", decision: "approve" });
 
-    expect(mockDocUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ guideVerified: true }),
+    expect(mockAppDocUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "approved", reviewedBy: "admin-uid" }),
+    );
+    expect(mockUserDocUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "tour_guide",
+        accountType: "tour_guide",
+        guideVerified: true,
+      }),
     );
     expect(mockSetCustomUserClaims).toHaveBeenCalledWith("guide-1", {
       role: "tour_guide",
@@ -94,7 +115,7 @@ describe("approve", () => {
   });
 
   it("writes an audit log entry", async () => {
-    await callHandler({ uid: "guide-1", decision: "approve", reason: "looks good" });
+    await callHandler({ applicationId: "app-1", decision: "approve", reason: "looks good" });
 
     expect(mockCollectionAdd).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -107,36 +128,57 @@ describe("approve", () => {
       }),
     );
   });
+
+  it("notifies the applicant of the approval", async () => {
+    await callHandler({ applicationId: "app-1", decision: "approve" });
+
+    expect(mockNotificationAdd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "guide_application",
+        title: "Tour Guide Application Approved!",
+        read: false,
+      }),
+    );
+  });
 });
 
 describe("reject", () => {
   beforeEach(() => {
-    mockDocGet.mockResolvedValue({
+    mockAppDocGet.mockResolvedValue({
       exists: true,
-      data: () => ({ accountType: "tour_guide", guideVerified: false }),
+      data: () => ({ uid: "guide-2", status: "pending" }),
     });
   });
 
-  it("drops the account back to hiker instead of leaving it in limbo", async () => {
-    const result = await callHandler({ uid: "guide-2", decision: "reject" });
+  it("marks the application rejected without touching the user's account", async () => {
+    const result = await callHandler({ applicationId: "app-2", decision: "reject" });
 
-    expect(mockDocUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ role: "hiker", accountType: "hiker", guideVerified: null }),
+    expect(mockAppDocUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "rejected", reviewedBy: "admin-uid" }),
     );
-    expect(mockSetCustomUserClaims).toHaveBeenCalledWith("guide-2", {
-      role: "hiker",
-      accountType: "hiker",
-      guideVerified: null,
-      admin: false,
-    });
+    expect(mockUserDocUpdate).not.toHaveBeenCalled();
+    expect(mockSetCustomUserClaims).not.toHaveBeenCalled();
     expect(result).toEqual({ decision: "reject" });
   });
 
   it("writes an audit log entry with no reason when none is given", async () => {
-    await callHandler({ uid: "guide-2", decision: "reject" });
+    await callHandler({ applicationId: "app-2", decision: "reject" });
 
     expect(mockCollectionAdd).toHaveBeenCalledWith(
       expect.objectContaining({ action: "reject_tour_guide", newStatus: "rejected", reason: null }),
+    );
+  });
+
+  it("notifies the applicant of the rejection, including the reason when given", async () => {
+    await callHandler({ applicationId: "app-2", decision: "reject", reason: "ID unreadable" });
+
+    expect(mockNotificationAdd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "guide_application",
+        title: "Tour Guide Application Update",
+        body: expect.stringContaining("ID unreadable"),
+        read: false,
+      }),
     );
   });
 });

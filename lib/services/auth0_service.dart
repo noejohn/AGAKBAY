@@ -2,11 +2,11 @@ import 'package:auth0_flutter/auth0_flutter.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
-/// Result of an Auth0-bridged sign-in — [isNewUser] tells the caller
-/// whether to show the one-time hiker/tour-guide picker (see
-/// Auth0Service.setInitialAccountType), since exchangeAuth0Token already
-/// knows this from resolveFirebaseUid and there's no need to guess it
-/// client-side.
+/// Result of an Auth0-bridged sign-in. [isNewUser] comes straight from
+/// exchangeAuth0Token's resolveFirebaseUid — every new account bootstraps
+/// as a hiker there (bootstrapNewUserDoc), so there's no client-side
+/// hiker/tour-guide choice to make; becoming a tour guide only happens
+/// later via a reviewed "Apply as Tour Guide" application.
 class Auth0SignInResult {
   const Auth0SignInResult({required this.credential, required this.isNewUser});
 
@@ -49,18 +49,6 @@ class Auth0Service {
   /// ever sees it.
   Future<Auth0SignInResult> signInWithGoogle() async {
     return _login(parameters: {'connection': 'google-oauth2'});
-  }
-
-  /// Records the user's one-time hiker/tour-guide choice for an account
-  /// that just signed up via Auth0 — only call this when
-  /// [Auth0SignInResult.isNewUser] was true. The server refuses to run
-  /// this a second time (see setInitialAccountType in auth0Exchange.js),
-  /// so it's safe to call at most once per account, never as a general
-  /// "change my role" action.
-  Future<void> setInitialAccountType(String accountType) async {
-    await _functions.httpsCallable('setInitialAccountType').call<void>({
-      'accountType': accountType,
-    });
   }
 
   Future<Auth0SignInResult> _login({

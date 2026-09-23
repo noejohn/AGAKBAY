@@ -23,6 +23,7 @@ import 'package:tunga/firebase_options.dart';
 import 'package:tunga/screens/kyrielle_companion_chat_screen.dart';
 import 'package:tunga/screens/agak_emotion_showcase_screen.dart';
 import 'package:tunga/screens/agak_scheduled_hikes_screen.dart';
+import 'package:tunga/screens/tour_guide_application_screen.dart';
 import 'package:tunga/screens/hike_room_screen.dart';
 import 'package:tunga/screens/onboarding/onboarding_flow_screen.dart';
 import 'package:tunga/services/activity_sync_service.dart';
@@ -569,10 +570,6 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) {
         return;
       }
-      await _promptAccountTypeIfNew(result);
-      if (!mounted) {
-        return;
-      }
       final onboarded = await OnboardingService().hasCompletedOnboarding(
         result.credential.user!.uid,
       );
@@ -596,83 +593,6 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);
-      }
-    }
-  }
-
-  // The Google/Auth0 redirect has no room to ask hiker-vs-guide the way the
-  // email/password signup screen does, so this asks right after — but only
-  // for a genuinely new account (exchangeAuth0Token's isNewUser), never on
-  // a returning user's login. setInitialAccountType refuses to run twice
-  // server-side, so this is safe to call at most once per account.
-  Future<void> _promptAccountTypeIfNew(Auth0SignInResult result) async {
-    if (!result.isNewUser) {
-      return;
-    }
-    final chosen = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => SimpleDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 4),
-        title: const Text(
-          'One quick thing...',
-          style: TextStyle(fontWeight: FontWeight.w900, fontSize: 19),
-        ),
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-            child: Text(
-              'Are you joining as a hiker, or a tour guide?',
-              style: TextStyle(color: AgakColors.ink.withValues(alpha: 0.7)),
-            ),
-          ),
-          const SizedBox(height: 12),
-          SimpleDialogOption(
-            onPressed: () => Navigator.of(dialogContext).pop('hiker'),
-            child: const Row(
-              children: [
-                Icon(Icons.hiking_rounded, color: AgakColors.olive),
-                SizedBox(width: 12),
-                Text(
-                  'Hiker',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: AgakColors.ink,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          SimpleDialogOption(
-            onPressed: () => Navigator.of(dialogContext).pop('tour_guide'),
-            child: const Row(
-              children: [
-                Icon(Icons.groups_rounded, color: AgakColors.maroon),
-                SizedBox(width: 12),
-                Text(
-                  'Tour Guide',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: AgakColors.ink,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-    if (chosen == null || !mounted) {
-      return;
-    }
-    try {
-      await _auth0Service.setInitialAccountType(chosen);
-    } catch (error) {
-      if (mounted) {
-        _showSnackBar(
-          'Could not save your account type — you can update this later.',
-        );
       }
     }
   }
@@ -7499,6 +7419,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'trail' => const Color(0xFF7CF9A2),
       'safety' => const Color(0xFFFFD76A),
       'comment' => const Color(0xFF48D1FF),
+      'guide_application' => AgakColors.olive,
       _ => const Color(0xFF48D1FF),
     };
     final icon = switch (type) {
@@ -7506,6 +7427,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'trail' => Icons.route_rounded,
       'comment' => Icons.chat_bubble_rounded,
       'safety' => Icons.health_and_safety_rounded,
+      'guide_application' => Icons.badge_rounded,
       _ => Icons.notifications_none_rounded,
     };
     DateTime? date;
@@ -7746,10 +7668,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       onTap: _openScheduledHikesScreen,
                     ),
                     const SizedBox(width: 10),
-                    _circleButton(
-                      icon: Icons.notifications_none_rounded,
-                      onTap: _openNotificationsSheet,
-                    ),
+                    _notificationBellButton(),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -9671,6 +9590,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _profileSection(
               title: 'Account',
               children: [
+                TourGuideApplicationStatusTile(
+                  currentAccountType: _currentUserProfile['accountType'] as String?,
+                ),
                 _profileActionTile(
                   icon: Icons.logout_rounded,
                   iconColor: const Color(0xFFFF7A7A),
@@ -10018,6 +9940,60 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  /// The notification bell, with a small unread-count badge — same
+  /// `users/{uid}/notifications` collection _openNotificationsSheet reads,
+  /// filtered to `read == false` so the count matches what a user would
+  /// actually see as "new" when they open the sheet.
+  Widget _notificationBellButton() {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      return _circleButton(icon: Icons.notifications_none_rounded, onTap: _openNotificationsSheet);
+    }
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: _firestore
+          .collection('users')
+          .doc(user.uid)
+          .collection('notifications')
+          .where('read', isEqualTo: false)
+          .snapshots(),
+      builder: (context, snapshot) {
+        final unreadCount = snapshot.data?.docs.length ?? 0;
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            _circleButton(icon: Icons.notifications_none_rounded, onTap: _openNotificationsSheet),
+            if (unreadCount > 0)
+              Positioned(
+                right: -2,
+                top: -2,
+                child: IgnorePointer(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                    decoration: BoxDecoration(
+                      color: AgakColors.maroon,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white, width: 1.5),
+                    ),
+                    child: Text(
+                      unreadCount > 9 ? '9+' : '$unreadCount',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -15711,7 +15687,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
   bool _isSubmitting = false;
-  String _selectedAccountType = 'hiker';
 
   @override
   void dispose() {
@@ -15770,7 +15745,7 @@ class _SignUpScreenState extends State<SignUpScreen> {
         username: username,
         email: email,
         password: password,
-        accountType: _selectedAccountType,
+        accountType: 'hiker',
       );
 
       if (!mounted) {
@@ -15805,112 +15780,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  Widget _accountTypeSelector() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AgakColors.ink.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AgakColors.ink.withValues(alpha: 0.12)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Choose account type',
-            style: TextStyle(
-              color: AgakColors.ink.withValues(alpha: 0.82),
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: _accountTypeOption(
-                  value: 'hiker',
-                  title: 'Hiker',
-                  icon: Icons.hiking_rounded,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _accountTypeOption(
-                  value: 'tour_guide',
-                  title: 'Tour Guide',
-                  icon: Icons.emoji_people_rounded,
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _accountTypeOption({
-    required String value,
-    required String title,
-    required IconData icon,
-  }) {
-    final isSelected = _selectedAccountType == value;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: _isSubmitting
-            ? null
-            : () {
-                setState(() {
-                  _selectedAccountType = value;
-                });
-              },
-        borderRadius: BorderRadius.circular(14),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
-          height: 64,
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? AgakColors.maroon.withValues(alpha: 0.16)
-                : AgakColors.ink.withValues(alpha: 0.04),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(
-              color: isSelected
-                  ? AgakColors.maroon
-                  : AgakColors.ink.withValues(alpha: 0.1),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                icon,
-                color: isSelected
-                    ? AgakColors.maroon
-                    : AgakColors.ink.withValues(alpha: 0.7),
-                size: 22,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: isSelected ? AgakColors.maroon : AgakColors.ink,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   @override
@@ -15976,8 +15845,6 @@ class _SignUpScreenState extends State<SignUpScreen> {
                         ),
                       ),
                       const SizedBox(height: 28),
-                      _accountTypeSelector(),
-                      const SizedBox(height: 14),
                       _AuthInput(
                         hint: 'Full Name',
                         icon: Icons.person_outline_rounded,

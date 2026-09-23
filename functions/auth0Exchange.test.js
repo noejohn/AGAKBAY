@@ -46,11 +46,7 @@ jest.mock("./redisCache", () => ({
   getRedisClient: (...args) => mockGetRedisClient(...args),
 }));
 
-const {
-  resolveFirebaseUid,
-  exchangeAuth0Token,
-  setInitialAccountType,
-} = require("./auth0Exchange");
+const { resolveFirebaseUid, exchangeAuth0Token } = require("./auth0Exchange");
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -193,88 +189,3 @@ describe("exchangeAuth0Token", () => {
   });
 });
 
-describe("setInitialAccountType", () => {
-  const callHandler = (data, uid = "user-1") =>
-    setInitialAccountType.run({ data, auth: { uid } });
-
-  it("rejects when not signed in", async () => {
-    await expect(
-      setInitialAccountType.run({ data: { accountType: "hiker" }, auth: null }),
-    ).rejects.toThrow(/signed in/);
-  });
-
-  it("rejects an invalid accountType value", async () => {
-    mockDocGet.mockResolvedValue({ exists: true, data: () => ({}) });
-
-    await expect(callHandler({ accountType: "admin" })).rejects.toThrow(
-      /hiker.*tour_guide/,
-    );
-  });
-
-  it("rejects when no profile document exists", async () => {
-    mockDocGet.mockResolvedValue({ exists: false });
-
-    await expect(callHandler({ accountType: "hiker" })).rejects.toThrow(
-      /No user profile/,
-    );
-  });
-
-  it("refuses to run a second time once accountTypeConfirmed is true", async () => {
-    mockDocGet.mockResolvedValue({
-      exists: true,
-      data: () => ({ accountTypeConfirmed: true }),
-    });
-
-    await expect(callHandler({ accountType: "tour_guide" })).rejects.toThrow(
-      /already been set/,
-    );
-    expect(mockDocUpdate).not.toHaveBeenCalled();
-  });
-
-  it("sets hiker with guideVerified null, and marks confirmed", async () => {
-    mockDocGet.mockResolvedValue({
-      exists: true,
-      data: () => ({ accountTypeConfirmed: false }),
-    });
-
-    const result = await callHandler({ accountType: "hiker" }, "user-2");
-
-    expect(mockDocUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        accountType: "hiker",
-        role: "hiker",
-        guideVerified: null,
-        accountTypeConfirmed: true,
-      }),
-    );
-    expect(mockSetCustomUserClaims).toHaveBeenCalledWith("user-2", {
-      role: "hiker",
-      accountType: "hiker",
-      guideVerified: null,
-    });
-    expect(result.accountType).toBe("hiker");
-  });
-
-  it("sets tour_guide with guideVerified false (pending), not true", async () => {
-    mockDocGet.mockResolvedValue({
-      exists: true,
-      data: () => ({ accountTypeConfirmed: false }),
-    });
-
-    await callHandler({ accountType: "tour_guide" }, "user-3");
-
-    expect(mockDocUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        accountType: "tour_guide",
-        role: "tour_guide",
-        guideVerified: false,
-        accountTypeConfirmed: true,
-      }),
-    );
-    expect(mockSetCustomUserClaims).toHaveBeenCalledWith("user-3", {
-      role: "tour_guide",
-      accountType: "tour_guide",
-      guideVerified: false,
-    });
-  });
-});

@@ -7,6 +7,12 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 // any client-supplied flag, since firestore.rules never lets a client
 // write "admin" onto their own doc (see firestore.rules' users/{userId}
 // create rule).
+//
+// Reviews a tour_guide_applications doc (submitted via the mobile app's
+// "Apply as Tour Guide" form). The applicant's users/{uid} doc is never
+// touched by the application itself — it only changes here, on approval —
+// so a rejected/pending applicant's account was never anything but a
+// normal hiker the whole time; there's nothing to "revert" on rejection.
 exports.reviewTourGuideApplication = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
   async (request) => {
@@ -14,46 +20,55 @@ exports.reviewTourGuideApplication = onCall(
       throw new HttpsError("permission-denied", "Admin access required.");
     }
 
-    const targetUid = request.data?.uid;
+    const applicationId = request.data?.applicationId;
     const decision = request.data?.decision;
-    if (typeof targetUid !== "string" || !targetUid) {
-      throw new HttpsError("invalid-argument", "uid is required.");
+    if (typeof applicationId !== "string" || !applicationId) {
+      throw new HttpsError("invalid-argument", "applicationId is required.");
     }
     if (decision !== "approve" && decision !== "reject") {
       throw new HttpsError("invalid-argument", "decision must be 'approve' or 'reject'.");
     }
 
     const db = admin.firestore();
-    const userRef = db.collection("users").doc(targetUid);
-    const snap = await userRef.get();
+    const applicationRef = db.collection("tour_guide_applications").doc(applicationId);
+    const snap = await applicationRef.get();
     if (!snap.exists) {
-      throw new HttpsError("not-found", "No user profile found.");
+      throw new HttpsError("not-found", "No application found.");
     }
-    const data = snap.data();
-    if (data.accountType !== "tour_guide" || data.guideVerified !== false) {
+    const application = snap.data();
+    if (application.status !== "pending") {
       throw new HttpsError(
         "failed-precondition",
-        "This account has no pending tour guide application.",
+        "This application has already been reviewed.",
       );
     }
 
     const approved = decision === "approve";
-    // Rejecting drops the account back to hiker rather than leaving it in
-    // limbo — matches the AGAKBAY admin-plan's "kapag rejected, mananatiling
-    // Hiker ang account" rule, and re-declaring as tour_guide later just
-    // starts a fresh application.
-    const update = approved
-      ? { guideVerified: true }
-      : { role: "hiker", accountType: "hiker", guideVerified: null };
-    await userRef.update({
-      ...update,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    const targetUid = application.uid;
+    const reason = typeof request.data?.reason === "string" ? request.data.reason : null;
+
+    await applicationRef.update({
+      status: approved ? "approved" : "rejected",
+      reviewedBy: request.auth.uid,
+      reviewedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reviewNote: reason,
     });
 
-    const claims = approved
-      ? { role: "tour_guide", accountType: "tour_guide", guideVerified: true, admin: false }
-      : { role: "hiker", accountType: "hiker", guideVerified: null, admin: false };
-    await admin.auth().setCustomUserClaims(targetUid, claims);
+    if (approved) {
+      const userRef = db.collection("users").doc(targetUid);
+      await userRef.update({
+        role: "tour_guide",
+        accountType: "tour_guide",
+        guideVerified: true,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      await admin.auth().setCustomUserClaims(targetUid, {
+        role: "tour_guide",
+        accountType: "tour_guide",
+        guideVerified: true,
+        admin: false,
+      });
+    }
 
     await db.collection("admin_actions").add({
       adminId: request.auth.uid,
@@ -61,7 +76,21 @@ exports.reviewTourGuideApplication = onCall(
       targetId: targetUid,
       previousStatus: "pending",
       newStatus: approved ? "approved" : "rejected",
-      reason: typeof request.data?.reason === "string" ? request.data.reason : null,
+      reason,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Same shape _createUserNotification writes client-side (lib/main.dart)
+    // so the existing Notifications sheet renders this with no UI changes.
+    await db.collection("users").doc(targetUid).collection("notifications").add({
+      type: "guide_application",
+      title: approved ? "Tour Guide Application Approved!" : "Tour Guide Application Update",
+      body: approved
+        ? "Congratulations! Your Tour Guide application has been approved. You can now create and manage Hike Rooms."
+        : reason
+          ? `Your Tour Guide application was not approved: ${reason}`
+          : "Your Tour Guide application was not approved this time. You're welcome to apply again.",
+      read: false,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
