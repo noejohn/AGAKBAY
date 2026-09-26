@@ -4,7 +4,7 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { getRedisClient, weatherCacheKey } = require("./redisCache");
 const { enforceRateLimit } = require("./rateLimit");
-const { exchangeAuth0Token, setInitialAccountType } = require("./auth0Exchange");
+const { exchangeAuth0Token } = require("./auth0Exchange");
 const { reviewTourGuideApplication } = require("./adminActions");
 const { manageUserAccount, createAdminAccount } = require("./userAccountActions");
 const {
@@ -15,7 +15,6 @@ const {
 admin.initializeApp();
 
 exports.exchangeAuth0Token = exchangeAuth0Token;
-exports.setInitialAccountType = setInitialAccountType;
 exports.reviewTourGuideApplication = reviewTourGuideApplication;
 exports.manageUserAccount = manageUserAccount;
 exports.createAdminAccount = createAdminAccount;

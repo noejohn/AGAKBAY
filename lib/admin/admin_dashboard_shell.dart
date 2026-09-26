@@ -661,6 +661,10 @@ class _DashboardOverviewPage extends StatelessWidget {
         .collection('users')
         .where('accountType', isEqualTo: 'tour_guide')
         .where('guideVerified', isEqualTo: false);
+    final approvedGuidesQuery = FirebaseFirestore.instance
+        .collection('users')
+        .where('accountType', isEqualTo: 'tour_guide')
+        .where('guideVerified', isEqualTo: true);
     final pendingTrailsQuery = FirebaseFirestore.instance
         .collection('trail_submissions')
         .where('status', isEqualTo: 'pending');
@@ -746,11 +750,7 @@ class _DashboardOverviewPage extends StatelessWidget {
                     return _ListRow(
                       title: (data['fullName'] as String?) ?? (data['email'] as String?) ?? d.id,
                       subtitle: (data['email'] as String?) ?? '',
-                      onReview: () => _showGuideReviewDialog(
-                        context,
-                        uid: d.id,
-                        data: data,
-                      ),
+                      onReview: () => _showNotWiredUpYet(context),
                     );
                   }).toList(),
                 );
@@ -876,9 +876,8 @@ class _TourGuideVerificationPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pendingGuidesQuery = FirebaseFirestore.instance
-        .collection('users')
-        .where('accountType', isEqualTo: 'tour_guide')
-        .where('guideVerified', isEqualTo: false);
+        .collection('tour_guide_applications')
+        .where('status', isEqualTo: 'pending');
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -923,7 +922,10 @@ class _TourGuideVerificationPage extends StatelessWidget {
                     .map(
                       (d) => Padding(
                         padding: const EdgeInsets.only(bottom: 16),
-                        child: _GuideApplicationCard(uid: d.id, data: d.data() as Map<String, dynamic>),
+                        child: _GuideApplicationCard(
+                          applicationId: d.id,
+                          data: d.data() as Map<String, dynamic>,
+                        ),
                       ),
                     )
                     .toList(),
@@ -946,13 +948,9 @@ class _FieldLabel extends StatelessWidget {
 }
 
 class _GuideApplicationCard extends StatefulWidget {
-  const _GuideApplicationCard({
-    required this.uid,
-    required this.data,
-    this.onReviewed,
-  });
+  const _GuideApplicationCard({required this.uid, required this.data});
 
-  final String uid;
+  final String applicationId;
   final Map<String, dynamic> data;
   final VoidCallback? onReviewed;
 
@@ -967,13 +965,13 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
     setState(() => _submitting = true);
     try {
       await FirebaseFunctions.instance.httpsCallable('reviewTourGuideApplication').call({
-        'uid': widget.uid,
+        'applicationId': widget.applicationId,
         'decision': decision,
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(decision == 'approve' ? 'Approved.' : 'Rejected — account reverted to hiker.'),
+            content: Text(decision == 'approve' ? 'Approved.' : 'Rejected.'),
           ),
         );
         widget.onReviewed?.call();
@@ -997,12 +995,56 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
     ).showSnackBar(SnackBar(content: Text('$feature isn\'t wired up yet.')));
   }
 
+  void _viewDocuments(BuildContext context) {
+    final idUrl = widget.data['idImageUrl'] as String?;
+    final certUrl = widget.data['certificateImageUrl'] as String?;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('ID & Certificate'),
+        content: SizedBox(
+          width: 480,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Government ID', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if (idUrl != null)
+                  Image.network(idUrl, fit: BoxFit.contain)
+                else
+                  const Text('Not provided.', style: TextStyle(color: Colors.black45)),
+                const SizedBox(height: 20),
+                const Text('Certificate', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                if (certUrl != null)
+                  Image.network(certUrl, fit: BoxFit.contain)
+                else
+                  const Text('Not provided.', style: TextStyle(color: Colors.black45)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final fullName =
-        (widget.data['fullName'] as String?) ?? (widget.data['username'] as String?) ?? widget.uid;
-    final email = (widget.data['email'] as String?) ?? '';
-    final submitted = _formatTimestamp(widget.data['createdAt']);
+    final data = widget.data;
+    final fullName = (data['fullName'] as String?) ?? widget.applicationId;
+    final email = (data['applicantEmail'] as String?) ?? '';
+    final contact = (data['contactNumber'] as String?) ?? '—';
+    final experience = (data['experienceYears'] as String?) ?? '—';
+    final mountains = (data['mountainsHandled'] as String?) ?? '—';
+    final submitted = _formatTimestamp(data['submittedAt']);
 
     return Container(
       width: double.infinity,
@@ -1019,6 +1061,7 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(fullName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    Text('Contact: $contact', style: const TextStyle(color: Colors.black54, fontSize: 12.5)),
                     if (email.isNotEmpty)
                       Text(email, style: const TextStyle(color: AdminColors.accent, fontSize: 13)),
                   ],
@@ -1038,27 +1081,17 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
             ],
           ),
           const SizedBox(height: 16),
-          // Experience/documents aren't collected anywhere yet — the real
-          // Tour Guide application form (full name, contact, experience,
-          // certifications, ID upload) hasn't been built. Showing that
-          // honestly here instead of inventing sample values.
           const _FieldLabel('Experience'),
-          const Text(
-            'Not collected yet — the guide application form isn\'t built.',
-            style: TextStyle(fontStyle: FontStyle.italic, color: Colors.black45, fontSize: 13),
-          ),
+          Text('$experience years', style: const TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 12),
-          const _FieldLabel('Documents Submitted'),
-          const Text(
-            'Not collected yet — no document upload flow exists.',
-            style: TextStyle(fontStyle: FontStyle.italic, color: Colors.black45, fontSize: 13),
-          ),
+          const _FieldLabel('Mountains Handled'),
+          Text(mountains, style: const TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 12),
           const _FieldLabel('Submitted'),
           Text(submitted.isEmpty ? '—' : submitted, style: const TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 16),
           OutlinedButton.icon(
-            onPressed: () => _notWiredUp('Full profile/ID view'),
+            onPressed: () => _viewDocuments(context),
             icon: const Icon(Icons.visibility_outlined, size: 18),
             label: const Text('View Full Profile & ID/Certificates'),
           ),
