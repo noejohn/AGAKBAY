@@ -41,6 +41,7 @@ async function main() {
     {
       role: "admin",
       accountType: "admin",
+      adminAccess: true,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     },
     { merge: true },

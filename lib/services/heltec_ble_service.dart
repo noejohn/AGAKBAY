@@ -42,6 +42,7 @@ class HeltecBleService extends ChangeNotifier {
   );
 
   BluetoothDevice? _device;
+  String? _lastDeviceId;
   BluetoothCharacteristic? _sosChar;
   BluetoothCharacteristic? _hikeInfoChar;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
@@ -67,6 +68,7 @@ class HeltecBleService extends ChangeNotifier {
 
   bool get isConnected =>
       _connectionState == BluetoothConnectionState.connected;
+  String? get deviceId => _device?.remoteId.str ?? _lastDeviceId;
   bool get isScanning => _isScanning;
   double? get lastLatitude => _lastLatitude;
   double? get lastLongitude => _lastLongitude;
@@ -134,6 +136,7 @@ class HeltecBleService extends ChangeNotifier {
       }
 
       _device = device;
+      _lastDeviceId = device.remoteId.str;
       _connectionSub = device.connectionState.listen(_onConnectionStateChanged);
       await device.connect(timeout: timeout);
       await _discoverCharacteristics(device);

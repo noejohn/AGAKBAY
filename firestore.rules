@@ -16,49 +16,34 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if signedIn() && (
+        isAdmin() ||
         resource.data.accountType == 'tour_guide' ||
         isOwner(userId)
       );
 
-      // Initial self-declaration ("I'm a hiker" / "I'm a tour guide") is
-      // still owner-driven, but guideVerified can never be set true here —
-      // only a trusted server path (exchangeAuth0Token's claims mirror, or
-      // scripts/approveGuide.js) can grant that. "admin" is blocked outright
-      // from client creation — that role is only ever granted server-side
-      // via scripts/grantAdminRole.js.
       allow create: if isOwner(userId)
         && request.resource.data.guideVerified != true
         && request.resource.data.role != 'admin'
         && request.resource.data.accountType != 'admin';
 
-      // After creation, role/accountType/guideVerified are frozen from the
-      // client entirely — a self-write here was the whole access-control
-      // hole (any signed-in user could promote themselves to a verified
-      // tour guide). accountTypeConfirmed is locked down for the same
-      // reason: it gates setInitialAccountType's one-time-only check, so a
-      // client resetting it back to false would let them call that
-      // function again and change their role through the back door.
-      // Everything else on the doc (username, profile photo,
-      // onboardingComplete, emergency contact, etc.) stays owner-editable.
       allow update: if isOwner(userId)
         && !request.resource.data.diff(resource.data).affectedKeys()
-             .hasAny(['role', 'accountType', 'guideVerified', 'accountTypeConfirmed']);
+            .hasAny([
+              'role',
+              'accountType',
+              'guideVerified',
+              'accountTypeConfirmed'
+            ]);
 
       match /notifications/{notificationId} {
         allow read, update, delete: if isOwner(userId);
         allow create: if isOwner(userId);
       }
 
-      // Durable per-hike record — one doc per hike attempt, completed or
-      // not. Owner-only: nobody else needs to read another hiker's log.
       match /hikes/{hikeId} {
         allow read, create: if isOwner(userId);
       }
 
-      // Small denormalized slice of the profile (just the display name)
-      // that any signed-in user can read — lets the community feed
-      // resolve a post/comment author's *current* name without exposing
-      // the full profile doc (email, emergency contact, etc.) to everyone.
       match /public/{docId} {
         allow read: if signedIn();
         allow write: if isOwner(userId);
@@ -154,6 +139,7 @@ service cloud.firestore {
           get(/databases/$(database)/documents/hike_rooms/$(roomId)).data.guideId
             == request.auth.uid
         );
+
       }
 
       match /sos_events/{eventId} {
@@ -181,6 +167,12 @@ service cloud.firestore {
       }
     }
 
+    // Enables the admin dashboard to count active SOS events with a
+    // collection-group query across every hike room.
+    match /{path=**}/sos_events/{eventId} {
+      allow read: if isAdmin();
+    }
+
     match /trail_submissions/{submissionId} {
       // Admin dashboard's "pending submissions" list needs to read every
       // hiker's submission, not just its own — without isAdmin() here,
@@ -205,12 +197,35 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Device identity and immutable connectivity history are written by
+    // updateParticipantBluetoothStatus via the Admin SDK.
+    match /bluetooth_devices/{deviceId} {
+      allow read: if isAdmin();
+      allow write: if false;
+
+      match /activity/{activityId} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
+    }
+
     // Written only by reviewTourGuideApplication (functions/adminActions.js)
     // via the Admin SDK — never directly by any client.
     match /admin_actions/{actionId} {
       allow read: if isAdmin();
       allow write: if false;
     }
+
+    match /notifications/{notificationId} {
+    allow read: if isAdmin();
+
+    allow create: if false;
+    allow delete: if false;
+
+    allow update: if isAdmin()
+      && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['isRead']);
+  }
 
     match /{document=**} {
       allow read, write: if false;

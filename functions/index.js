@@ -6,12 +6,21 @@ const { getRedisClient, weatherCacheKey } = require("./redisCache");
 const { enforceRateLimit } = require("./rateLimit");
 const { exchangeAuth0Token, setInitialAccountType } = require("./auth0Exchange");
 const { reviewTourGuideApplication } = require("./adminActions");
+const { manageUserAccount, createAdminAccount } = require("./userAccountActions");
+const {
+  updateParticipantBluetoothStatus,
+  renameBluetoothDevice,
+} = require("./bluetoothActivity");
 
 admin.initializeApp();
 
 exports.exchangeAuth0Token = exchangeAuth0Token;
 exports.setInitialAccountType = setInitialAccountType;
 exports.reviewTourGuideApplication = reviewTourGuideApplication;
+exports.manageUserAccount = manageUserAccount;
+exports.createAdminAccount = createAdminAccount;
+exports.updateParticipantBluetoothStatus = updateParticipantBluetoothStatus;
+exports.renameBluetoothDevice = renameBluetoothDevice;
 
 const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;
@@ -328,6 +337,51 @@ exports.sendSosEvent = onCall(
   },
 );
 
+exports.onSosEventCreated = onDocumentCreated(
+  {
+    document: "hike_rooms/{roomId}/sos_events/{eventId}",
+    region: "asia-southeast1",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const snapshot = event.data;
+
+    if (!snapshot) {
+      return;
+    }
+
+    const data = snapshot.data() || {};
+
+    const roomId = event.params.roomId;
+    const eventId = event.params.eventId;
+
+    const senderName = String(data.senderName || "Hiker");
+    const roomCode = String(data.roomCode || roomId);
+
+    await db.collection("notifications").add({
+      type: "sos",
+      title: "SOS Emergency Alert",
+      message: `${senderName} has triggered an SOS in hike room ${roomCode}.`,
+
+      isRead: false,
+
+      roomId,
+      eventId,
+
+      senderId: String(data.senderId || ""),
+      senderName,
+
+      latitude: Number(data.latitude),
+      longitude: Number(data.longitude),
+
+      transport: String(data.transport || "internet"),
+
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  },
+);
+
 function weatherCodeFromGoogleCondition(conditionType) {
   const type = String(conditionType || "").toUpperCase();
   if (type.includes("THUNDER")) return 95;
@@ -535,6 +589,56 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
     const submissionId = event.params.submissionId;
     const data = snapshot.data() || {};
     const mountainKey = String(data.mountainKey || "").trim();
+    const mountainName = String(data.mountainName || "").trim();
+    const trailName = String(data.trailName || mountainName || "Unnamed trail").trim();
+    const submitterUid = String(data.submittedBy || "").trim();
+
+    let submitterName = String(data.submitterName || data.authorName || "").trim();
+    if (submitterUid) {
+      const submitterSnap = await db.collection("users").doc(submitterUid).get();
+      const submitter = submitterSnap.data() || {};
+      submitterName = submitterName || String(
+        submitter.fullName || submitter.username || submitter.email || "",
+      ).trim();
+    }
+    submitterName = submitterName || "Unknown user";
+
+    // Use deterministic IDs so a retried Firestore event cannot create
+    // duplicate audit rows or admin notifications.
+    const auditRef = db.collection("admin_actions").doc(`trail_submission_${submissionId}`);
+    const notificationRef = db.collection("notifications").doc(`trail_submission_${submissionId}`);
+    await db.runTransaction(async (transaction) => {
+      const [auditSnap, notificationSnap] = await Promise.all([
+        transaction.get(auditRef),
+        transaction.get(notificationRef),
+      ]);
+      if (!auditSnap.exists) {
+        transaction.create(auditRef, {
+          action: "submit_trail_route",
+          targetId: submissionId,
+          trailName,
+          mountainName,
+          mountainKey,
+          submittedBy: submitterUid,
+          submitterName,
+          previousStatus: null,
+          newStatus: "received",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      if (!notificationSnap.exists) {
+        transaction.create(notificationRef, {
+          type: "trail_submission",
+          title: "New Trail Route Submission",
+          message: `${submitterName} submitted ${trailName} for ${mountainName || "a mountain"}.`,
+          trailSubmissionId: submissionId,
+          mountainKey,
+          isRead: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    });
+
     if (!mountainKey) {
       return;
     }
@@ -554,7 +658,6 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
       return;
     }
 
-    const trailName = String(data.trailName || data.mountainName || "").trim();
     const stations = Array.isArray(data.stations)
       ? data.stations.map((name) => String(name).trim()).filter(Boolean)
       : [];
@@ -579,6 +682,65 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
       mountainKey,
       mountainName: trailName || String(data.mountainName || "").trim(),
       submitterUid: String(data.submittedBy || ""),
+    });
+  },
+);
+
+// Every audit record also becomes an in-app admin notification. Trail
+// submission notifications are created with the audit row above so their
+// message includes the submitter and trail name; this trigger handles all
+// other admin actions and safely tolerates Firestore event retries.
+exports.onAdminActionCreated = onDocumentCreated(
+  {
+    document: "admin_actions/{actionId}",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) return;
+
+    const data = snapshot.data() || {};
+    const actionId = event.params.actionId;
+    const action = String(data.action || "admin_action");
+    const notificationId = action === "submit_trail_route"
+      ? `trail_submission_${data.targetId || actionId}`
+      : `admin_action_${actionId}`;
+    const notificationRef = db.collection("notifications").doc(notificationId);
+    const actionLabels = {
+      create_admin: "Created an admin account",
+      approve_tour_guide: "Approved a tour guide",
+      reject_tour_guide: "Rejected a tour guide",
+      revoke_admin: "Revoked admin access",
+      suspend: "Suspended an account",
+      restore: "Restored an account",
+      delete_user_account: "Deleted a user account",
+      rename_bluetooth_device: "Renamed a Bluetooth device",
+      submit_trail_route: "Received a trail route submission",
+    };
+    const label = actionLabels[action] || action.replaceAll("_", " ");
+    const target = String(
+      data.trailName || data.mountainName || data.targetId || "",
+    ).trim();
+    const actor = String(
+      data.submitterName || data.adminEmail || data.actorEmail ||
+      data.adminId || data.submittedBy || "An administrator",
+    ).trim();
+
+    await db.runTransaction(async (transaction) => {
+      const notificationSnap = await transaction.get(notificationRef);
+      if (notificationSnap.exists) return;
+      transaction.create(notificationRef, {
+        type: "admin_action",
+        title: action === "submit_trail_route"
+          ? "New Trail Route Submission"
+          : "Admin Activity",
+        message: `${actor}: ${label}${target ? ` — ${target}` : ""}.`,
+        actionId,
+        action,
+        isRead: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
     });
   },
 );
@@ -622,7 +784,9 @@ async function notifyHikersOfNewTrail({ mountainKey, mountainName, submitterUid 
   }
 }
 
-exports.onCommunityCommentCreated = onDocumentCreated(
+// Keep a distinct name: the deployed onCommunityCommentCreated function is
+// an HTTPS endpoint, and Firebase cannot change a function's trigger type.
+exports.notifyOnCommunityCommentCreated = onDocumentCreated(
   {
     document: "community_posts/{postId}/comments/{commentId}",
     timeoutSeconds: 60,

@@ -99,6 +99,9 @@ class HikeRoomParticipant {
     required this.role,
     required this.deviceStatus,
     required this.activityStatus,
+    this.latitude,
+    this.longitude,
+    this.lastLocationAt,
   });
 
   final String userId;
@@ -107,16 +110,37 @@ class HikeRoomParticipant {
   final String deviceStatus;
   final String activityStatus;
 
+  // Last location reported by this participant's device.
+  final double? latitude;
+  final double? longitude;
+
+  // When the location was last successfully recorded in Firestore.
+  final DateTime? lastLocationAt;
+
+  bool get hasLocation =>
+      latitude != null && longitude != null;
+
   factory HikeRoomParticipant.fromSnapshot(
     DocumentSnapshot<Map<String, dynamic>> snapshot,
   ) {
     final data = snapshot.data() ?? <String, dynamic>{};
+
+    final rawLastLocationAt = data['lastLocationAt'];
+
+    DateTime? lastLocationAt;
+    if (rawLastLocationAt is Timestamp) {
+      lastLocationAt = rawLastLocationAt.toDate();
+    }
+
     return HikeRoomParticipant(
       userId: snapshot.id,
       name: data['name']?.toString() ?? 'Hiker',
       role: data['role']?.toString() ?? 'hiker',
       deviceStatus: data['deviceStatus']?.toString() ?? 'not_connected',
       activityStatus: data['activityStatus']?.toString() ?? 'in_room',
+      latitude: (data['latitude'] as num?)?.toDouble(),
+      longitude: (data['longitude'] as num?)?.toDouble(),
+      lastLocationAt: lastLocationAt,
     );
   }
 }
@@ -498,6 +522,54 @@ class HikeRoomService {
       isHiking ? 'hikingStartedAt' : 'returnedToRoomAt':
           FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateCurrentParticipantLocation(
+    String roomId, {
+      required double latitude,
+      required double longitude,
+      }
+    ) async {
+    if (latitude < -90 || latitude > 90) {
+      throw ArgumentError('Invalid latitude.');
+    }
+
+    if (longitude < -180 || longitude > 180) {
+      throw ArgumentError('Invalid longitude.');
+    }
+
+    final participantRef = _roomRef(
+      roomId,
+    ).collection('participants').doc(_user.uid);
+
+    final participant = await participantRef.get();
+
+    if (!participant.exists ||
+        (participant.data()?['membershipStatus']?.toString() ?? 'active') !=
+            'active') {
+      throw StateError('You are not an active participant in this room.');
+    }
+
+    await participantRef.update({
+      'latitude': latitude,
+      'longitude': longitude,
+      'lastLocationAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateCurrentParticipantDeviceStatus(
+    String roomId, {
+    required String deviceStatus,
+    required String deviceId,
+    String? deviceName,
+  }) async {
+    await _functions.httpsCallable('updateParticipantBluetoothStatus').call({
+      'roomId': roomId,
+      'deviceId': deviceId,
+      'deviceStatus': deviceStatus,
+      'deviceName': deviceName,
     });
   }
 

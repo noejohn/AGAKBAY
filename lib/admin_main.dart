@@ -75,14 +75,31 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
   Future<void> _restoreSession() async {
     // Firebase persists the session in the browser, so a page reload
     // resolves the current user asynchronously rather than instantly.
-    final user = await FirebaseAuth.instance.authStateChanges().first;
-    if (!mounted) {
-      return;
+    try {
+      final persistedUser = await FirebaseAuth.instance.authStateChanges().first;
+      final user = persistedUser == null
+          ? null
+          : await _adminAuth.validateAdmin(persistedUser);
+      if (!mounted) return;
+      setState(() {
+        _user = user;
+        _restoring = false;
+      });
+    } on FirebaseAuthException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _user = null;
+        _error = error.message ?? 'Please verify your email before signing in.';
+        _restoring = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _user = null;
+        _error = 'Could not restore the admin session. Please sign in again.';
+        _restoring = false;
+      });
     }
-    setState(() {
-      _user = user;
-      _restoring = false;
-    });
   }
 
   Future<void> _signIn() async {

@@ -20,7 +20,11 @@ class HikeRoomScreen extends StatefulWidget {
 
 class _HikeRoomScreenState extends State<HikeRoomScreen> {
   final HikeRoomService _service = HikeRoomService();
+  VoidCallback? _bleListener;
+  String? _activeRoomId;
   final TextEditingController _codeController = TextEditingController();
+
+  StreamSubscription<Position>? _locationSubscription;
 
   HikeRoom? _room;
   String _accountType = 'hiker';
@@ -33,11 +37,44 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
   @override
   void initState() {
     super.initState();
+
     _load();
+
+    final ble = HeltecBleService.instance;
+
+    _bleListener = () {
+      final roomId = _activeRoomId;
+
+      if (roomId == null) {
+        return;
+      }
+
+      final deviceId = ble.deviceId;
+      if (deviceId == null || deviceId.isEmpty) {
+        return;
+      }
+
+      unawaited(
+        _service
+            .updateCurrentParticipantDeviceStatus(
+              roomId,
+              deviceStatus: ble.isConnected ? 'connected' : 'disconnected',
+              deviceId: deviceId,
+              deviceName: HeltecBleService.hikerDeviceName,
+            )
+            .catchError((Object error) {
+              debugPrint('Could not record Bluetooth activity: $error');
+            }),
+      );
+    };
+
+    ble.addListener(_bleListener!);
   }
 
   @override
   void dispose() {
+    HeltecBleService.instance.removeListener(_bleListener!);
+    _locationSubscription?.cancel();
     _codeController.dispose();
     super.dispose();
   }
@@ -138,21 +175,38 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
 
   Future<void> _openHikingMode(HikeRoom room) async {
     final callback = widget.onStartHiking;
+
     if (callback == null) {
       _message('Open this room from the main app to start Hiking Mode.');
       return;
     }
+
     try {
-      await _service.setCurrentParticipantHiking(room.id, isHiking: true);
+    _activeRoomId = room.id;
+
+    await _service.setCurrentParticipantHiking(
+      room.id,
+      isHiking: true,
+    );
+
+      await _startParticipantLocationTracking(room.id);
+
       await callback(room);
     } catch (error) {
       _message(_errorText(error));
     } finally {
+      await _stopParticipantLocationTracking();
+
       try {
-        await _service.setCurrentParticipantHiking(room.id, isHiking: false);
+        await _service.setCurrentParticipantHiking(
+          room.id,
+          isHiking: false,
+        );
       } catch (_) {
         // The guide may have removed the participant while they were hiking.
       }
+
+      _activeRoomId = null;
     }
   }
 
@@ -175,6 +229,47 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
       locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
     );
   }
+
+  Future<void> _startParticipantLocationTracking(String roomId) async {
+  await _stopParticipantLocationTracking();
+
+  // Get an immediate GPS position so Firestore does not have to
+  // wait for the first stream event.
+  final initialPosition = await _getPhoneLocation();
+
+  await _service.updateCurrentParticipantLocation(
+    roomId,
+    latitude: initialPosition.latitude,
+    longitude: initialPosition.longitude,
+  );
+
+  const locationSettings = LocationSettings(
+    accuracy: LocationAccuracy.high,
+    distanceFilter: 5,
+  );
+
+  _locationSubscription = Geolocator.getPositionStream(
+    locationSettings: locationSettings,
+  ).listen(
+    (position) async {
+      try {
+        await _service.updateCurrentParticipantLocation(
+          roomId,
+          latitude: position.latitude,
+          longitude: position.longitude,
+        );
+      } catch (_) {
+        // Ignore individual location-update failures.
+        // The next GPS position will try again.
+      }
+    },
+  );
+}
+
+Future<void> _stopParticipantLocationTracking() async {
+  await _locationSubscription?.cancel();
+  _locationSubscription = null;
+}
 
   Future<void> _sendSos(String roomId) async {
     await _run(() async {
