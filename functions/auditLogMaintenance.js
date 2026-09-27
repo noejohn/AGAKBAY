@@ -68,11 +68,12 @@ exports.backfillAuditLogNames = onCall(
     const batch = db.batch();
     for (const doc of snap.docs) {
       const data = doc.data();
-      if (data.adminEmail !== undefined) continue; // already enriched
+      if (data.adminEmail !== undefined && data.adminName !== undefined) continue;
       const updates = {};
       if (data.adminId) {
         const adminInfo = await resolveUser(data.adminId);
         updates.adminEmail = adminInfo.email;
+        updates.adminName = adminInfo.name;
       }
       if (USER_TARGET_ACTIONS.has(data.action) && data.targetId) {
         const targetInfo = await resolveUser(data.targetId);

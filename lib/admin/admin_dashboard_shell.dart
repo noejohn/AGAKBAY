@@ -59,8 +59,6 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
         _Sidebar(
           selected: _selected,
           onSelect: (i) => setState(() => _selected = i),
-          user: widget.user,
-          onSignOut: widget.onSignOut,
         ),
         Expanded(
           child: ColoredBox(
@@ -68,7 +66,7 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
             child: Column(
               children: [
                 Container(
-                  height: 64,
+                  height: 72,
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   decoration: const BoxDecoration(
                     color: Colors.white,
@@ -78,31 +76,96 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                       ),
                     ),
                   ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _navItems[_selected].label,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final headerWidth = constraints.maxWidth;
+                      final showTitle = headerWidth >= 700;
+                      return Row(
+                        children: [
+                          if (showTitle)
+                            SizedBox(
+                              width: 190,
+                              child: Text(
+                                _navItems[_selected].label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                          Expanded(
+                            child: LayoutBuilder(
+                              builder: (context, searchConstraints) {
+                                final searchWidth = searchConstraints.maxWidth.clamp(80.0, 320.0).toDouble();
+                                return Center(
+                                  child: SizedBox(
+                                    width: searchWidth,
+                                    height: 42,
+                                    child: _AdminGlobalSearch(
+                                      onNavigate: (index) => setState(() => _selected = index),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
                           ),
-                        ),
-                      ),
-                      _NotificationBell(
-                        onOpenSosMonitoring: () {
-                          setState(() => _selected = 4);
-                        },
-                        onOpenAuditLogs: () {
-                          setState(() => _selected = 7);
-                        },
-                      ),
-                    ],
+                          _NotificationBell(
+                            onOpenSosMonitoring: () => setState(() => _selected = 4),
+                            onOpenAuditLogs: () => setState(() => _selected = 7),
+                          ),
+                          const SizedBox(width: 6),
+                          Builder(
+                            builder: (buttonContext) => Tooltip(
+                              message: 'Admin profile',
+                              child: GestureDetector(
+                                onTap: () => _openAdminProfileMenu(
+                                  buttonContext,
+                                  widget.user,
+                                  widget.onSignOut,
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      CircleAvatar(
+                                        radius: 18,
+                                        backgroundColor: const Color(0xFF0C563D),
+                                        child: Text(
+                                          (widget.user.displayName?.trim().isNotEmpty == true
+                                                  ? widget.user.displayName!.trim()[0]
+                                                  : widget.user.email?.trim().isNotEmpty == true
+                                                      ? widget.user.email!.trim()[0]
+                                                      : 'A')
+                                              .toUpperCase(),
+                                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                        ),
+                                      ),
+                                      if (headerWidth > 850) ...[
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          widget.user.displayName?.trim().isNotEmpty == true
+                                              ? widget.user.displayName!.trim()
+                                              : 'Admin',
+                                          style: const TextStyle(fontWeight: FontWeight.w600),
+                                        ),
+                                      ],
+                                      const Icon(Icons.keyboard_arrow_down_rounded),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                      );
+                    },
                   ),
                 ),
                 Expanded(
                   child: switch (_selected) {
                     0 => _DashboardOverviewPage(
+                        user: widget.user,
                         onNavigate: (index) => setState(() => _selected = index),
                       ),
                     1 => const _TourGuideVerificationPage(),
@@ -126,61 +189,354 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
   }
 }
 
+class _AdminSearchResult {
+  const _AdminSearchResult({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.destination,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final int destination;
+}
+
+class _AdminGlobalSearch extends StatefulWidget {
+  const _AdminGlobalSearch({required this.onNavigate});
+
+  final ValueChanged<int> onNavigate;
+
+  @override
+  State<_AdminGlobalSearch> createState() => _AdminGlobalSearchState();
+}
+
+class _AdminGlobalSearchState extends State<_AdminGlobalSearch> {
+  final _controller = TextEditingController();
+  bool _searching = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  String? _firstValue(Map<String, dynamic> data, List<String> keys) {
+    for (final key in keys) {
+      final value = data[key]?.toString().trim();
+      if (value != null && value.isNotEmpty) return value;
+    }
+    return null;
+  }
+
+  bool _matches(Map<String, dynamic> data, String id, String query, List<String> fields) {
+    final searchable = [id, for (final field in fields) data[field]?.toString() ?? '']
+        .join(' ')
+        .toLowerCase();
+    return searchable.contains(query);
+  }
+
+  Future<void> _search() async {
+    final query = _controller.text.trim().toLowerCase();
+    if (query.isEmpty || _searching) return;
+    setState(() => _searching = true);
+    try {
+      final database = FirebaseFirestore.instance;
+      final snapshots = await Future.wait([
+        database.collection('users').limit(300).get(),
+        database.collection('trail_submissions').limit(300).get(),
+        database.collection('mountain_trails').limit(300).get(),
+      ]);
+      if (!mounted) return;
+
+      final results = <_AdminSearchResult>[];
+      final userFields = ['fullName', 'displayName', 'name', 'email', 'username'];
+      for (final doc in snapshots[0].docs) {
+        final data = doc.data();
+        if (!_matches(data, doc.id, query, userFields)) continue;
+        results.add(_AdminSearchResult(
+          title: _firstValue(data, ['fullName', 'displayName', 'name']) ??
+              _firstValue(data, ['email']) ?? doc.id,
+          subtitle: 'User · ${_firstValue(data, ['email']) ?? doc.id}',
+          icon: Icons.person_outline_rounded,
+          destination: 6,
+        ));
+      }
+
+      final trailFields = [
+        'trailName', 'mountainName', 'name', 'title', 'submitterName',
+        'submitterEmail', 'status',
+      ];
+      for (final doc in snapshots[1].docs) {
+        final data = doc.data();
+        if (!_matches(data, doc.id, query, trailFields)) continue;
+        results.add(_AdminSearchResult(
+          title: _firstValue(data, ['trailName', 'mountainName', 'title', 'name']) ?? doc.id,
+          subtitle: 'Trail submission · ${_firstValue(data, ['status']) ?? 'unknown status'}',
+          icon: Icons.route_outlined,
+          destination: 2,
+        ));
+      }
+
+      final mountainFields = ['mountainName', 'name', 'title', 'region', 'province'];
+      for (final doc in snapshots[2].docs) {
+        final data = doc.data();
+        if (!_matches(data, doc.id, query, mountainFields)) continue;
+        results.add(_AdminSearchResult(
+          title: _firstValue(data, mountainFields) ?? doc.id,
+          subtitle: 'Mountain trail · ${_firstValue(data, ['status']) ?? 'available'}',
+          icon: Icons.terrain_rounded,
+          destination: 2,
+        ));
+      }
+
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Search results for “${_controller.text.trim()}”'),
+          content: SizedBox(
+            width: 480,
+            height: 360,
+            child: results.isEmpty
+                ? const Center(child: Text('No matching mountains, users, or trails found.'))
+                : ListView.separated(
+                    itemCount: results.length > 30 ? 30 : results.length,
+                    separatorBuilder: (context, index) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final result = results[index];
+                      return ListTile(
+                        leading: Icon(result.icon, color: AdminColors.accent),
+                        title: Text(result.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(result.subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        onTap: () {
+                          Navigator.of(dialogContext).pop();
+                          widget.onNavigate(result.destination);
+                        },
+                      );
+                    },
+                  ),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Close'))],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Search failed: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 220;
+        final veryCompact = constraints.maxWidth < 160;
+        return TextField(
+          controller: _controller,
+          textInputAction: TextInputAction.search,
+          onChanged: (_) => setState(() {}),
+          onSubmitted: (_) => _search(),
+          decoration: InputDecoration(
+            hintText: compact ? 'Search...' : 'Search mountains, users, trails...',
+            prefixIcon: veryCompact ? null : const Icon(Icons.search_rounded),
+            suffixIcon: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_controller.text.isNotEmpty)
+                  IconButton(
+                    tooltip: 'Clear search',
+                    onPressed: () {
+                      _controller.clear();
+                      setState(() {});
+                    },
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                if (_searching)
+                  const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                  )
+                else if (_controller.text.isEmpty || !compact)
+                  IconButton(
+                    tooltip: 'Search',
+                    onPressed: _search,
+                    icon: const Icon(Icons.arrow_forward_rounded),
+                  ),
+              ],
+            ),
+            filled: true,
+            fillColor: const Color(0xFFF4F7F8),
+            contentPadding: EdgeInsets.zero,
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Color(0xFFDCE5E9)),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Color(0xFFDCE5E9)),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+Future<void> _openAdminProfileMenu(
+  BuildContext context,
+  User user,
+  VoidCallback onSignOut,
+) async {
+  final button = context.findRenderObject() as RenderBox;
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final topLeft = button.localToGlobal(Offset.zero, ancestor: overlay);
+  final bottomRight = button.localToGlobal(
+    button.size.bottomRight(Offset.zero),
+    ancestor: overlay,
+  );
+  final narrowScreen = overlay.size.width < 600;
+  final popupWidth = (overlay.size.width - (narrowScreen ? 24 : 16))
+      .clamp(120.0, narrowScreen ? 220.0 : 280.0)
+      .toDouble();
+  final minPopupWidth = popupWidth.clamp(0.0, narrowScreen ? 180.0 : 240.0).toDouble();
+  final position = RelativeRect.fromLTRB(
+    topLeft.dx,
+    bottomRight.dy + 4,
+    overlay.size.width - bottomRight.dx,
+    overlay.size.height - bottomRight.dy - 4,
+  );
+
+  final result = await showMenu<String>(
+    context: context,
+    position: position,
+    color: Colors.white,
+    elevation: 8,
+    constraints: BoxConstraints(
+      minWidth: minPopupWidth,
+      maxWidth: popupWidth,
+      maxHeight: (overlay.size.height - 16).clamp(120.0, 480.0).toDouble(),
+    ),
+    items: [
+      PopupMenuItem<String>(
+        enabled: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              user.displayName?.trim().isNotEmpty == true
+                  ? user.displayName!.trim()
+                  : 'Admin',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700, color: Colors.black87),
+            ),
+            if (user.email?.isNotEmpty == true)
+              Text(
+                user.email!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12, color: Colors.black54),
+              ),
+          ],
+        ),
+      ),
+      const PopupMenuDivider(),
+      const PopupMenuItem<String>(
+        value: 'sign_out',
+        child: Row(
+          children: [
+            Icon(Icons.logout_rounded, size: 18),
+            SizedBox(width: 10),
+            Text('Sign out'),
+          ],
+        ),
+      ),
+    ],
+  );
+  if (result == 'sign_out') onSignOut();
+}
+
 class _Sidebar extends StatelessWidget {
   const _Sidebar({
     required this.selected,
     required this.onSelect,
-    required this.user,
-    required this.onSignOut,
   });
 
   final int selected;
   final ValueChanged<int> onSelect;
-  final User user;
-  final VoidCallback onSignOut;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 260,
-      color: AdminColors.backgroundTop,
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final collapsed = screenWidth < 760;
+    final compact = screenWidth < 1050;
+    final shortScreen = screenHeight < 650;
+    final compactFooter = collapsed || shortScreen;
+    final sidebarWidth = collapsed ? 72.0 : compact ? 220.0 : 260.0;
+
+    return AnimatedContainer(
+      width: sidebarWidth,
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeInOut,
+      color: const Color(0xFF0A4936),
       child: Column(
         children: [
-          const SizedBox(height: 24),
+          SizedBox(height: shortScreen ? 10 : collapsed ? 16 : 22),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
+            padding: EdgeInsets.symmetric(horizontal: collapsed ? 15 : compact ? 14 : 20),
+            child: collapsed
+                ? Container(
+                    width: 42,
+                    height: 42,
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(color: AdminColors.accent, borderRadius: BorderRadius.circular(12)),
+                    child: Image.asset('assets/images/animal.png', fit: BoxFit.cover),
+                  )
+                : Row(
               children: [
                 Container(
-                  width: 36,
-                  height: 36,
+                  width: compact ? 40 : 46,
+                  height: compact ? 40 : 46,
                   decoration: BoxDecoration(
                     color: AdminColors.accent,
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(Icons.terrain_rounded, color: Colors.white, size: 20),
+                  clipBehavior: Clip.antiAlias,
+                  child: Image.asset(
+                    'assets/images/animal.png',
+                    fit: BoxFit.cover,
+                  ),
                 ),
-                const SizedBox(width: 10),
-                const Expanded(
+                SizedBox(width: compact ? 9 : 12),
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        'Agakbay',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                        'AGAKBAY',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: compact ? 16 : 18, letterSpacing: 1.1),
                       ),
-                      Text(
-                        'Admin Dashboard',
-                        style: TextStyle(color: AdminColors.accent, fontSize: 11),
-                      ),
+                      if (!compact) ...[
+                        const SizedBox(height: 2),
+                        const Text('Navigate · Explore · Stay Safe',
+                          style: TextStyle(color: Color(0xFFB8D5CA), fontSize: 9)),
+                      ],
                     ],
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 24),
+          SizedBox(height: shortScreen ? 10 : collapsed ? 16 : 24),
           Expanded(
             child: ListView.builder(
               padding: EdgeInsets.zero,
@@ -188,70 +544,144 @@ class _Sidebar extends StatelessWidget {
               itemBuilder: (context, i) {
                 final item = _navItems[i];
                 final isSelected = i == selected;
-                return Material(
-                  color: isSelected ? AdminColors.accent : Colors.transparent,
-                  child: InkWell(
-                    onTap: () => onSelect(i),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                      child: Row(
-                        children: [
-                          Icon(item.icon, color: Colors.white, size: 18),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              item.label,
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w400,
-                                fontSize: 13.5,
-                              ),
+                final section = i == 0 ? 'OVERVIEW' : i == 1 ? 'VERIFICATION' : i == 3 ? 'OPERATIONS' : i == 6 ? 'MANAGEMENT' : null;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (section != null && !collapsed && !shortScreen)
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(compact ? 16 : 22, i == 0 ? 0 : 18, 12, 8),
+                        child: Text(section, style: const TextStyle(
+                          color: Color(0xFFB8D5CA), fontSize: 10,
+                          fontWeight: FontWeight.w700, letterSpacing: 1.4,
+                        )),
+                      ),
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: collapsed ? 8 : 10, vertical: 2),
+                      child: Tooltip(
+                        message: collapsed ? item.label : '',
+                        child: Material(
+                        color: isSelected ? const Color(0xFF14895F) : Colors.transparent,
+                        borderRadius: BorderRadius.circular(11),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(11),
+                          onTap: () => onSelect(i),
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(
+                              horizontal: collapsed ? 0 : 12,
+                              vertical: shortScreen ? 9 : 12,
+                            ),
+                            child: Row(
+                              mainAxisAlignment: collapsed ? MainAxisAlignment.center : MainAxisAlignment.start,
+                              children: [
+                                Icon(item.icon, color: Colors.white, size: 18),
+                                if (!collapsed) ...[
+                                SizedBox(width: compact ? 9 : 12),
+                                Expanded(
+                                  child: Text(
+                                    item.label,
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: isSelected ? FontWeight.w700 : FontWeight.w400,
+                                      fontSize: compact ? 12 : 13.5,
+                                    ),
+                                  ),
+                                ),
+                                if (isSelected)
+                                  const Icon(Icons.chevron_right_rounded, color: Colors.white70, size: 18),
+                                ],
+                              ],
                             ),
                           ),
-                        ],
+                        ),
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 );
               },
             ),
           ),
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(border: Border(top: BorderSide(color: Colors.white24))),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  backgroundColor: AdminColors.accent,
-                  child: Text(
-                    (user.email ?? '?').substring(0, 1).toUpperCase(),
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text(
-                        'Admin',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              collapsed ? 10 : 14,
+              shortScreen ? 6 : 8,
+              collapsed ? 10 : 14,
+              shortScreen ? 8 : 14,
+            ),
+            child: compactFooter
+                ? Tooltip(
+                    message: 'Explore safely',
+                    child: Container(
+                      height: shortScreen ? 40 : 50,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF105941),
+                        borderRadius: BorderRadius.circular(13),
+                        image: const DecorationImage(
+                          image: AssetImage('assets/images/mountain_banner.jpg'),
+                          fit: BoxFit.cover,
+                          opacity: 0.35,
+                        ),
                       ),
-                      Text(
-                        user.email ?? '',
-                        style: const TextStyle(color: Colors.white70, fontSize: 11),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
+                      child: const Icon(Icons.explore_rounded, color: Color(0xFFB8E3CB), size: 24),
+                    ),
+                  )
+                : Container(
+              width: double.infinity,
+              height: 76,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF105941), Color(0xFF0A4936)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
+              ),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.asset(
+                    'assets/images/mountain_banner.jpg',
+                    fit: BoxFit.cover,
                   ),
-                ),
-                IconButton(
-                  onPressed: onSignOut,
-                  icon: const Icon(Icons.logout, color: Colors.white70, size: 18),
-                  tooltip: 'Sign out',
-                ),
-              ],
+                  const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Color(0x990A4936), Color(0x550A4936)],
+                        begin: Alignment.centerLeft,
+                        end: Alignment.centerRight,
+                      ),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+                    child: Row(
+                      children: [
+                        Icon(Icons.explore_rounded, color: Color(0xFFB8E3CB), size: 25),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text('EXPLORE SAFELY', style: TextStyle(
+                                color: Colors.white, fontSize: 10,
+                                fontWeight: FontWeight.w800, letterSpacing: 1.1,
+                              )),
+                              SizedBox(height: 4),
+                              Text('Every trail has a story.', style: TextStyle(
+                                color: Color(0xFFB8D5CA), fontSize: 11,
+                              )),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
@@ -299,6 +729,14 @@ class _NotificationBellState extends State<_NotificationBell> {
       button.size.bottomRight(Offset.zero),
       ancestor: overlay,
     );
+    final narrowScreen = overlay.size.width < 700;
+    final popupWidth = (overlay.size.width - (narrowScreen ? 24 : 16))
+        .clamp(180.0, narrowScreen ? 340.0 : 420.0)
+        .toDouble();
+    final popupMaxHeight = narrowScreen
+        ? (overlay.size.height * 0.62).clamp(220.0, 440.0).toDouble()
+        : (overlay.size.height - 24).clamp(180.0, 520.0).toDouble();
+    final notificationListHeight = (popupMaxHeight - 112).clamp(68.0, 400.0).toDouble();
 
     final position = RelativeRect.fromLTRB(
       buttonTopLeft.dx,
@@ -312,10 +750,10 @@ class _NotificationBellState extends State<_NotificationBell> {
       position: position,
       color: Colors.white,
       elevation: 8,
-      constraints: const BoxConstraints(
-        minWidth: 360,
-        maxWidth: 420,
-        maxHeight: 520,
+      constraints: BoxConstraints(
+        minWidth: popupWidth.clamp(0.0, narrowScreen ? 300.0 : 360.0).toDouble(),
+        maxWidth: popupWidth,
+        maxHeight: popupMaxHeight,
       ),
       items: [
         PopupMenuItem<void>(
@@ -325,6 +763,8 @@ class _NotificationBellState extends State<_NotificationBell> {
             notifications: notifications,
             onOpenSosMonitoring: widget.onOpenSosMonitoring,
             onOpenAuditLogs: widget.onOpenAuditLogs,
+            width: popupWidth,
+            listHeight: notificationListHeight,
           ),
         ),
       ],
@@ -389,11 +829,15 @@ class _NotificationPopupContent extends StatefulWidget {
     required this.notifications,
     required this.onOpenSosMonitoring,
     required this.onOpenAuditLogs,
+    required this.width,
+    required this.listHeight,
   });
 
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> notifications;
   final VoidCallback onOpenSosMonitoring;
   final VoidCallback onOpenAuditLogs;
+  final double width;
+  final double listHeight;
 
   @override
   State<_NotificationPopupContent> createState() =>
@@ -403,6 +847,64 @@ class _NotificationPopupContent extends StatefulWidget {
 class _NotificationPopupContentState
     extends State<_NotificationPopupContent> {
   bool _showUnreadOnly = false;
+  final Map<String, Future<String>> _resolvedMessages = {};
+
+  Future<String> _resolveAdminActivityMessage(
+    String notificationId,
+    Map<String, dynamic> notification,
+  ) {
+    return _resolvedMessages.putIfAbsent(notificationId, () async {
+      var message = notification['message']?.toString() ?? '';
+      final actionId = notification['actionId']?.toString();
+      if (actionId == null || actionId.isEmpty) return message;
+
+      final actionSnap = await FirebaseFirestore.instance
+          .collection('admin_actions')
+          .doc(actionId)
+          .get();
+      final action = actionSnap.data();
+      if (action == null) return message;
+
+      final targetId = action['targetId']?.toString();
+      final targetName = action['targetName']?.toString().trim();
+      if (targetId != null && targetId.isNotEmpty) {
+        final targetEmail = action['targetEmail']?.toString().trim();
+        final targetLabel = targetName != null && targetName.isNotEmpty
+            ? targetName
+            : targetEmail != null && targetEmail.isNotEmpty
+                ? targetEmail
+                : 'this user';
+        message = message.replaceAll(targetId, targetLabel);
+      }
+
+      final adminId = action['adminId']?.toString();
+      if (adminId != null && adminId.isNotEmpty) {
+        final storedName = action['adminName']?.toString().trim();
+        String? adminName = storedName != null && storedName.isNotEmpty
+            ? storedName
+            : null;
+        if (adminName == null) {
+          final adminSnap = await FirebaseFirestore.instance
+              .collection('users')
+              .doc(adminId)
+              .get();
+          final profile = adminSnap.data();
+          for (final field in const ['fullName', 'displayName', 'name']) {
+            final value = profile?[field]?.toString().trim();
+            if (value != null && value.isNotEmpty) {
+              adminName = value;
+              break;
+            }
+          }
+        }
+        adminName ??= action['adminEmail']?.toString().trim();
+        if (adminName != null && adminName.isNotEmpty) {
+          message = message.replaceAll(adminId, adminName);
+        }
+      }
+      return message;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -416,7 +918,7 @@ class _NotificationPopupContentState
         : widget.notifications;
 
     return SizedBox(
-      width: 390,
+      width: widget.width,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -522,7 +1024,7 @@ class _NotificationPopupContentState
             )
           else
               SizedBox(
-                height: 400,
+                height: widget.listHeight,
                 child: ListView(
                   padding: EdgeInsets.zero,
                   children: filteredNotifications.map(
@@ -534,6 +1036,7 @@ class _NotificationPopupContentState
                           data['message']?.toString() ?? '';
                       final isRead =
                           data['isRead'] == true;
+                      final timeAgo = _relativeNotificationTime(data['createdAt']);
 
                       return InkWell(
                         borderRadius: BorderRadius.circular(10),
@@ -609,16 +1112,29 @@ class _NotificationPopupContentState
                                     ),
                                     if (message.isNotEmpty) ...[
                                       const SizedBox(height: 3),
-                                      Text(
-                                        message,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.black54,
+                                      FutureBuilder<String>(
+                                        future: data['type']?.toString() == 'admin_action'
+                                            ? _resolveAdminActivityMessage(notification.id, data)
+                                            : Future.value(message),
+                                        builder: (context, snapshot) => Text(
+                                          snapshot.data ?? message,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.black54,
+                                          ),
                                         ),
                                       ),
                                     ],
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      timeAgo,
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.black45,
+                                      ),
+                                    ),
                                   ],
                                 ),
                               ),
@@ -650,9 +1166,27 @@ class _NotificationPopupContentState
   }
 }
 
-class _DashboardOverviewPage extends StatelessWidget {
-  const _DashboardOverviewPage({required this.onNavigate});
+String _relativeNotificationTime(Object? value) {
+  final DateTime? createdAt = switch (value) {
+    Timestamp timestamp => timestamp.toDate(),
+    DateTime dateTime => dateTime,
+    _ => null,
+  };
+  if (createdAt == null) return 'Time unavailable';
 
+  final difference = DateTime.now().difference(createdAt);
+  if (difference.isNegative || difference.inSeconds < 1) return 'Just now';
+  if (difference.inSeconds < 60) return '${difference.inSeconds}s ago';
+  if (difference.inMinutes < 60) return '${difference.inMinutes}m ago';
+  if (difference.inHours < 24) return '${difference.inHours}h ago';
+  if (difference.inDays < 7) return '${difference.inDays}d ago';
+  return '${createdAt.month}/${createdAt.day}/${createdAt.year}';
+}
+
+class _DashboardOverviewPage extends StatelessWidget {
+  const _DashboardOverviewPage({required this.user, required this.onNavigate});
+
+  final User user;
   final ValueChanged<int> onNavigate;
 
   @override
@@ -661,10 +1195,6 @@ class _DashboardOverviewPage extends StatelessWidget {
         .collection('users')
         .where('accountType', isEqualTo: 'tour_guide')
         .where('guideVerified', isEqualTo: false);
-    final approvedGuidesQuery = FirebaseFirestore.instance
-        .collection('users')
-        .where('accountType', isEqualTo: 'tour_guide')
-        .where('guideVerified', isEqualTo: true);
     final pendingTrailsQuery = FirebaseFirestore.instance
         .collection('trail_submissions')
         .where('status', isEqualTo: 'pending');
@@ -683,14 +1213,12 @@ class _DashboardOverviewPage extends StatelessWidget {
         .where('action', isEqualTo: 'reject_tour_guide');
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
+      padding: EdgeInsets.all(MediaQuery.sizeOf(context).width < 700 ? 16 : 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Dashboard Overview', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 4),
-          const Text('Summary of activity on the Agakbay platform', style: TextStyle(color: Colors.black54)),
-          const SizedBox(height: 20),
+          _DashboardWelcomeBanner(user: user),
+          const SizedBox(height: 18),
           StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
             stream: pendingGuidesQuery.snapshots(),
             builder: (context, guideSnap) {
@@ -729,6 +1257,8 @@ class _DashboardOverviewPage extends StatelessWidget {
             },
           ),
           const SizedBox(height: 28),
+          _OverviewQuickPanels(onNavigate: onNavigate),
+          const SizedBox(height: 20),
           _SectionCard(
             title: 'Pending Tour Guide Applications',
             child: StreamBuilder<QuerySnapshot>(
@@ -792,9 +1322,264 @@ class _DashboardOverviewPage extends StatelessWidget {
               },
             ),
           ),
+          const SizedBox(height: 20),
+          const _RecentActivityPanel(),
         ],
       ),
     );
+  }
+}
+
+class _DashboardWelcomeBanner extends StatelessWidget {
+  const _DashboardWelcomeBanner({required this.user});
+
+  final User user;
+
+  @override
+  Widget build(BuildContext context) {
+    final profile = FirebaseFirestore.instance.collection('users').doc(user.uid).snapshots();
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: profile,
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
+        final profileName = [data?['fullName'], data?['displayName'], data?['name']]
+            .whereType<String>()
+            .map((name) => name.trim())
+            .firstWhere((name) => name.isNotEmpty, orElse: () => '');
+        final authName = user.displayName?.trim() ?? '';
+        final emailName = user.email?.split('@').first.trim() ?? '';
+        final adminName = profileName.isNotEmpty
+            ? profileName
+            : authName.isNotEmpty
+                ? authName
+                : emailName.isNotEmpty
+                    ? emailName
+                    : 'Admin';
+        final firstName = adminName.trim().split(RegExp(r'\s+')).first;
+        return _buildBanner(context, firstName);
+      },
+    );
+  }
+
+  Widget _buildBanner(BuildContext context, String adminName) {
+    final hour = DateTime.now().hour;
+    final greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+    final date = DateTime.now();
+    const months = ['January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'];
+    final width = MediaQuery.sizeOf(context).width;
+    return Container(
+      width: double.infinity,
+      height: width < 520 ? 184 : width < 700 ? 174 : 170,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(borderRadius: BorderRadius.circular(18)),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.asset('assets/images/mountain_banner.jpg', fit: BoxFit.cover),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xF2F1F8F5), Color(0xBFEAF4EE), Color(0x14EAF4EE)],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+                stops: [0, 0.58, 1],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 22),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text('$greeting, $adminName 👋', style: TextStyle(
+                  fontSize: width < 700 ? 23 : 30, fontWeight: FontWeight.w800,
+                  color: const Color(0xFF092F27))),
+                const SizedBox(height: 6),
+                const Text("Here's what's happening across the AGAKBAY platform today.",
+                  style: TextStyle(fontSize: 15, color: Color(0xFF496A70))),
+                const SizedBox(height: 12),
+                Row(children: [
+                  const Icon(Icons.calendar_month_rounded, size: 17, color: Color(0xFF52727A)),
+                  const SizedBox(width: 7),
+                  Text('${months[date.month - 1]} ${date.day}, ${date.year}',
+                    style: const TextStyle(color: Color(0xFF52727A), fontSize: 13)),
+                ]),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RecentActivityPanel extends StatelessWidget {
+  const _RecentActivityPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return _SectionCard(
+      title: 'Recent Activity',
+      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: FirebaseFirestore.instance
+            .collection('admin_actions')
+            .orderBy('createdAt', descending: true)
+            .limit(5)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
+          if (!snapshot.hasData) return const _LoadingRow();
+          if (snapshot.data!.docs.isEmpty) {
+            return const _EmptyRow('No recent admin activity.');
+          }
+          return Column(
+            children: snapshot.data!.docs.map((doc) {
+              final data = doc.data();
+              final action = data['action']?.toString() ?? 'activity';
+              final target = data['targetName']?.toString() ??
+                  data['trailName']?.toString() ??
+                  data['mountainName']?.toString() ?? '';
+              final time = _formatTimestamp(data['createdAt']);
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                child: Row(children: [
+                  CircleAvatar(
+                    radius: 20,
+                    backgroundColor: AdminColors.accent.withValues(alpha: 0.13),
+                    child: const Icon(Icons.bolt_rounded, color: AdminColors.accent),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_actionVerb(action), style: const TextStyle(fontWeight: FontWeight.w600)),
+                      if (target.isNotEmpty) Text(target, style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                    ],
+                  )),
+                  Text(time, style: const TextStyle(color: Colors.black45, fontSize: 11)),
+                ]),
+              );
+            }).toList(),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _OverviewQuickPanels extends StatelessWidget {
+  const _OverviewQuickPanels({required this.onNavigate});
+
+  final ValueChanged<int> onNavigate;
+
+  @override
+  Widget build(BuildContext context) {
+    final rooms = FirebaseFirestore.instance
+        .collection('hike_rooms')
+        .where('status', isEqualTo: 'active')
+        .limit(3)
+        .snapshots();
+    final sos = FirebaseFirestore.instance
+        .collectionGroup('sos_events')
+        .where('status', isEqualTo: 'sent')
+        .limit(3)
+        .snapshots();
+    final width = MediaQuery.sizeOf(context).width;
+    final roomCard = GestureDetector(
+      onTap: () => onNavigate(3),
+      child: _SectionCard(
+      title: 'Active Hike Rooms',
+      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: rooms,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
+          if (!snapshot.hasData) return const _LoadingRow();
+          final docs = snapshot.data!.docs;
+          if (docs.isEmpty) return const _EmptyRow('No active hike rooms.');
+          return Column(children: docs.map((doc) {
+            final room = doc.data();
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(children: [
+                CircleAvatar(
+                  radius: 19,
+                  backgroundColor: const Color(0xFF12805A).withValues(alpha: .12),
+                  child: const Icon(Icons.terrain_rounded, color: Color(0xFF12805A)),
+                ),
+                const SizedBox(width: 11),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(room['mountainName']?.toString() ?? 'Hike room',
+                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                    Text('Guide · ${room['guideName']?.toString() ?? 'Unknown'}',
+                      style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                  ],
+                )),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(color: const Color(0xFFE1F4EA), borderRadius: BorderRadius.circular(20)),
+                  child: const Text('ACTIVE', style: TextStyle(color: Color(0xFF12805A), fontSize: 10, fontWeight: FontWeight.w800)),
+                ),
+              ]),
+            );
+          }).toList());
+        },
+      ),
+    ));
+    final sosCard = GestureDetector(
+      onTap: () => onNavigate(4),
+      child: _SectionCard(
+      title: 'SOS Monitoring',
+      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: sos,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
+          if (!snapshot.hasData) return const _LoadingRow();
+          final docs = snapshot.data!.docs;
+          if (docs.isEmpty) {
+            return Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              decoration: BoxDecoration(color: const Color(0xFFF0F8F4), borderRadius: BorderRadius.circular(12)),
+              child: const Column(children: [
+                Icon(Icons.verified_user_rounded, color: Color(0xFF12805A), size: 34),
+                SizedBox(height: 8),
+                Text('No active SOS alerts', style: TextStyle(fontWeight: FontWeight.w700)),
+                SizedBox(height: 3),
+                Text('All hikers are currently safe.', style: TextStyle(color: Colors.black54, fontSize: 12)),
+              ]),
+            );
+          }
+          return Column(children: docs.map((doc) {
+            final alert = doc.data();
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(children: [
+                const CircleAvatar(radius: 19, backgroundColor: Color(0xFFFFE8E8),
+                  child: Icon(Icons.warning_rounded, color: Color(0xFFD92F3D))),
+                const SizedBox(width: 11),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(alert['senderName']?.toString() ?? 'Hiker needs help', style: const TextStyle(fontWeight: FontWeight.w700)),
+                  Text('Room ${alert['roomCode']?.toString() ?? '—'} · SOS alert', style: const TextStyle(color: Colors.black54, fontSize: 12)),
+                ])),
+                const Text('PENDING', style: TextStyle(color: Color(0xFFD92F3D), fontSize: 10, fontWeight: FontWeight.w800)),
+              ]),
+            );
+          }).toList());
+        },
+      ),
+    ));
+    if (width < 900) {
+      return Column(children: [roomCard, const SizedBox(height: 16), sosCard]);
+    }
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Expanded(flex: 6, child: roomCard),
+      const SizedBox(width: 16),
+      Expanded(flex: 4, child: sosCard),
+    ]);
   }
 }
 
@@ -1568,20 +2353,21 @@ class _StatGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cards = [
-      _StatCardData('Pending Guide Apps', pendingGuides?.toString() ?? '-', Icons.person_add_alt_1, Colors.orange, 1),
-      _StatCardData('Pending Trail Submissions', pendingTrails?.toString() ?? '-', Icons.alt_route_rounded, Colors.blue, 2),
-      _StatCardData('Active Hike Rooms', activeRooms?.toString() ?? '-', Icons.terrain_rounded, AdminColors.accent, 3),
-      _StatCardData('Active SOS Alerts', activeSos?.toString() ?? '-', Icons.warning_amber_rounded, Colors.red, 4),
-      _StatCardData('Registered Devices', registeredDevices?.toString() ?? '-', Icons.bluetooth, Colors.indigo, 5),
-      _StatCardData('Approved / Rejected', '${approvedGuides ?? '-'} / ${rejectedGuides ?? '-'}', Icons.fact_check_outlined, Colors.black87, 7),
+      _StatCardData('Pending Guide Apps', pendingGuides?.toString() ?? '-', Icons.groups_rounded, const Color(0xFF12805A), 1),
+      _StatCardData('Pending Trail Submissions', pendingTrails?.toString() ?? '-', Icons.landscape_rounded, const Color(0xFF2387CC), 2),
+      _StatCardData('Active Hike Rooms', activeRooms?.toString() ?? '-', Icons.directions_walk_rounded, const Color(0xFF12805A), 3),
+      _StatCardData('Active SOS Alerts', activeSos?.toString() ?? '-', Icons.warning_rounded, const Color(0xFFD92F3D), 4),
     ];
+    final width = MediaQuery.sizeOf(context).width;
     return GridView.count(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
-      crossAxisCount: 2,
-      mainAxisSpacing: 16,
-      crossAxisSpacing: 16,
-      childAspectRatio: 3.2,
+      crossAxisCount: width > 1250 ? 4 : width > 720 ? 2 : 1,
+      mainAxisSpacing: 14,
+      crossAxisSpacing: 14,
+      // Keep enough vertical room for the label and value at narrow widths,
+      // where the dashboard content is reduced by the navigation sidebar.
+      childAspectRatio: width > 1250 ? 2.05 : width > 720 ? 2.2 : 2.6,
       children: cards.map((card) => _StatCard(
         data: card,
         onTap: () => onNavigate(card.destination),
@@ -1598,32 +2384,35 @@ class _StatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.white,
+      color: Color.alphaBlend(data.color.withValues(alpha: 0.055), Colors.white),
       borderRadius: BorderRadius.circular(14),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(14),
         child: Container(
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(borderRadius: BorderRadius.circular(14)),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: data.color.withValues(alpha: 0.13)),
+          ),
           child: Row(
             children: [
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(data.label, style: const TextStyle(color: Colors.black54, fontSize: 12.5)),
-                    const SizedBox(height: 8),
-                    Text(data.value, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+                    Text(data.label, style: const TextStyle(color: Color(0xFF173B34), fontSize: 13, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 7),
+                    Text(data.value, style: TextStyle(fontSize: 29, fontWeight: FontWeight.w800, color: data.color)),
                   ],
                 ),
               ),
               Container(
-                width: 40,
-                height: 40,
+                width: 48,
+                height: 48,
                 decoration: BoxDecoration(
-                  color: data.color.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
+                  color: data.color.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
                 ),
                 child: Icon(data.icon, color: data.color, size: 20),
               ),

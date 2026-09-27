@@ -1,8 +1,109 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 
+// User-owned hike data is stored under hike_rooms, not users/{uid}. Keep SOS
+// history for safety, anonymize the deleted sender, remove their membership,
+// and end any room they guide so other participants are not left in a live
+// room without its guide.
+async function deleteUserHikeRecords(db, uid) {
+  const [sosEvents, participants, sosNotifications, rooms] = await Promise.all([
+    db.collectionGroup("sos_events").where("senderId", "==", uid).get(),
+    db.collectionGroup("participants").where("userId", "==", uid).get(),
+    db.collection("notifications")
+      .where("type", "==", "sos")
+      .where("senderId", "==", uid)
+      .get(),
+    db.collection("hike_rooms").get(),
+  ]);
+
+  const writesByPath = new Map();
+  const queueUpdate = (ref, data) => writesByPath.set(ref.path, { ref, data });
+  const queueDelete = (ref) => writesByPath.set(ref.path, { ref, delete: true });
+
+  for (const doc of sosEvents.docs) {
+    queueUpdate(doc.ref, {
+      senderName: "user",
+      senderId: admin.firestore.FieldValue.delete(),
+    });
+  }
+  for (const doc of sosNotifications.docs) {
+    const notification = doc.data();
+    const event = sosEvents.docs.find((eventDoc) =>
+      eventDoc.id === notification.eventId &&
+      eventDoc.ref.parent.parent?.id === notification.roomId,
+    );
+    const roomCode = notification.roomCode || event?.data().roomCode ||
+      notification.roomId || "";
+    queueUpdate(doc.ref, {
+      senderName: "user",
+      senderId: admin.firestore.FieldValue.delete(),
+      message: `user has triggered an SOS in hike room ${roomCode}.`,
+    });
+  }
+
+  // Close rooms led by this user, finish memberships for the remaining
+  // participants, and clear their active-room pointers.
+  for (const room of rooms.docs) {
+    const targetParticipantRef = room.ref.collection("participants").doc(uid);
+    const targetParticipant = await targetParticipantRef.get();
+    if (targetParticipant.exists) queueDelete(targetParticipantRef);
+    if (room.data().guideId !== uid) continue;
+    queueUpdate(room.ref, {
+      status: "ended",
+      endedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      autoEndedReason: "guide_account_deleted",
+    });
+    const roomParticipants = await room.ref.collection("participants").get();
+    for (const participant of roomParticipants.docs) {
+      const participantData = participant.data();
+      if (participantData.userId === uid || participant.id === uid) {
+        queueDelete(participant.ref);
+        continue;
+      }
+      if ((participantData.membershipStatus || "active") === "active") {
+        queueUpdate(participant.ref, {
+          membershipStatus: "room_ended",
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        const participantUserRef = db.collection("users").doc(participant.id);
+        const participantUser = await participantUserRef.get();
+        if (participantUser.exists) {
+          queueUpdate(participantUserRef, {
+            activeHikeRoomId: admin.firestore.FieldValue.delete(),
+          });
+        }
+      }
+    }
+  }
+
+  // Remove the deleted user's participant rows from rooms led by other users.
+  for (const participant of participants.docs) {
+    const roomRef = participant.ref.parent.parent;
+    if (!roomRef) continue;
+    const room = rooms.docs.find((doc) => doc.ref.path === roomRef.path);
+    if (room?.data().guideId === uid) continue;
+    queueDelete(participant.ref);
+  }
+
+  for (const room of rooms.docs) {
+    queueDelete(room.ref.collection("sos_cooldowns").doc(uid));
+  }
+
+  const writes = [...writesByPath.values()];
+
+  for (let offset = 0; offset < writes.length; offset += 450) {
+    const batch = db.batch();
+    for (const write of writes.slice(offset, offset + 450)) {
+      if (write.delete) batch.delete(write.ref);
+      else batch.update(write.ref, write.data);
+    }
+    await batch.commit();
+  }
+}
+
 exports.manageUserAccount = onCall(
-  { timeoutSeconds: 30, memory: "256MiB" },
+  { timeoutSeconds: 120, memory: "256MiB" },
   async (request) => {
     if (request.auth?.token?.admin !== true) {
       throw new HttpsError("permission-denied", "Admin access required.");
@@ -46,6 +147,7 @@ exports.manageUserAccount = onCall(
           "This profile has no sign-in account — it can only be deleted, not suspended or restored.",
         );
       }
+      await deleteUserHikeRecords(db, uid);
       await db.collection("admin_actions").add({
         adminId: request.auth.uid,
         adminEmail: request.auth.token.email || null,
@@ -90,6 +192,7 @@ exports.manageUserAccount = onCall(
         newStatus: "deleted",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+      await deleteUserHikeRecords(db, uid);
       await auth.deleteUser(uid);
       await db.recursiveDelete(userRef);
       return { action, status: "deleted" };

@@ -333,28 +333,37 @@ exports.onSosEventCreated = onDocumentCreated(
     const roomId = event.params.roomId;
     const eventId = event.params.eventId;
 
-    const senderName = String(data.senderName || "Hiker");
-    const roomCode = String(data.roomCode || roomId);
+    const eventRef = db.collection("hike_rooms").doc(roomId)
+      .collection("sos_events").doc(eventId);
+    const notificationRef = db.collection("notifications")
+      .doc(`sos_${roomId}_${eventId}`);
 
-    await db.collection("notifications").add({
-      type: "sos",
-      title: "SOS Emergency Alert",
-      message: `${senderName} has triggered an SOS in hike room ${roomCode}.`,
-
-      isRead: false,
-
-      roomId,
-      eventId,
-
-      senderId: String(data.senderId || ""),
-      senderName,
-
-      latitude: Number(data.latitude),
-      longitude: Number(data.longitude),
-
-      transport: String(data.transport || "internet"),
-
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    // Account deletion removes the source event and its notification. Check
+    // the source inside the same transaction so a delayed create trigger
+    // cannot recreate a notification after cleanup.
+    await db.runTransaction(async (transaction) => {
+      const [eventSnap, notificationSnap] = await Promise.all([
+        transaction.get(eventRef),
+        transaction.get(notificationRef),
+      ]);
+      if (!eventSnap.exists || notificationSnap.exists) return;
+      const currentEvent = eventSnap.data() || {};
+      const senderName = String(currentEvent.senderName || "Hiker");
+      const roomCode = String(currentEvent.roomCode || roomId);
+      transaction.create(notificationRef, {
+        type: "sos",
+        title: "SOS Emergency Alert",
+        message: `${senderName} has triggered an SOS in hike room ${roomCode}.`,
+        isRead: false,
+        roomId,
+        eventId,
+        senderId: String(data.senderId || ""),
+        senderName,
+        latitude: Number(data.latitude),
+        longitude: Number(data.longitude),
+        transport: String(data.transport || "internet"),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
     });
   },
 );
@@ -662,13 +671,27 @@ exports.onAdminActionCreated = onDocumentCreated(
     };
     const label = actionLabels[action] || action.replaceAll("_", " ");
     const target = String(
-      data.trailName || data.mountainName || data.targetId || "",
+      data.trailName || data.mountainName || data.targetName || data.targetId || "",
     ).trim();
-    const actor = String(
-      data.submitterName || data.adminEmail || data.actorEmail ||
+    let actor = String(
+      data.submitterName || data.adminName || data.adminEmail || data.actorEmail ||
       data.adminId || data.submittedBy ||
       (action === "auto_close_abandoned_room" ? "System" : "An administrator"),
     ).trim();
+    if (data.adminId && !data.adminName) {
+      const adminProfile = await db.collection("users").doc(String(data.adminId)).get();
+      const profile = adminProfile.data() || {};
+      let adminName = profile.fullName || profile.displayName || profile.name;
+      if (!adminName) {
+        try {
+          const authUser = await admin.auth().getUser(String(data.adminId));
+          adminName = authUser.displayName;
+        } catch (_) {
+          // Keep the email/uid fallback when the Auth account has no name.
+        }
+      }
+      actor = String(adminName || actor).trim();
+    }
 
     await db.runTransaction(async (transaction) => {
       const notificationSnap = await transaction.get(notificationRef);

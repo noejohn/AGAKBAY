@@ -92,6 +92,7 @@ flutter:
 
   assets:
     - assets/images/
+    - assets/images/mountain_banner.jpg
     - assets/trails/
     - assets/agak/
 

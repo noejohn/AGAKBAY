@@ -36,7 +36,7 @@ class AdminApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AGAKBAY Admin',
+      title: 'AGAKBAY',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: AdminColors.accent),
       home: const AdminLoginScreen(),
     );
@@ -241,21 +241,18 @@ class _SignInCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(18),
               border: Border.all(color: AdminColors.accentDim, width: 3),
             ),
-            child: const Icon(Icons.terrain_rounded, color: Colors.white, size: 32),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(15),
+              child: Image.asset(
+                'assets/images/animal.png',
+                fit: BoxFit.cover,
+              ),
+            ),
           ),
           const SizedBox(height: 16),
           const Text(
             'Agakbay',
             style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Admin Dashboard',
-            style: TextStyle(
-              color: AdminColors.accent,
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-            ),
           ),
           const SizedBox(height: 28),
           Container(
