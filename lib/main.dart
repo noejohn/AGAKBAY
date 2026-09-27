@@ -20,6 +20,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
+import 'package:tunga/screens/account_suspended_screen.dart';
 import 'package:tunga/screens/kyrielle_companion_chat_screen.dart';
 import 'package:tunga/screens/agak_emotion_showcase_screen.dart';
 import 'package:tunga/screens/agak_scheduled_hikes_screen.dart';
@@ -536,6 +537,16 @@ class _LoginScreenState extends State<LoginScreen> {
         ),
       );
     } on FirebaseAuthException catch (error) {
+      if (error.code == 'user-disabled') {
+        if (mounted) {
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (context) => const AccountSuspendedScreen(),
+            ),
+          );
+        }
+        return;
+      }
       final message = switch (error.code) {
         'wrong-password' => 'Wrong password.',
         'user-not-found' => 'Email not found.',
@@ -588,6 +599,18 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
       _showSnackBar('Google sign-in failed: ${error.message}');
+    } on FirebaseAuthException catch (error) {
+      if (error.code == 'user-disabled') {
+        if (mounted) {
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (context) => const AccountSuspendedScreen(),
+            ),
+          );
+        }
+        return;
+      }
+      _showSnackBar('Google sign-in failed: ${error.message ?? error.code}');
     } catch (error) {
       _showSnackBar('Google sign-in failed: $error');
     } finally {
@@ -15667,6 +15690,46 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   }
 }
 
+bool _passwordHasNumber(String value) => RegExp(r'[0-9]').hasMatch(value);
+
+bool _passwordHasSpecialChar(String value) =>
+    RegExp(r'[!@#$%^&*(),.?":{}|<>_\-+=\[\];/~`]').hasMatch(value);
+
+class _PasswordRequirementRow extends StatelessWidget {
+  const _PasswordRequirementRow({required this.label, required this.met});
+
+  final String label;
+  final bool met;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = met
+        ? const Color(0xFF2E7D46)
+        : AgakColors.ink.withValues(alpha: 0.45);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          Icon(
+            met ? Icons.check_circle_rounded : Icons.circle_outlined,
+            size: 15,
+            color: color,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12.5,
+              color: color,
+              fontWeight: met ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class SignUpScreen extends StatefulWidget {
   const SignUpScreen({super.key, required this.firebaseReady});
 
@@ -15722,6 +15785,16 @@ class _SignUpScreenState extends State<SignUpScreen> {
 
     if (password.length < 8) {
       _showSnackBar('Password must be at least 8 characters.');
+      return;
+    }
+
+    if (!_passwordHasNumber(password)) {
+      _showSnackBar('Password must include at least one number.');
+      return;
+    }
+
+    if (!_passwordHasSpecialChar(password)) {
+      _showSnackBar('Password must include at least one special character.');
       return;
     }
 
@@ -15887,7 +15960,34 @@ class _SignUpScreenState extends State<SignUpScreen> {
                           ),
                         ),
                       ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: 8),
+                      ValueListenableBuilder<TextEditingValue>(
+                        valueListenable: _passwordController,
+                        builder: (context, value, _) {
+                          final password = value.text;
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _PasswordRequirementRow(
+                                  label: 'At least 8 characters',
+                                  met: password.length >= 8,
+                                ),
+                                _PasswordRequirementRow(
+                                  label: 'Contains a number',
+                                  met: _passwordHasNumber(password),
+                                ),
+                                _PasswordRequirementRow(
+                                  label: 'Contains a special character (e.g. ! @ # \$)',
+                                  met: _passwordHasSpecialChar(password),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 10),
                       _AuthInput(
                         hint: 'Confirm Password',
                         icon: Icons.lock_reset_rounded,
@@ -15969,15 +16069,24 @@ class EmailVerificationScreen extends StatefulWidget {
       _EmailVerificationScreenState();
 }
 
-class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
+class _EmailVerificationScreenState extends State<EmailVerificationScreen>
+    with WidgetsBindingObserver {
   Timer? _timer;
+  Timer? _pollTimer;
   int _secondsLeft = 45;
   bool _checkingVerification = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _startResendTimer();
+    // Covers the common path — tap the link in Gmail/Mail, then switch back
+    // to Agakbay — without the user having to press anything here.
+    _pollTimer = Timer.periodic(
+      const Duration(seconds: 4),
+      (_) => _checkVerification(),
+    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -15991,8 +16100,17 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
+    _pollTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkVerification();
+    }
   }
 
   void _startResendTimer() {
@@ -16008,6 +16126,10 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
     });
   }
 
+  // Runs silently in the background (periodic poll + on app resume) — there
+  // is no manual "check now" button anymore, so this must never spam a
+  // snackbar for "not verified yet" or a transient network hiccup; it only
+  // ever speaks up once verification actually succeeds.
   Future<void> _checkVerification() async {
     if (_checkingVerification) {
       return;
@@ -16020,6 +16142,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         return;
       }
       if (verified) {
+        _pollTimer?.cancel();
         _showSnackBar('Email verified successfully.');
         final uid = FirebaseAuth.instance.currentUser?.uid;
         final onboarded = uid == null
@@ -16036,11 +16159,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
           ),
           (route) => false,
         );
-      } else {
-        _showSnackBar('Not verified yet. Check your email and tap the link.');
       }
-    } catch (error) {
-      _showSnackBar('Verification check failed: $error');
+    } catch (_) {
+      // Keep waiting quietly — the next poll tick or app resume will retry.
     } finally {
       if (mounted) {
         setState(() => _checkingVerification = false);
@@ -16154,37 +16275,26 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                         ],
                       ),
                       const SizedBox(height: 20),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: _checkingVerification
-                              ? null
-                              : _checkVerification,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AgakColors.maroon,
-                            foregroundColor: AgakColors.cream,
-                            padding: const EdgeInsets.symmetric(vertical: 18),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(18),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.2,
+                              color: AgakColors.maroon.withValues(alpha: 0.6),
                             ),
                           ),
-                          child: _checkingVerification
-                              ? const SizedBox(
-                                  width: 24,
-                                  height: 24,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.4,
-                                    color: AgakColors.cream,
-                                  ),
-                                )
-                              : const Text(
-                                  'I HAVE VERIFIED',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                    letterSpacing: 1.4,
-                                  ),
-                                ),
-                        ),
+                          const SizedBox(width: 12),
+                          Text(
+                            'Waiting for you to verify — this updates automatically.',
+                            style: TextStyle(
+                              color: AgakColors.ink.withValues(alpha: 0.66),
+                              fontSize: 13.5,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),

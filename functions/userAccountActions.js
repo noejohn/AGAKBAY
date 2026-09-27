@@ -22,15 +22,6 @@ exports.manageUserAccount = onCall(
 
     const auth = admin.auth();
     const db = admin.firestore();
-    let target;
-    try {
-      target = await auth.getUser(uid);
-    } catch (error) {
-      if (error.code === "auth/user-not-found") {
-        throw new HttpsError("not-found", "Authentication account not found.");
-      }
-      throw error;
-    }
 
     const userRef = db.collection("users").doc(uid);
     const userSnap = await userRef.get();
@@ -39,6 +30,36 @@ exports.manageUserAccount = onCall(
     }
     const profile = userSnap.data() || {};
     const isAdmin = profile.adminAccess === true || profile.role === "admin" || profile.accountType === "admin";
+
+    let target;
+    try {
+      target = await auth.getUser(uid);
+    } catch (error) {
+      if (error.code !== "auth/user-not-found") throw error;
+      if (action !== "delete") {
+        // Suspend/restore/revoke need a live sign-in account to act on.
+        // This one has none — either it was already removed on the Auth
+        // side, or this Firestore doc was created without one — so only
+        // deleting the leftover profile data makes sense here.
+        throw new HttpsError(
+          "failed-precondition",
+          "This profile has no sign-in account — it can only be deleted, not suspended or restored.",
+        );
+      }
+      await db.collection("admin_actions").add({
+        adminId: request.auth.uid,
+        adminEmail: request.auth.token.email || null,
+        action: "delete_user_account",
+        targetId: uid,
+        targetEmail: profile.email || null,
+        targetName: profile.fullName || profile.displayName || null,
+        previousStatus: isAdmin ? "admin" : "standard",
+        newStatus: "deleted",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      await db.recursiveDelete(userRef);
+      return { action, status: "deleted" };
+    }
 
     if (["revoke_admin", "suspend", "delete"].includes(action) && isAdmin) {
       const markedAdmins = await db.collection("users").where("adminAccess", "==", true).get();
@@ -60,8 +81,11 @@ exports.manageUserAccount = onCall(
     if (action === "delete") {
       await db.collection("admin_actions").add({
         adminId: request.auth.uid,
+        adminEmail: request.auth.token.email || null,
         action: "delete_user_account",
         targetId: uid,
+        targetEmail: profile.email || null,
+        targetName: profile.fullName || profile.displayName || null,
         previousStatus: isAdmin ? "admin" : "standard",
         newStatus: "deleted",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -101,8 +125,11 @@ exports.manageUserAccount = onCall(
     await userRef.update(updates);
     await db.collection("admin_actions").add({
       adminId: request.auth.uid,
+      adminEmail: request.auth.token.email || null,
       action,
       targetId: uid,
+      targetEmail: profile.email || null,
+      targetName: profile.fullName || profile.displayName || null,
       previousStatus,
       newStatus,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -170,8 +197,11 @@ exports.createAdminAccount = onCall(
       const resetLink = await auth.generatePasswordResetLink(email);
       await db.collection("admin_actions").add({
         adminId: request.auth.uid,
+        adminEmail: request.auth.token.email || null,
         action: "create_admin",
         targetId: createdUser.uid,
+        targetEmail: email,
+        targetName: fullName,
         previousStatus: null,
         newStatus: "admin",
         createdAt: admin.firestore.FieldValue.serverTimestamp(),

@@ -18,7 +18,7 @@ class HikeRoomScreen extends StatefulWidget {
   State<HikeRoomScreen> createState() => _HikeRoomScreenState();
 }
 
-class _HikeRoomScreenState extends State<HikeRoomScreen> {
+class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObserver {
   final HikeRoomService _service = HikeRoomService();
   VoidCallback? _bleListener;
   String? _activeRoomId;
@@ -32,12 +32,17 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
   bool _loading = true;
   bool _submitting = false;
 
+  Timer? _heartbeatTimer;
+  String? _heartbeatRoomId;
+  AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
+
   bool get _isGuide => _accountType == 'tour_guide';
 
   @override
   void initState() {
     super.initState();
 
+    WidgetsBinding.instance.addObserver(this);
     _load();
 
     final ble = HeltecBleService.instance;
@@ -73,10 +78,56 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _heartbeatTimer?.cancel();
     HeltecBleService.instance.removeListener(_bleListener!);
     _locationSubscription?.cancel();
     _codeController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _lifecycleState = state;
+    if (state == AppLifecycleState.resumed) {
+      _sendHeartbeatIfResumed();
+    }
+  }
+
+  // Only keeps the guide's active room "alive" while their app is actually
+  // in the foreground — a backgrounded/closed app simply stops refreshing
+  // guideLastActiveAt, and closeAbandonedHikeRooms auto-ends the room once
+  // that goes stale, without disrupting a guide who briefly switches apps.
+  void _ensureHeartbeat(HikeRoom room) {
+    if (!_isGuide || room.status != HikeRoomStatus.active) {
+      _stopHeartbeat();
+      return;
+    }
+    if (_heartbeatRoomId == room.id && _heartbeatTimer != null) return;
+    _stopHeartbeat();
+    _heartbeatRoomId = room.id;
+    _sendHeartbeatIfResumed();
+    _heartbeatTimer = Timer.periodic(
+      const Duration(seconds: 60),
+      (_) => _sendHeartbeatIfResumed(),
+    );
+  }
+
+  void _sendHeartbeatIfResumed() {
+    if (_lifecycleState != AppLifecycleState.resumed) return;
+    final roomId = _heartbeatRoomId;
+    if (roomId == null) return;
+    unawaited(
+      _service.sendGuideHeartbeat(roomId).catchError((Object error) {
+        debugPrint('Could not send guide heartbeat: $error');
+      }),
+    );
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _heartbeatRoomId = null;
   }
 
   Future<void> _load() async {
@@ -131,6 +182,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> {
     if (confirmed != true) return;
     await _run(() async {
       await _service.endRoom(roomId);
+      _stopHeartbeat();
       if (mounted) setState(() => _room = null);
     });
   }
@@ -356,10 +408,29 @@ Future<void> _stopParticipantLocationTracking() async {
               builder: (context, snapshot) {
                 final room = snapshot.data;
                 if (room == null || room.status == HikeRoomStatus.ended) {
+                  _stopHeartbeat();
                   return const Center(child: Text('This room has ended.'));
                 }
                 _room = room;
-                if (_isGuide) return _buildActiveRoom(room);
+                _ensureHeartbeat(room);
+                if (_isGuide) {
+                  // Blocks leaving this screen (AppBar back, system back
+                  // gesture/button) while a hike is active without first
+                  // going through the same end-room confirmation as the
+                  // explicit "End Room" button — otherwise the room is left
+                  // dangling "active" with no one able to close it.
+                  return PopScope(
+                    canPop: room.status != HikeRoomStatus.active,
+                    onPopInvokedWithResult: (didPop, result) async {
+                      if (didPop) return;
+                      await _endRoom(room.id);
+                      if (mounted && _room == null) {
+                        Navigator.of(this.context).pop();
+                      }
+                    },
+                    child: _buildActiveRoom(room),
+                  );
+                }
                 return StreamBuilder<String>(
                   stream: _service.watchCurrentMembership(room.id),
                   initialData: 'active',

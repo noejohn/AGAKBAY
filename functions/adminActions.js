@@ -72,8 +72,11 @@ exports.reviewTourGuideApplication = onCall(
 
     await db.collection("admin_actions").add({
       adminId: request.auth.uid,
+      adminEmail: request.auth.token.email || null,
       action: approved ? "approve_tour_guide" : "reject_tour_guide",
       targetId: targetUid,
+      targetEmail: application.applicantEmail || null,
+      targetName: application.fullName || null,
       previousStatus: "pending",
       newStatus: approved ? "approved" : "rejected",
       reason,

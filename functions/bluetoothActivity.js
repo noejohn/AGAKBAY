@@ -113,6 +113,7 @@ exports.renameBluetoothDevice = onCall(
     });
     await db.collection("admin_actions").add({
       adminId: request.auth.uid,
+      adminEmail: request.auth.token.email || null,
       action: "rename_bluetooth_device",
       targetId: deviceKey,
       previousStatus: previousName || null,

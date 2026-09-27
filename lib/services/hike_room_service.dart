@@ -419,6 +419,18 @@ class HikeRoomService {
   Future<void> endRoom(String roomId) =>
       _setRoomStatus(roomId, HikeRoomStatus.ended, timestampField: 'endedAt');
 
+  // Sent every ~60s by the guide's device while a room is active and the
+  // app is in the foreground. closeAbandonedHikeRooms (functions/
+  // hikeRoomMaintenance.js) auto-ends any room whose guide has gone quiet
+  // for too long — covering a killed/crashed app that never gets to call
+  // endRoom, on top of the explicit PopScope-driven end-on-leave in
+  // HikeRoomScreen.
+  Future<void> sendGuideHeartbeat(String roomId) async {
+    await _roomRef(roomId).update({
+      'guideLastActiveAt': FieldValue.serverTimestamp(),
+    });
+  }
+
   Future<void> _setRoomStatus(
     String roomId,
     HikeRoomStatus status, {
@@ -432,6 +444,8 @@ class HikeRoomService {
       'status': status.name,
       timestampField: FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
+      if (status == HikeRoomStatus.active)
+        'guideLastActiveAt': FieldValue.serverTimestamp(),
     });
     if (status == HikeRoomStatus.ended) {
       final participants = await _roomRef(

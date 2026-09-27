@@ -11,6 +11,10 @@ const {
   updateParticipantBluetoothStatus,
   renameBluetoothDevice,
 } = require("./bluetoothActivity");
+const { closeAbandonedHikeRooms } = require("./hikeRoomMaintenance");
+const { backfillAuditLogNames } = require("./auditLogMaintenance");
+const { reviewTrailSubmission } = require("./trailReview");
+const { sanitizeRoutePoints } = require("./routePoints");
 
 admin.initializeApp();
 
@@ -20,6 +24,10 @@ exports.manageUserAccount = manageUserAccount;
 exports.createAdminAccount = createAdminAccount;
 exports.updateParticipantBluetoothStatus = updateParticipantBluetoothStatus;
 exports.renameBluetoothDevice = renameBluetoothDevice;
+exports.closeAbandonedHikeRooms = closeAbandonedHikeRooms;
+exports.backfillAuditLogNames = backfillAuditLogNames;
+exports.reviewTrailSubmission = reviewTrailSubmission;
+exports.sanitizeRoutePoints = sanitizeRoutePoints;
 
 const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;
@@ -41,36 +49,6 @@ function hashCode({ code, uid }) {
     .digest("hex");
 }
 exports.hashCode = hashCode;
-
-function sanitizeRoutePoints(points) {
-  if (!Array.isArray(points)) {
-    return [];
-  }
-  const cleaned = [];
-  for (const point of points) {
-    if (!point || typeof point !== "object") {
-      continue;
-    }
-    const lat = Number(point.lat);
-    const lon = Number(point.lon);
-    if (
-      !Number.isFinite(lat) ||
-      !Number.isFinite(lon) ||
-      lat < -90 ||
-      lat > 90 ||
-      lon < -180 ||
-      lon > 180
-    ) {
-      continue;
-    }
-    cleaned.push({
-      lat: Number(lat.toFixed(7)),
-      lon: Number(lon.toFixed(7)),
-    });
-  }
-  return cleaned;
-}
-exports.sanitizeRoutePoints = sanitizeRoutePoints;
 
 async function sendEmailWithResend({ to, code }) {
   const apiKey = process.env.RESEND_API_KEY;
@@ -573,6 +551,13 @@ exports.fetchWeatherSnapshot = onCall(
   },
 );
 
+// Only records the submission for admin review — publishing to
+// mountain_trails, notifying the submitter, and notifying other hikers all
+// now happen in reviewTrailSubmission (trailReview.js), gated on an actual
+// admin decision from the Trail Verification page. This trigger used to
+// auto-publish and flip the doc's status off "pending" within seconds of
+// upload, which meant the admin dashboard's "pending" list emptied itself
+// before anyone could review anything — it only records + alerts admins now.
 exports.onTrailSubmissionCreated = onDocumentCreated(
   {
     document: "trail_submissions/{submissionId}",
@@ -637,51 +622,6 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
         });
       }
     });
-
-    if (!mountainKey) {
-      return;
-    }
-
-    const routePoints = sanitizeRoutePoints(data.routePoints);
-
-    await snapshot.ref.set(
-      {
-        status: "included",
-        processedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
-
-    if (routePoints.length < 2) {
-      return;
-    }
-
-    const stations = Array.isArray(data.stations)
-      ? data.stations.map((name) => String(name).trim()).filter(Boolean)
-      : [];
-
-    await db.collection("mountain_trails").doc(mountainKey).set(
-      {
-        mountainKey,
-        status: "verified",
-        routePoints,
-        trailName,
-        stations,
-        recordedAt: data.recordedAt || null,
-        source: "community_recorded",
-        generatedFromSubmissionId: submissionId,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
-
-    await notifyHikersOfNewTrail({
-      mountainKey,
-      mountainName: trailName || String(data.mountainName || "").trim(),
-      submitterUid: String(data.submittedBy || ""),
-    });
   },
 );
 
@@ -716,6 +656,9 @@ exports.onAdminActionCreated = onDocumentCreated(
       delete_user_account: "Deleted a user account",
       rename_bluetooth_device: "Renamed a Bluetooth device",
       submit_trail_route: "Received a trail route submission",
+      approve_trail_submission: "Approved a trail submission",
+      reject_trail_submission: "Rejected a trail submission",
+      auto_close_abandoned_room: "Auto-closed an abandoned hike room",
     };
     const label = actionLabels[action] || action.replaceAll("_", " ");
     const target = String(
@@ -723,7 +666,8 @@ exports.onAdminActionCreated = onDocumentCreated(
     ).trim();
     const actor = String(
       data.submitterName || data.adminEmail || data.actorEmail ||
-      data.adminId || data.submittedBy || "An administrator",
+      data.adminId || data.submittedBy ||
+      (action === "auto_close_abandoned_room" ? "System" : "An administrator"),
     ).trim();
 
     await db.runTransaction(async (transaction) => {
@@ -743,45 +687,6 @@ exports.onAdminActionCreated = onDocumentCreated(
     });
   },
 );
-
-async function notifyHikersOfNewTrail({ mountainKey, mountainName, submitterUid }) {
-  const displayName = mountainName || "a nearby mountain";
-  const hikersSnap = await db
-    .collection("leaderboard")
-    .where("completedTrailKeys", "array-contains", mountainKey)
-    .get();
-
-  if (hikersSnap.empty) {
-    return;
-  }
-
-  const batch = db.batch();
-  let notifyCount = 0;
-  hikersSnap.forEach((doc) => {
-    const uid = doc.id;
-    if (!uid || uid === submitterUid) {
-      return;
-    }
-    const notificationRef = db
-      .collection("users")
-      .doc(uid)
-      .collection("notifications")
-      .doc();
-    batch.set(notificationRef, {
-      type: "trail",
-      title: "New trail recorded",
-      body: `Someone recorded a trail for ${displayName}. Check it out!`,
-      mountainKey,
-      read: false,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    notifyCount += 1;
-  });
-
-  if (notifyCount > 0) {
-    await batch.commit();
-  }
-}
 
 // Keep a distinct name: the deployed onCommunityCommentCreated function is
 // an HTTPS endpoint, and Firebase cannot change a function's trigger type.

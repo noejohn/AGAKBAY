@@ -750,7 +750,7 @@ class _DashboardOverviewPage extends StatelessWidget {
                     return _ListRow(
                       title: (data['fullName'] as String?) ?? (data['email'] as String?) ?? d.id,
                       subtitle: (data['email'] as String?) ?? '',
-                      onReview: () => _showNotWiredUpYet(context),
+                      onReview: () => _showGuideReviewDialog(context, applicationId: d.id, data: data),
                     );
                   }).toList(),
                 );
@@ -820,10 +820,16 @@ String _actionVerb(String action) {
       return 'Disconnected';
     case 'device_changed':
       return 'Device Updated';
+    case 'auto_close_abandoned_room':
+      return 'Auto-Closed Abandoned Hike Room';
     case 'rename_bluetooth_device':
       return 'Renamed Bluetooth Device';
     case 'submit_trail_route':
       return 'Submitted Trail Route';
+    case 'approve_trail_submission':
+      return 'Approved Trail Submission';
+    case 'reject_trail_submission':
+      return 'Rejected Trail Submission';
     default:
       return action;
   }
@@ -841,9 +847,37 @@ String _formatTimestamp(Object? value) {
   return '${months[date.month - 1]} ${date.day}, ${date.year}';
 }
 
+Future<void> _showAccountActionResultDialog(
+  BuildContext context, {
+  required bool success,
+  required String title,
+  required String message,
+}) {
+  return showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      icon: Icon(
+        success ? Icons.check_circle_rounded : Icons.error_rounded,
+        color: success ? AdminColors.accent : Colors.red,
+        size: 44,
+      ),
+      title: Text(title, textAlign: TextAlign.center),
+      content: Text(message, textAlign: TextAlign.center),
+      actionsAlignment: MainAxisAlignment.center,
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          style: FilledButton.styleFrom(backgroundColor: AdminColors.accent),
+          child: const Text('OK'),
+        ),
+      ],
+    ),
+  );
+}
+
 void _showGuideReviewDialog(
   BuildContext context, {
-  required String uid,
+  required String applicationId,
   required Map<String, dynamic> data,
 }) {
   showDialog<void>(
@@ -854,7 +888,7 @@ void _showGuideReviewDialog(
         width: 680,
         child: SingleChildScrollView(
           child: _GuideApplicationCard(
-            uid: uid,
+            applicationId: applicationId,
             data: data,
             onReviewed: () => Navigator.of(dialogContext).pop(),
           ),
@@ -948,7 +982,7 @@ class _FieldLabel extends StatelessWidget {
 }
 
 class _GuideApplicationCard extends StatefulWidget {
-  const _GuideApplicationCard({required this.uid, required this.data});
+  const _GuideApplicationCard({required this.applicationId, required this.data, this.onReviewed});
 
   final String applicationId;
   final Map<String, dynamic> data;
@@ -1313,14 +1347,75 @@ class _TrailMapPreview extends StatelessWidget {
   }
 }
 
-class _TrailSubmissionCard extends StatelessWidget {
+class _TrailSubmissionCard extends StatefulWidget {
   const _TrailSubmissionCard({required this.submissionId, required this.data});
 
   final String submissionId;
   final Map<String, dynamic> data;
 
   @override
+  State<_TrailSubmissionCard> createState() => _TrailSubmissionCardState();
+}
+
+class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
+  bool _reviewing = false;
+
+  Future<void> _review(String decision) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(decision == 'approve' ? 'Approve this trail?' : 'Reject this trail?'),
+        content: Text(
+          decision == 'approve'
+              ? 'This publishes the route on this mountain and notifies the submitter and other hikers who\'ve done it before.'
+              : 'The submitter will be notified their trail was not approved.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _reviewing = true);
+    try {
+      await FirebaseFunctions.instance.httpsCallable('reviewTrailSubmission').call({
+        'submissionId': widget.submissionId,
+        'decision': decision,
+      });
+      if (!mounted) return;
+      await _showAccountActionResultDialog(
+        context,
+        success: true,
+        title: decision == 'approve' ? 'Trail Approved' : 'Trail Rejected',
+        message: decision == 'approve'
+            ? 'The route is now published and the submitter and other hikers have been notified.'
+            : 'The submitter has been notified.',
+      );
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      await _showAccountActionResultDialog(
+        context,
+        success: false,
+        title: 'Could Not Update Submission',
+        message: error.message ?? 'Something went wrong. Please try again.',
+      );
+    } finally {
+      if (mounted) setState(() => _reviewing = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final data = widget.data;
+    final submissionId = widget.submissionId;
     final title = (data['trailName'] as String?) ?? (data['mountainName'] as String?) ?? submissionId;
     final submittedBy = data['submittedBy'] as String?;
     final distance = (data['distanceKm'] as num?)?.toStringAsFixed(1);
@@ -1401,29 +1496,21 @@ class _TrailSubmissionCard extends StatelessWidget {
             children: [
               Expanded(
                 child: FilledButton(
-                  onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Trail approve/reject isn\'t wired up yet — submissions currently '
-                        'auto-publish on upload (see onTrailSubmissionCreated).',
-                      ),
-                    ),
-                  ),
+                  onPressed: _reviewing ? null : () => _review('approve'),
                   style: FilledButton.styleFrom(backgroundColor: AdminColors.accent),
-                  child: const Text('Approve'),
+                  child: _reviewing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Text('Approve'),
                 ),
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: FilledButton(
-                  onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Trail approve/reject isn\'t wired up yet — submissions currently '
-                        'auto-publish on upload (see onTrailSubmissionCreated).',
-                      ),
-                    ),
-                  ),
+                  onPressed: _reviewing ? null : () => _review('reject'),
                   style: FilledButton.styleFrom(backgroundColor: Colors.red),
                   child: const Text('Reject'),
                 ),
@@ -3597,6 +3684,18 @@ class _UserManagementPageState extends State<_UserManagementPage> {
       'restore': 'Restore this account\'s access?',
       'delete': 'Permanently delete this sign-in account and its user profile? Authored activity records may remain.',
     };
+    final successTitles = <String, String>{
+      'revoke_admin': 'Admin Access Revoked',
+      'suspend': 'Account Suspended',
+      'restore': 'Account Restored',
+      'delete': 'Account Deleted',
+    };
+    final successMessages = <String, String>{
+      'revoke_admin': 'This user no longer has admin access.',
+      'suspend': 'This account has been signed out and can no longer sign in.',
+      'restore': 'This account can sign in again.',
+      'delete': 'The sign-in account and profile data have been permanently deleted.',
+    };
     final confirmed = await showDialog<bool>(
       context: dialogContext,
       builder: (context) => AlertDialog(
@@ -3623,13 +3722,20 @@ class _UserManagementPageState extends State<_UserManagementPage> {
       });
       if (!mounted || !dialogContext.mounted) return;
       Navigator.of(dialogContext).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Account updated: ${descriptions[action]}')),
+      if (!mounted) return;
+      await _showAccountActionResultDialog(
+        context,
+        success: true,
+        title: successTitles[action]!,
+        message: successMessages[action]!,
       );
     } on FirebaseFunctionsException catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.message ?? 'Could not update this account.')),
+      await _showAccountActionResultDialog(
+        context,
+        success: false,
+        title: 'Could Not Update Account',
+        message: error.message ?? 'Something went wrong. Please try again.',
       );
     }
   }
@@ -3983,8 +4089,44 @@ class _UserDetailRow extends StatelessWidget {
   }
 }
 
-class _AuditLogsPage extends StatelessWidget {
+class _AuditLogsPage extends StatefulWidget {
   const _AuditLogsPage();
+
+  @override
+  State<_AuditLogsPage> createState() => _AuditLogsPageState();
+}
+
+class _AuditLogsPageState extends State<_AuditLogsPage> {
+  bool _backfilling = false;
+
+  Future<void> _backfillOlderRecords() async {
+    setState(() => _backfilling = true);
+    try {
+      final result = await FirebaseFunctions.instance
+          .httpsCallable('backfillAuditLogNames')
+          .call();
+      if (!mounted) return;
+      final updated = (result.data as Map?)?['updated'] ?? 0;
+      await _showAccountActionResultDialog(
+        context,
+        success: true,
+        title: 'Older Records Updated',
+        message: updated == 0
+            ? 'No older records needed fixing — everything already shows names/emails.'
+            : 'Filled in the actor/target name or email on $updated older record(s).',
+      );
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      await _showAccountActionResultDialog(
+        context,
+        success: false,
+        title: 'Could Not Fix Older Records',
+        message: error.message ?? 'Something went wrong. Please try again.',
+      );
+    } finally {
+      if (mounted) setState(() => _backfilling = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -4015,12 +4157,28 @@ class _AuditLogsPage extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Audit Logs (${logs.length})',
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
+              Row(
+                children: [
+                  Text(
+                    'Audit Logs (${logs.length})',
+                    style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  OutlinedButton.icon(
+                    onPressed: _backfilling ? null : _backfillOlderRecords,
+                    icon: _backfilling
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.auto_fix_high_rounded, size: 18),
+                    label: const Text('Fix Older Records'),
+                  ),
+                ],
               ),
               const SizedBox(height: 16),
               Expanded(
@@ -4044,24 +4202,33 @@ class _AuditLogsPage extends StatelessWidget {
                         ],
                         rows: logs.map((log) {
                           final data = log.data();
+                          final action = data['action']?.toString() ?? 'unknown_action';
                           final previous = data['previousStatus']?.toString();
                           final next = data['newStatus']?.toString();
-                          final actor = data['adminId']?.toString() ??
-                              data['submittedBy']?.toString();
-                          final target = data['trailName']?.toString() ??
+                          // Prefers the human-readable email/name written at
+                          // the time of the action; falls back to the raw
+                          // uid only for older records written before that
+                          // enrichment existed.
+                          final actor = data['adminEmail']?.toString() ??
+                              data['submitterName']?.toString() ??
+                              data['adminId']?.toString() ??
+                              data['submittedBy']?.toString() ??
+                              (action == 'auto_close_abandoned_room' ? 'System' : null);
+                          final target = data['targetName']?.toString() ??
+                              data['trailName']?.toString() ??
                               data['mountainName']?.toString() ??
+                              data['targetEmail']?.toString() ??
                               data['targetId']?.toString();
                           final statusChange = [
                             if (previous != null && previous != 'null') previous,
                             if (next != null && next != 'null') next,
-                          ].join(' â†’ ');
+                          ].join(' → ');
                           return DataRow(
                             cells: [
                               DataCell(Text(_formatTimestamp(data['createdAt']).isEmpty
                                   ? 'Unknown'
                                   : _formatTimestamp(data['createdAt']))),
-                              DataCell(Text(_actionVerb(
-                                  data['action']?.toString() ?? 'unknown_action'))),
+                              DataCell(Text(_actionVerb(action))),
                               DataCell(Text(actor ?? '—')),
                               DataCell(Text(target ?? '—')),
                               DataCell(Text(statusChange.isEmpty ? '—' : statusChange)),
@@ -4095,21 +4262,50 @@ class _AuditLogsPage extends StatelessWidget {
     String documentId,
     Map<String, dynamic> data,
   ) {
-    final fields = <String, dynamic>{'logId': documentId, ...data};
+    final action = data['action']?.toString() ?? 'unknown_action';
+    final adminEmail = data['adminEmail']?.toString();
+    final adminId = data['adminId']?.toString();
+    final targetName = data['targetName']?.toString();
+    final targetEmail = data['targetEmail']?.toString();
+    final targetId = data['targetId']?.toString();
+    final previous = data['previousStatus']?.toString();
+    final next = data['newStatus']?.toString();
+    final reason = data['reason']?.toString();
+    final change = [
+      if (previous != null && previous != 'null') previous,
+      if (next != null && next != 'null') next,
+    ].join(' → ');
+
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Audit Record'),
+        title: Text(_actionVerb(action)),
         content: SizedBox(
-          width: 520,
+          width: 480,
           child: SingleChildScrollView(
             child: Column(
-              children: fields.entries.map((entry) {
-                final value = entry.value is Timestamp
-                    ? _formatTimestamp(entry.value)
-                    : entry.value?.toString() ?? '—';
-                return _UserDetailRow(label: entry.key, value: value);
-              }).toList(),
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _UserDetailRow(
+                  label: 'Date',
+                  value: _formatTimestamp(data['createdAt']).isEmpty
+                      ? 'Unknown'
+                      : _formatTimestamp(data['createdAt']),
+                ),
+                _UserDetailRow(label: 'Admin', value: adminEmail ?? adminId ?? '—'),
+                if (targetName != null)
+                  _UserDetailRow(label: 'Target', value: targetName),
+                if (targetEmail != null)
+                  _UserDetailRow(
+                    label: targetName != null ? 'Target Email' : 'Target',
+                    value: targetEmail,
+                  ),
+                if (targetName == null && targetEmail == null && targetId != null)
+                  _UserDetailRow(label: 'Target', value: targetId),
+                if (change.isNotEmpty) _UserDetailRow(label: 'Change', value: change),
+                if (reason != null && reason.isNotEmpty && reason != 'null')
+                  _UserDetailRow(label: 'Reason', value: reason),
+              ],
             ),
           ),
         ),
