@@ -164,3 +164,58 @@ Future<String> fetchGeminiImageResponse({
 
   return '';
 }
+
+/// Calls the Gemini `embedContent` endpoint — turns [text] into a numeric
+/// vector for the Kyrielle knowledge-base RAG lookup (kyrielle_rag_service.dart).
+/// Same fail-open contract as the other Gemini calls here: returns null on
+/// any problem (missing/exhausted key, network error, bad response), and
+/// callers must treat that as "couldn't retrieve" and fall back to
+/// answering without retrieved context, never as a hard failure.
+Future<List<double>?> fetchGeminiEmbedding({
+  required String apiKey,
+  required String text,
+  Duration timeout = const Duration(seconds: 15),
+}) async {
+  if (apiKey.isEmpty || text.trim().isEmpty) {
+    return null;
+  }
+
+  try {
+    final uri = Uri.https(
+      'generativelanguage.googleapis.com',
+      '/v1beta/models/gemini-embedding-2:embedContent',
+      {'key': apiKey},
+    );
+    final response = await http
+        .post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({
+            'model': 'models/gemini-embedding-2',
+            'content': {
+              'parts': [
+                {'text': text},
+              ],
+            },
+          }),
+        )
+        .timeout(timeout);
+
+    if (response.statusCode != 200) {
+      debugPrint(
+        'Gemini embedding request failed: ${response.statusCode} ${response.body}',
+      );
+      return null;
+    }
+
+    final body = json.decode(response.body);
+    final values = body['embedding']?['values'];
+    if (values is List) {
+      return values.map((value) => (value as num).toDouble()).toList();
+    }
+  } catch (error) {
+    debugPrint('Gemini embedding request threw: $error');
+  }
+
+  return null;
+}

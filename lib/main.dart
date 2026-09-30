@@ -21,6 +21,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
 import 'package:tunga/screens/account_suspended_screen.dart';
+import 'package:tunga/services/kyrielle_rag_service.dart';
 import 'package:tunga/screens/kyrielle_companion_chat_screen.dart';
 import 'package:tunga/screens/agak_emotion_showcase_screen.dart';
 import 'package:tunga/screens/agak_scheduled_hikes_screen.dart';
@@ -1488,6 +1489,18 @@ Future<String> _answerHikeAssistantQuestion({
     final contextBuffer = StringBuffer();
     if (extraContext != null && extraContext.isNotEmpty) {
       contextBuffer.writeln(extraContext);
+    }
+    // RAG lookup: retrieves only the app-specific facts relevant to this
+    // question (Hike Room rules, SOS mechanics, verification flow, etc.)
+    // instead of always stuffing the whole FAQ list into every prompt.
+    // Fails open to an empty list — Gemini still answers using whatever
+    // other context is available above.
+    final retrievedFaqAnswers = await KyrielleRagService.instance
+        .retrieveRelevantAnswers(question, apiKey: aiApiKey);
+    if (retrievedFaqAnswers.isNotEmpty) {
+      contextBuffer.writeln(
+        'Relevant Agakbay app facts:\n${retrievedFaqAnswers.join('\n')}',
+      );
     }
     if (trail != null) {
       contextBuffer.writeln(
@@ -9626,6 +9639,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     final confirmed = await _showLogoutConfirmationDialog();
                     if (confirmed) {
                       await _firebaseAuth.signOut();
+                      // AuthGate (the app's root) reacts to the sign-out and
+                      // swaps to WelcomeScreen on its own, but it's buried
+                      // under this DashboardScreen route — without popping
+                      // back down to it, the screen never visibly changes.
+                      if (mounted) {
+                        Navigator.of(
+                          context,
+                        ).popUntil((route) => route.isFirst);
+                      }
                     }
                   },
                 ),
