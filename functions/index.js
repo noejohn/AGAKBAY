@@ -771,3 +771,79 @@ exports.notifyOnCommunityCommentCreated = onDocumentCreated(
       });
   },
 );
+
+async function notifyCommunityLike(event, isCommentLike) {
+  const snapshot = event.data;
+  if (!snapshot) {
+    return;
+  }
+
+  const { postId, commentId, likerId: pathLikerId } = event.params;
+  const likerId = String(snapshot.data()?.userId || pathLikerId || "").trim();
+  if (!likerId) {
+    return;
+  }
+
+  const postSnap = await db.collection("community_posts").doc(postId).get();
+  if (!postSnap.exists) {
+    return;
+  }
+
+  let recipientId = String(postSnap.data()?.authorId || "").trim();
+  if (isCommentLike) {
+    const commentSnap = await db
+      .collection("community_posts")
+      .doc(postId)
+      .collection("comments")
+      .doc(commentId)
+      .get();
+    if (!commentSnap.exists) {
+      return;
+    }
+    recipientId = String(commentSnap.data()?.authorId || "").trim();
+  }
+  if (!recipientId || recipientId === likerId) {
+    return;
+  }
+
+  const notificationRef = db
+    .collection("users")
+    .doc(recipientId)
+    .collection("notifications")
+    .doc(event.id);
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(notificationRef);
+    if (existing.exists) {
+      return;
+    }
+    transaction.create(notificationRef, {
+      type: "like",
+      title: isCommentLike ? "Your comment got a like" : "Your post got a like",
+      body: isCommentLike
+        ? "Someone liked your comment."
+        : "Someone liked your post.",
+      postId,
+      ...(isCommentLike ? { commentId } : {}),
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+exports.notifyOnCommunityPostLiked = onDocumentCreated(
+  {
+    document: "community_posts/{postId}/likes/{likerId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  (event) => notifyCommunityLike(event, false),
+);
+
+exports.notifyOnCommunityCommentLiked = onDocumentCreated(
+  {
+    document: "community_posts/{postId}/comments/{commentId}/likes/{likerId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  (event) => notifyCommunityLike(event, true),
+);
