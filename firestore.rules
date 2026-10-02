@@ -122,12 +122,14 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if signedIn()
         && request.resource.data.guideId == request.auth.uid;
-      // The guide can change anything (status, route, etc.); a joining or
-      // leaving participant only ever touches `updatedAt` on the room doc
-      // itself (see joinRoom/leaveRoom in hike_room_service.dart) — this
-      // lets that through without opening the whole room to every hiker.
+      // The guide can edit room details and start the room. Ending is handled
+      // by the endHikeRoom callable so participant memberships and user room
+      // pointers are cleaned up together. A joining or leaving participant
+      // only touches `updatedAt` on this room document.
       allow update: if signedIn() && (
-        resource.data.guideId == request.auth.uid ||
+        (resource.data.guideId == request.auth.uid
+          && (request.resource.data.status != 'ended'
+            || resource.data.status == 'ended')) ||
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt'])
       );
 

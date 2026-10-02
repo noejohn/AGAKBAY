@@ -1,10 +1,9 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 
-// User-owned hike data is stored under hike_rooms, not users/{uid}. Keep SOS
-// history for safety, anonymize the deleted sender, remove their membership,
-// and end any room they guide so other participants are not left in a live
-// room without its guide.
+// User-owned hike data is stored under hike_rooms, not users/{uid}. Remove
+// their SOS event details and membership, and end any room they guide so
+// other participants are not left in a live room without its guide.
 async function deleteUserHikeRecords(db, uid) {
   const [sosEvents, participants, sosNotifications, rooms] = await Promise.all([
     db.collectionGroup("sos_events").where("senderId", "==", uid).get(),
@@ -20,25 +19,15 @@ async function deleteUserHikeRecords(db, uid) {
   const queueUpdate = (ref, data) => writesByPath.set(ref.path, { ref, data });
   const queueDelete = (ref) => writesByPath.set(ref.path, { ref, delete: true });
 
-  for (const doc of sosEvents.docs) {
-    queueUpdate(doc.ref, {
-      senderName: "user",
-      senderId: admin.firestore.FieldValue.delete(),
-    });
-  }
+  for (const doc of sosEvents.docs) queueDelete(doc.ref);
   for (const doc of sosNotifications.docs) {
-    const notification = doc.data();
-    const event = sosEvents.docs.find((eventDoc) =>
-      eventDoc.id === notification.eventId &&
-      eventDoc.ref.parent.parent?.id === notification.roomId,
-    );
-    const roomCode = notification.roomCode || event?.data().roomCode ||
-      notification.roomId || "";
-    queueUpdate(doc.ref, {
-      senderName: "user",
-      senderId: admin.firestore.FieldValue.delete(),
-      message: `user has triggered an SOS in hike room ${roomCode}.`,
-    });
+    queueDelete(doc.ref);
+  }
+  for (const doc of sosEvents.docs) {
+    const roomId = doc.ref.parent.parent?.id;
+    if (roomId) {
+      queueDelete(db.collection("notifications").doc(`sos_${roomId}_${doc.id}`));
+    }
   }
 
   // Close rooms led by this user, finish memberships for the remaining
@@ -101,6 +90,75 @@ async function deleteUserHikeRecords(db, uid) {
     await batch.commit();
   }
 }
+
+exports.cleanupOrphanedSosEvents = onCall(
+  { timeoutSeconds: 300, memory: "512MiB" },
+  async (request) => {
+    if (request.auth?.token?.admin !== true) {
+      throw new HttpsError("permission-denied", "Admin access required.");
+    }
+
+    const db = admin.firestore();
+    const [events, anonymizedEvents] = await Promise.all([
+      db.collectionGroup("sos_events").where("senderId", "!=", "").get(),
+      db.collectionGroup("sos_events").where("senderName", "==", "user").get(),
+    ]);
+
+    const candidates = new Map();
+    for (const event of events.docs) candidates.set(event.ref.path, event);
+    // Older account deletion code anonymized senderName and removed senderId.
+    for (const event of anonymizedEvents.docs) {
+      if (!event.data().senderId) candidates.set(event.ref.path, event);
+    }
+
+    const senderIds = [...new Set([...candidates.values()]
+      .map((event) => event.data().senderId)
+      .filter((uid) => typeof uid === "string" && uid))];
+    const profileExists = new Map();
+    for (let offset = 0; offset < senderIds.length; offset += 400) {
+      const batchIds = senderIds.slice(offset, offset + 400);
+      const profiles = await db.getAll(...batchIds.map((uid) => db.collection("users").doc(uid)));
+      profiles.forEach((profile) => profileExists.set(profile.id, profile.exists));
+    }
+
+    const orphaned = [...candidates.values()].filter((event) => {
+      const uid = event.data().senderId;
+      return !uid || profileExists.get(uid) === false;
+    });
+    const notifications = new Map();
+    for (const event of orphaned) {
+      const roomId = event.ref.parent.parent?.id;
+      if (roomId) {
+        const notificationRef = db.collection("notifications").doc(`sos_${roomId}_${event.id}`);
+        notifications.set(notificationRef.path, notificationRef);
+      }
+    }
+
+    const notificationRefs = [...notifications.values()];
+    const existingNotificationRefs = [];
+    for (let offset = 0; offset < notificationRefs.length; offset += 400) {
+      const snapshots = await db.getAll(...notificationRefs.slice(offset, offset + 400));
+      snapshots.forEach((snapshot) => {
+        if (snapshot.exists) existingNotificationRefs.push(snapshot.ref);
+      });
+    }
+
+    const refsToDelete = [
+      ...orphaned.map((event) => event.ref),
+      ...existingNotificationRefs,
+    ];
+    for (let offset = 0; offset < refsToDelete.length; offset += 450) {
+      const batch = db.batch();
+      for (const ref of refsToDelete.slice(offset, offset + 450)) batch.delete(ref);
+      await batch.commit();
+    }
+
+    return {
+      deletedSosEvents: orphaned.length,
+      deletedSosNotifications: existingNotificationRefs.length,
+    };
+  },
+);
 
 exports.manageUserAccount = onCall(
   { timeoutSeconds: 120, memory: "256MiB" },

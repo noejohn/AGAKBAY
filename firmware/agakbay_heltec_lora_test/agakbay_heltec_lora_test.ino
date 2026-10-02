@@ -13,20 +13,19 @@
 // ============================================================
 
 // Change this one line per board before flashing.
-#define DEVICE_ID "B" // <-- set to "B" on the second board
+#define DEVICE_ID "A" // <-- set to "B" on the second board
 
-// Confirm this matches your antenna's rated band before testing.
-// 433 MHz is a common choice for LoRa projects in the Philippines.
-#define RF_FREQUENCY 433000000 // Hz
+// Keep this matched to the antenna band and identical on both boards.
+#define RF_FREQUENCY 915000000 // Hz
 #define TX_OUTPUT_POWER 14 // dBm
 #define LORA_BANDWIDTH 0 // 0: 125 kHz
-#define LORA_SPREADING_FACTOR 7
+#define LORA_SPREADING_FACTOR 12 // longest-range setting; slower packets
 #define LORA_CODINGRATE 1 // 1: 4/5
 #define LORA_PREAMBLE_LENGTH 8
 #define LORA_SYMBOL_TIMEOUT 0
 #define LORA_FIX_LENGTH_PAYLOAD_ON false
 #define LORA_IQ_INVERSION_ON false
-#define RX_TIMEOUT_VALUE 1000
+#define RX_TIMEOUT_VALUE 0 // continuous receive; required for long SF12 packets
 #define BUFFER_SIZE 64
 
 static SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
@@ -44,7 +43,8 @@ String lastReceived = "";
 int16_t lastRssi = 0;
 int8_t lastSnr = 0;
 unsigned long lastTxMs = 0;
-const unsigned long txIntervalMs = 4000;
+const unsigned long txIntervalMs = 6000;
+const unsigned long unitBStartDelayMs = 3000;
 
 void VextOn() {
   pinMode(Vext, OUTPUT);
@@ -138,7 +138,10 @@ void setup() {
   Serial.println("LoRa ping-pong test ready - unit " DEVICE_ID);
   state = STATE_RX;
   Radio.Rx(RX_TIMEOUT_VALUE);
-  lastTxMs = millis();
+  // Keep the two units' periodic transmissions apart to reduce collisions.
+  // Unit A's first send is due now; unit B starts three seconds later.
+  const unsigned long startDelay = DEVICE_ID[0] == 'B' ? unitBStartDelayMs : 0;
+  lastTxMs = millis() - txIntervalMs + startDelay;
 }
 
 void loop() {

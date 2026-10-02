@@ -1,0 +1,33 @@
+{
+  "configurations": [
+    {
+      "name": "Heltec ESP32",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/cores/esp32",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/variants/heltec_wireless_tracker",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/variants/**",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/libraries/**",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/esp32-arduino-libs/**/include/**",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/esp32-arduino-libs/**/include/newlib/platform_include",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/xtensa-esp-elf-gcc/*/xtensa-esp-elf/include",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/xtensa-esp-elf-gcc/*/xtensa-esp-elf/sys-include",
+        "${env:USERPROFILE}/Documents/Arduino/libraries/**"
+      ],
+      "defines": [
+        "ARDUINO=10819",
+        "ARDUINO_ARCH_ESP32",
+        "ESP32",
+        "MCU_ESP32_S3",
+        "HELTEC_BOARD=34",
+        "WIRELESS_TRACKER",
+        "SLOW_CLK_TPYE=0",
+        "RADIO_CHIP_SX1262"
+      ],
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-gcc-x64"
+    }
+  ],
+  "version": 4
+}

@@ -33,6 +33,7 @@ import 'package:tunga/services/auth_database_service.dart';
 import 'package:auth0_flutter/auth0_flutter.dart';
 import 'package:tunga/services/auth0_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
+import 'package:tunga/services/heltec_ble_service.dart';
 import 'package:tunga/services/onboarding_service.dart';
 import 'package:tunga/models/agak_mountain.dart';
 import 'package:tunga/models/agak_recommendation.dart';
@@ -1150,7 +1151,6 @@ class _MountainOrganizer {
   final bool isExternalSuggestion;
 }
 
-
 /// Whether [normalizedQuestion] is asking about weather/conditions — the
 /// trigger for pulling a live GPS + weather snapshot into the answer
 /// instead of letting the AI guess or say it has no real-time data, and
@@ -2252,28 +2252,52 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final maxDistanceKm = isNearSearch ? 30.0 : 10.0;
       final searchAnchorName = _searchedTrailAnchor?.name;
       final searchAnchor = _searchedTrailAnchor;
+      void logProviderError(String provider, Object error) {
+        final safeError = error.toString().replaceAll(
+          _mapsApiKey,
+          '[redacted]',
+        );
+        debugPrint('Nearby trails: $provider failed: $safeError');
+      }
 
       List<_NearbyTrail> trails = const <_NearbyTrail>[];
+      var providerFailed = false;
       if (_mapsApiKey.isNotEmpty) {
-        trails = await _fetchNearbyTrailsByDistance(
-          center,
-          maxDistanceKm: maxDistanceKm,
-          searchAnchorName: searchAnchorName,
-        );
+        try {
+          trails = await _fetchNearbyTrailsByDistance(
+            center,
+            maxDistanceKm: maxDistanceKm,
+            searchAnchorName: searchAnchorName,
+          );
+        } catch (error) {
+          // A failed Google Places request should not block the next source.
+          logProviderError('Google Places nearby search', error);
+          providerFailed = true;
+        }
       }
       if (trails.isEmpty && _mapsApiKey.isNotEmpty) {
-        trails = await _fetchNearbyTrailsFromPlaces(
-          center,
-          maxDistanceKm: maxDistanceKm,
-          searchAnchorName: searchAnchorName,
-        );
+        try {
+          trails = await _fetchNearbyTrailsFromPlaces(
+            center,
+            maxDistanceKm: maxDistanceKm,
+            searchAnchorName: searchAnchorName,
+          );
+        } catch (error) {
+          logProviderError('Google Places text search', error);
+          providerFailed = true;
+        }
       }
       if (trails.isEmpty) {
-        trails = await _fetchNearbyTrailsFromNominatim(
-          center,
-          maxDistanceKm: maxDistanceKm,
-          searchAnchorName: searchAnchorName,
-        );
+        try {
+          trails = await _fetchNearbyTrailsFromNominatim(
+            center,
+            maxDistanceKm: maxDistanceKm,
+            searchAnchorName: searchAnchorName,
+          );
+        } catch (error) {
+          logProviderError('OpenStreetMap search', error);
+          providerFailed = true;
+        }
       }
       if (isNearSearch && searchAnchor != null) {
         trails = trails.where((trail) {
@@ -2290,10 +2314,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       setState(() {
         _nearbyTrails = trails;
         if (trails.isEmpty) {
-          _nearbyTrailsMessage = 'No nearby mountains found in this area.';
+          _nearbyTrailsMessage = providerFailed
+              ? 'Nearby mountains unavailable right now. Check your internet connection and Maps API setup, then retry.'
+              : 'No nearby mountains found in this area.';
         }
       });
-    } catch (_) {
+    } catch (error) {
+      final safeError = error.toString().replaceAll(_mapsApiKey, '[redacted]');
+      debugPrint('Nearby trails: unexpected failure: $safeError');
       if (!mounted) {
         return;
       }
@@ -3591,7 +3619,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         backgroundColor: AgakColors.olive,
         content: Text(
           message,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
         ),
         leading: const Icon(Icons.check_circle, color: Colors.white),
         actions: [
@@ -5135,6 +5166,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         builder: (_) => _HikingModeScreen(
           trail: trail,
           mapsApiKey: _mapsApiKey,
+          hikeRoom: room,
           communityTrail: sharedRoute,
           preferredGpxAssetPath: room.routeAssetPath.isEmpty
               ? null
@@ -6271,9 +6303,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // _weatherApiKey at all. Kept as its own named method (rather than
   // repointing every call site at WeatherService directly) purely so the
   // several existing callers below don't all need touching.
-  Future<AgakWeatherSnapshot?> _fetchCurrentWeatherSnapshot(
-    LatLng location,
-  ) {
+  Future<AgakWeatherSnapshot?> _fetchCurrentWeatherSnapshot(LatLng location) {
     return _weatherService.fetchCurrentSnapshot(
       latitude: location.latitude,
       longitude: location.longitude,
@@ -9627,7 +9657,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               title: 'Account',
               children: [
                 TourGuideApplicationStatusTile(
-                  currentAccountType: _currentUserProfile['accountType'] as String?,
+                  currentAccountType:
+                      _currentUserProfile['accountType'] as String?,
                 ),
                 _profileActionTile(
                   icon: Icons.logout_rounded,
@@ -9995,7 +10026,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget _notificationBellButton() {
     final user = _firebaseAuth.currentUser;
     if (user == null) {
-      return _circleButton(icon: Icons.notifications_none_rounded, onTap: _openNotificationsSheet);
+      return _circleButton(
+        icon: Icons.notifications_none_rounded,
+        onTap: _openNotificationsSheet,
+      );
     }
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _firestore
@@ -10009,15 +10043,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
         return Stack(
           clipBehavior: Clip.none,
           children: [
-            _circleButton(icon: Icons.notifications_none_rounded, onTap: _openNotificationsSheet),
+            _circleButton(
+              icon: Icons.notifications_none_rounded,
+              onTap: _openNotificationsSheet,
+            ),
             if (unreadCount > 0)
               Positioned(
                 right: -2,
                 top: -2,
                 child: IgnorePointer(
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    constraints: const BoxConstraints(
+                      minWidth: 18,
+                      minHeight: 18,
+                    ),
                     decoration: BoxDecoration(
                       color: AgakColors.maroon,
                       borderRadius: BorderRadius.circular(10),
@@ -12993,6 +13036,7 @@ class _HikingModeScreen extends StatefulWidget {
     this.selectedRouteLabel,
     this.recordingNewTrail = false,
     this.fetchWeatherSnapshot,
+    this.hikeRoom,
   });
 
   final _NearbyTrail trail;
@@ -13009,12 +13053,17 @@ class _HikingModeScreen extends StatefulWidget {
   /// mid-hike weather re-checks are silently skipped.
   final Future<AgakWeatherSnapshot?> Function(LatLng location)?
   fetchWeatherSnapshot;
+  final HikeRoom? hikeRoom;
 
   @override
   State<_HikingModeScreen> createState() => _HikingModeScreenState();
 }
 
 class _HikingModeScreenState extends State<_HikingModeScreen> {
+  final HikeRoomService _hikeRoomService = HikeRoomService();
+  StreamSubscription<List<RoomSosEvent>>? _roomSosSubscription;
+  List<RoomSosEvent> _roomSosEvents = const <RoomSosEvent>[];
+  Object? _roomSosStreamError;
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   GoogleMapController? _googleMapController;
@@ -13101,6 +13150,23 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   @override
   void initState() {
     super.initState();
+    final room = widget.hikeRoom;
+    if (room != null) {
+      _roomSosSubscription = _hikeRoomService.watchSosEvents(room.id).listen(
+        (events) {
+          if (mounted) {
+            setState(() {
+              _roomSosEvents = events;
+              _roomSosStreamError = null;
+            });
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          debugPrint('Could not load hike room SOS events: $error');
+          if (mounted) setState(() => _roomSosStreamError = error);
+        },
+      );
+    }
     _checkpoints = const <_HikeCheckpoint>[];
     unawaited(_startConnectivityMonitor());
     _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -13127,6 +13193,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
 
   @override
   void dispose() {
+    _roomSosSubscription?.cancel();
     _elapsedTimer?.cancel();
     _positionSubscription?.cancel();
     _connectivitySubscription?.cancel();
@@ -13161,11 +13228,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   // doesn't guarantee it's fast enough to finish — either way, hiking mode
   // proceeds afterward regardless of how many tiles actually downloaded.
   Future<void> _preCacheOfflineMapTiles(LatLng start) async {
-    final points = <LatLng>[
-      start,
-      ?_hikeTarget,
-      ..._plannedRoutePoints,
-    ];
+    final points = <LatLng>[start, ?_hikeTarget, ..._plannedRoutePoints];
     if (!mounted) {
       return;
     }
@@ -14725,7 +14788,8 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
           'Trail: ${widget.trail.name}\n'
           'Latitude: ${location.latitude.toStringAsFixed(6)}\n'
           'Longitude: ${location.longitude.toStringAsFixed(6)}\n\n'
-          'Bluetooth/LoRa transmission will be connected in the next step.',
+          'The alert will be sent through the hike room and, when a Heltec '
+          'device is connected, broadcast over LoRa as well.',
       cancelLabel: 'Cancel',
       confirmLabel: 'Send SOS',
       confirmIcon: Icons.sos_rounded,
@@ -14745,33 +14809,49 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     debugPrint('Prepared LoRa SOS payload: $payload');
 
     var sentToRoom = false;
+    var sentByDevice = false;
     try {
-      final roomService = HikeRoomService();
-      final room = await roomService.getActiveRoom();
-      if (room != null && room.status == HikeRoomStatus.active) {
-        await roomService.sendSos(
-          roomId: room.id,
+      try {
+        final room = widget.hikeRoom ?? await _hikeRoomService.getActiveRoom();
+        if (room != null && room.status == HikeRoomStatus.active) {
+          await _hikeRoomService.sendSos(
+            roomId: room.id,
+            latitude: location.latitude,
+            longitude: location.longitude,
+          );
+          sentToRoom = true;
+        }
+      } catch (error) {
+        debugPrint('Unable to send SOS to hike room: $error');
+      }
+
+      final ble = HeltecBleService.instance;
+      if (ble.isConnected) {
+        sentByDevice = await ble.sendSos(
+          hikerName: _sosSenderName(),
           latitude: location.latitude,
           longitude: location.longitude,
         );
-        sentToRoom = true;
       }
-    } catch (error) {
-      debugPrint('Unable to send SOS to hike room: $error');
-    }
 
-    if (!mounted) return;
-    setState(() => _sendingSos = false);
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          sentToRoom
-              ? 'SOS sent to your Tour Guide through the hike room.'
-              : 'No active internet room received the SOS. Heltec/LoRa is not connected yet.',
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            sentToRoom && sentByDevice
+                ? 'SOS sent through the hike room and Heltec LoRa.'
+                : sentToRoom
+                ? 'SOS sent to your Tour Guide through the hike room.'
+                : sentByDevice
+                ? 'SOS sent over Heltec LoRa. No active internet room received it.'
+                : 'No active internet room received the SOS. Connect a Heltec device for offline SOS.',
+          ),
+          backgroundColor: AgakColors.maroon,
         ),
-        backgroundColor: AgakColors.maroon,
-      ),
-    );
+      );
+    } finally {
+      if (mounted) setState(() => _sendingSos = false);
+    }
   }
 
   int _findNearestRouteIndex(LatLng point) {
@@ -14906,6 +14986,35 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         ),
       );
     }
+    for (final event in _roomSosEvents) {
+      markers.add(
+        fm.Marker(
+          point: ll.LatLng(event.latitude, event.longitude),
+          width: 44,
+          height: 44,
+          child: const Icon(
+            Icons.sos_rounded,
+            color: Colors.redAccent,
+            size: 38,
+          ),
+        ),
+      );
+    }
+    final relay = HeltecBleService.instance;
+    if (relay.lastRelayLatitude != null && relay.lastRelayLongitude != null) {
+      markers.add(
+        fm.Marker(
+          point: ll.LatLng(relay.lastRelayLatitude!, relay.lastRelayLongitude!),
+          width: 44,
+          height: 44,
+          child: const Icon(
+            Icons.sos_rounded,
+            color: Colors.deepOrange,
+            size: 38,
+          ),
+        ),
+      );
+    }
     return markers;
   }
 
@@ -14957,9 +15066,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       Marker(
         markerId: const MarkerId('destination'),
         position: destination,
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          BitmapDescriptor.hueGreen,
-        ),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
       ),
     };
     final current = _currentLocation;
@@ -14974,6 +15081,31 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
           rotation: _currentHeadingDegrees ?? 0,
           flat: true,
           anchor: const Offset(0.5, 0.5),
+        ),
+      );
+    }
+    for (final event in _roomSosEvents) {
+      markers.add(
+        Marker(
+          markerId: MarkerId('sos_${event.id}'),
+          position: LatLng(event.latitude, event.longitude),
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          infoWindow: InfoWindow(title: 'SOS: ${event.senderName}'),
+        ),
+      );
+    }
+    final relay = HeltecBleService.instance;
+    if (relay.lastRelayLatitude != null && relay.lastRelayLongitude != null) {
+      markers.add(
+        Marker(
+          markerId: const MarkerId('sos_lora_relay'),
+          position: LatLng(relay.lastRelayLatitude!, relay.lastRelayLongitude!),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueOrange,
+          ),
+          infoWindow: InfoWindow(
+            title: 'Offline SOS: ${relay.lastRelaySenderName ?? 'Hiker'}',
+          ),
         ),
       );
     }
@@ -15487,6 +15619,96 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                     ),
                   ),
                 ),
+                if (widget.hikeRoom != null && _roomSosStreamError != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AgakColors.maroon.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AgakColors.maroon.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.cloud_off_rounded, color: Colors.redAccent),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Could not load room SOS alerts. Check your connection and try again.',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                if (widget.hikeRoom != null && _roomSosEvents.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    constraints: const BoxConstraints(maxHeight: 108),
+                    decoration: BoxDecoration(
+                      color: AgakColors.surface,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AgakColors.maroon.withValues(alpha: 0.18),
+                      ),
+                    ),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: math.min(_roomSosEvents.length, 3),
+                      itemBuilder: (context, index) {
+                        final event = _roomSosEvents[index];
+                        final acknowledged = event.status == 'acknowledged';
+                        final isGuide =
+                            FirebaseAuth.instance.currentUser?.uid ==
+                            widget.hikeRoom?.guideId;
+                        return ListTile(
+                          dense: true,
+                          leading: Icon(
+                            acknowledged
+                                ? Icons.done_all_rounded
+                                : Icons.sos_rounded,
+                            color: acknowledged
+                                ? Colors.green
+                                : Colors.redAccent,
+                          ),
+                          title: Text('${event.senderName} sent SOS'),
+                          subtitle: Text(
+                            '${event.latitude.toStringAsFixed(5)}, ${event.longitude.toStringAsFixed(5)} · '
+                            '${acknowledged ? 'Acknowledged' : 'Pending'}',
+                          ),
+                          trailing: !acknowledged && isGuide
+                              ? TextButton(
+                                  onPressed: () async {
+                                    try {
+                                      await _hikeRoomService.acknowledgeSos(
+                                        widget.hikeRoom!.id,
+                                        event.id,
+                                      );
+                                    } catch (error) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(error.toString()),
+                                          ),
+                                        );
+                                      }
+                                    }
+                                  },
+                                  child: const Text('Acknowledge'),
+                                )
+                              : null,
+                        );
+                      },
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 10),
                 Row(
                   children: [
@@ -16001,7 +16223,8 @@ class _SignUpScreenState extends State<SignUpScreen> {
                                   met: _passwordHasNumber(password),
                                 ),
                                 _PasswordRequirementRow(
-                                  label: 'Contains a special character (e.g. ! @ # \$)',
+                                  label:
+                                      'Contains a special character (e.g. ! @ # \$)',
                                   met: _passwordHasSpecialChar(password),
                                 ),
                               ],

@@ -20,7 +20,10 @@ val weatherApiKey = localProperties.getProperty("WEATHER_API_KEY", mapsApiKey)
 val customSearchApiKey = localProperties.getProperty("CUSTOM_SEARCH_API_KEY", "")
 val customSearchEngineId = localProperties.getProperty("CUSTOM_SEARCH_ENGINE_ID", "")
 val aiApiKey = localProperties.getProperty("AI_API_KEY", "")
-val auth0Domain = localProperties.getProperty("AUTH0_DOMAIN", "")
+val auth0Domain = localProperties.getProperty(
+    "AUTH0_DOMAIN",
+    "dev-cmd5w5abm4lstmka.us.auth0.com",
+)
 
 android {
     namespace = "com.example.tunga"

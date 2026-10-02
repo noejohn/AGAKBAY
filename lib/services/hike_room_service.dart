@@ -416,8 +416,15 @@ class HikeRoomService {
     timestampField: 'startedAt',
   );
 
-  Future<void> endRoom(String roomId) =>
-      _setRoomStatus(roomId, HikeRoomStatus.ended, timestampField: 'endedAt');
+  Future<void> endRoom(String roomId) async {
+    try {
+      await _functions.httpsCallable('endHikeRoom').call({
+        'roomId': roomId,
+      });
+    } on FirebaseFunctionsException catch (error) {
+      throw StateError(error.message ?? 'Could not end the hike room.');
+    }
+  }
 
   // Sent every ~60s by the guide's device while a room is active and the
   // app is in the foreground. closeAbandonedHikeRooms (functions/
@@ -447,26 +454,6 @@ class HikeRoomService {
       if (status == HikeRoomStatus.active)
         'guideLastActiveAt': FieldValue.serverTimestamp(),
     });
-    if (status == HikeRoomStatus.ended) {
-      final participants = await _roomRef(
-        roomId,
-      ).collection('participants').get();
-      final batch = _firestore.batch();
-      for (final participant in participants.docs) {
-        if ((participant.data()['membershipStatus']?.toString() ?? 'active') !=
-            'active') {
-          continue;
-        }
-        batch.update(_userRef(participant.id), {
-          'activeHikeRoomId': FieldValue.delete(),
-        });
-        batch.update(participant.reference, {
-          'membershipStatus': 'room_ended',
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-      }
-      await batch.commit();
-    }
   }
 
   Future<void> leaveRoom(String roomId) async {

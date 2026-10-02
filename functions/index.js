@@ -6,12 +6,17 @@ const { getRedisClient, weatherCacheKey } = require("./redisCache");
 const { enforceRateLimit } = require("./rateLimit");
 const { exchangeAuth0Token } = require("./auth0Exchange");
 const { reviewTourGuideApplication } = require("./adminActions");
-const { manageUserAccount, createAdminAccount } = require("./userAccountActions");
+const {
+  manageUserAccount,
+  createAdminAccount,
+  cleanupOrphanedSosEvents,
+} = require("./userAccountActions");
 const {
   updateParticipantBluetoothStatus,
   renameBluetoothDevice,
 } = require("./bluetoothActivity");
 const { closeAbandonedHikeRooms } = require("./hikeRoomMaintenance");
+const { endHikeRoom } = require("./endHikeRoom");
 const { backfillAuditLogNames } = require("./auditLogMaintenance");
 const { reviewTrailSubmission } = require("./trailReview");
 const { sanitizeRoutePoints } = require("./routePoints");
@@ -22,9 +27,11 @@ exports.exchangeAuth0Token = exchangeAuth0Token;
 exports.reviewTourGuideApplication = reviewTourGuideApplication;
 exports.manageUserAccount = manageUserAccount;
 exports.createAdminAccount = createAdminAccount;
+exports.cleanupOrphanedSosEvents = cleanupOrphanedSosEvents;
 exports.updateParticipantBluetoothStatus = updateParticipantBluetoothStatus;
 exports.renameBluetoothDevice = renameBluetoothDevice;
 exports.closeAbandonedHikeRooms = closeAbandonedHikeRooms;
+exports.endHikeRoom = endHikeRoom;
 exports.backfillAuditLogNames = backfillAuditLogNames;
 exports.reviewTrailSubmission = reviewTrailSubmission;
 exports.sanitizeRoutePoints = sanitizeRoutePoints;

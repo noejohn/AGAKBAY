@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_sleep.h>
 #include "HT_TinyGPS++.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -14,6 +15,13 @@
 #define VGNSS_CTRL 3
 #define GNSS_RX_PIN 33
 #define GNSS_TX_PIN 34
+
+// Heltec's onboard BOOT button is GPIO0 and is active-low. Holding it for
+// two seconds puts the ESP32, BLE, GNSS, and LoRa radio into deep sleep;
+// pressing it again wakes the board and restarts setup(). This saves power
+// but does not physically disconnect the battery.
+#define POWER_BUTTON_PIN 0
+#define POWER_BUTTON_HOLD_MS 2000
 
 // Change this one line before flashing each board: "AGAKBAY-Hiker" for a
 // hiker's unit, "AGAKBAY-TourGuide" for the tour guide's unit. The app
@@ -38,13 +46,14 @@
 #define RF_FREQUENCY 915000000 // Hz
 #define TX_OUTPUT_POWER 14 // dBm
 #define LORA_BANDWIDTH 0 // 0: 125 kHz
-#define LORA_SPREADING_FACTOR 7
+#define LORA_SPREADING_FACTOR 12
 #define LORA_CODINGRATE 1 // 1: 4/5
 #define LORA_PREAMBLE_LENGTH 8
 #define LORA_SYMBOL_TIMEOUT 0
 #define LORA_FIX_LENGTH_PAYLOAD_ON false
 #define LORA_IQ_INVERSION_ON false
-#define RX_TIMEOUT_VALUE 1000
+#define RX_TIMEOUT_VALUE 0
+#define TX_TIMEOUT_VALUE 10000 // ms; allow long SF12 SOS packets to finish
 #define LORA_BUFFER_SIZE 96
 
 static SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
@@ -97,6 +106,8 @@ double lastRelayLat = 0;
 double lastRelayLng = 0;
 unsigned long sosBannerUntilMs = 0;
 const unsigned long sosBannerDurationMs = 30000;
+unsigned long powerButtonPressedAtMs = 0;
+bool powerButtonShutdownStarted = false;
 
 void VextOn() {
   pinMode(Vext, OUTPUT);
@@ -365,7 +376,7 @@ void setupLora() {
   Radio.SetTxConfig(MODEM_LORA, TX_OUTPUT_POWER, 0, LORA_BANDWIDTH,
                      LORA_SPREADING_FACTOR, LORA_CODINGRATE,
                      LORA_PREAMBLE_LENGTH, LORA_FIX_LENGTH_PAYLOAD_ON,
-                     true, 0, 0, LORA_IQ_INVERSION_ON, 3000);
+                     true, 0, 0, LORA_IQ_INVERSION_ON, TX_TIMEOUT_VALUE);
   Radio.SetRxConfig(MODEM_LORA, LORA_BANDWIDTH, LORA_SPREADING_FACTOR,
                      LORA_CODINGRATE, 0, LORA_PREAMBLE_LENGTH,
                      LORA_SYMBOL_TIMEOUT, LORA_FIX_LENGTH_PAYLOAD_ON,
@@ -378,6 +389,7 @@ void setupLora() {
 void setup() {
   Serial.begin(115200);
   delay(500);
+  pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
   // Temporary checkpoint prints — whichever line prints LAST before the
   // Monitor goes silent tells us exactly which setup step is hanging.
   // Safe to delete once boot completes reliably.
@@ -395,6 +407,33 @@ void setup() {
 }
 
 void loop() {
+  // Long-press the onboard BOOT button to shut down. Deep sleep stops the
+  // ESP32 and peripherals; GPIO0 is configured as the wake source so the
+  // next button press boots the firmware again.
+  if (digitalRead(POWER_BUTTON_PIN) == LOW) {
+    if (powerButtonPressedAtMs == 0) {
+      powerButtonPressedAtMs = millis();
+    } else if (!powerButtonShutdownStarted &&
+               millis() - powerButtonPressedAtMs >= POWER_BUTTON_HOLD_MS) {
+      powerButtonShutdownStarted = true;
+      Serial.println("Power button held: entering deep sleep; press again to wake.");
+      Radio.Sleep();
+      digitalWrite(VGNSS_CTRL, LOW);
+      pinMode(Vext, OUTPUT);
+      digitalWrite(Vext, HIGH);
+      // Avoid waking immediately if the button is still held when sleep
+      // begins. The next press after release will wake the board.
+      while (digitalRead(POWER_BUTTON_PIN) == LOW) {
+        delay(10);
+      }
+      esp_sleep_enable_ext0_wakeup((gpio_num_t)POWER_BUTTON_PIN, 0);
+      esp_deep_sleep_start();
+    }
+  } else {
+    powerButtonPressedAtMs = 0;
+    powerButtonShutdownStarted = false;
+  }
+
   // Temporary debug aid: mirrors raw GPS module output to the Serial
   // Monitor. Readable text starting with "$" (e.g. "$GNRMC,...") means
   // the module is talking and the baud rate is right — TinyGPS++ just
