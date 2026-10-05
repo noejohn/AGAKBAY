@@ -15,6 +15,7 @@
 #define VGNSS_CTRL 3
 #define GNSS_RX_PIN 33
 #define GNSS_TX_PIN 34
+#define BUZZER_PIN 47
 
 // Heltec's onboard BOOT button is GPIO0 and is active-low. Holding it for
 // two seconds puts the ESP32, BLE, GNSS, and LoRa radio into deep sleep;
@@ -64,6 +65,10 @@ BLECharacteristic *sosRelayCharacteristic;
 bool deviceConnected = false;
 unsigned long lastNotifyMs = 0;
 const unsigned long notifyIntervalMs = 5000;
+unsigned long lastDisplayPageMs = 0;
+const unsigned long displayPageIntervalMs = 3000;
+
+int displayPage = 0;
 
 // Set from the phone once it connects (see HikeInfoCallbacks) — empty
 // until then, so the screen just shows placeholder "--" values.
@@ -114,6 +119,13 @@ void VextOn() {
   digitalWrite(Vext, LOW);
 }
 
+void buzzSOS() {
+  // Continuous buzzer for 10 seconds
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(10000);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
 // Redraws the whole screen from current state. Called on every state change
 // (BLE connect/disconnect, hike info received, GPS fix acquired) rather than
 // on a timer — the status only needs to change when something actually
@@ -123,38 +135,86 @@ void updateDisplay() {
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.setFont(ArialMT_Plain_10);
 
-  // A relayed SOS takes over the whole screen for a while — this is the
-  // one state a tour guide needs to see even with the phone put away.
+  // A relayed SOS takes over the whole screen for a while.
   if (sosBannerUntilMs != 0 && millis() < sosBannerUntilMs) {
     display.drawString(0, 0, "!!! SOS RECEIVED !!!");
-    display.drawStringMaxWidth(0, 16, 128, "From: " + lastRelayHikerName);
+
+    display.drawStringMaxWidth(
+        0, 16, 128,
+        "From: " + lastRelayHikerName);
+
     display.drawString(
         0, 34,
         lastRelayHasFix
             ? String(lastRelayLat, 5) + "," + String(lastRelayLng, 5)
             : "Location: no GPS fix yet");
+
     display.drawString(0, 50, "via LoRa - no signal");
+
     display.display();
     return;
   }
 
-  display.drawString(0, 0, deviceConnected ? "BLE: Connected" : "BLE: Advertising...");
-  display.drawString(0, 12, gps.location.isValid() ? "GPS: Locked" : "GPS: Waiting...");
+  // Common status information
+  display.drawString(
+      0, 0,
+      deviceConnected ? "BLE: Connected" : "BLE: Advertising...");
 
+  display.drawString(
+      0, 12,
+      gps.location.isValid() ? "GPS: Locked" : "GPS: Waiting...");
+
+  // Automatically cycle through the details.
   if (isGuideDevice) {
-    display.drawStringMaxWidth(
-        0, 26, 128,
-        "Mountain: " + (hikeMountainName.length() > 0 ? hikeMountainName : "--"));
-    display.drawStringMaxWidth(
-        0, 44, 128,
-        "Hikers: " + (hikeParticipantCount.length() > 0 ? hikeParticipantCount : "--"));
+    if (displayPage == 0) {
+      // Page 1: Mountain
+      display.drawString(0, 28, "Mountain:");
+
+      display.drawStringMaxWidth(
+          0,
+          44,
+          128,
+          hikeMountainName.length() > 0
+              ? hikeMountainName
+              : "--");
+
+    } else {
+      // Page 2: Hikers
+      display.drawString(0, 28, "Hikers:");
+
+      display.drawStringMaxWidth(
+          0,
+          44,
+          128,
+          hikeParticipantCount.length() > 0
+              ? hikeParticipantCount + " Participants"
+              : "--");
+    }
   } else {
-    display.drawStringMaxWidth(
-        0, 26, 128,
-        "Guide: " + (hikeGuideName.length() > 0 ? hikeGuideName : "--"));
-    display.drawStringMaxWidth(
-        0, 44, 128,
-        "Mountain: " + (hikeMountainName.length() > 0 ? hikeMountainName : "--"));
+    if (displayPage == 0) {
+      // Page 1: Guide
+      display.drawString(0, 28, "Guide:");
+
+      display.drawStringMaxWidth(
+          0,
+          44,
+          128,
+          hikeGuideName.length() > 0
+              ? hikeGuideName
+              : "--");
+
+    } else {
+      // Page 2: Mountain
+      display.drawString(0, 28, "Mountain:");
+
+      display.drawStringMaxWidth(
+          0,
+          44,
+          128,
+          hikeMountainName.length() > 0
+              ? hikeMountainName
+              : "--");
+    }
   }
 
   display.display();
@@ -212,6 +272,8 @@ class SosCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+
+
 // --- LoRa radio callbacks ---
 // Half-duplex on a single antenna: the state machine below alternates
 // between listening (RADIO_RX, the normal resting state) and a brief
@@ -250,6 +312,8 @@ void handleReceivedLoraPacket(const String &packet, int16_t rssi) {
   lastRelayLat = latStr.toDouble();
   lastRelayLng = lngStr.toDouble();
   sosBannerUntilMs = millis() + sosBannerDurationMs;
+
+  buzzSOS();
 
   Serial.printf("LoRa: SOS received from %s, fix=%s, at %s,%s (RSSI %d)\n",
                 lastRelayHikerName.c_str(), hasFix ? "yes" : "NO", latStr.c_str(),
@@ -390,6 +454,9 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
   // Temporary checkpoint prints — whichever line prints LAST before the
   // Monitor goes silent tells us exactly which setup step is hanging.
   // Safe to delete once boot completes reliably.
@@ -459,6 +526,12 @@ void loop() {
     }
     updateDisplay();
     lastNotifyMs = millis();
+  }
+
+  if (millis() - lastDisplayPageMs >= displayPageIntervalMs) {
+    displayPage = (displayPage + 1) % 2;
+    updateDisplay();
+    lastDisplayPageMs = millis();
   }
 
   // Send is deferred to here (rather than done inside SosCallbacks::onWrite)
