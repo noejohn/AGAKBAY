@@ -1,12 +1,10 @@
 // The full Admin Dashboard shell shown after a successful sign-in —
-// sidebar navigation + main content area. Only "Dashboard" has real
-// content wired up so far; the rest are placeholders until their backing
-// Cloud Functions/collections exist (tour guide application review,
-// trail review, device registry, audit logs, etc. — see the project's
-// admin-plan sequencing).
+// sidebar navigation + main content area. Sections are backed by Firestore
+// streams and callable Cloud Functions for verification, monitoring, device
+// management, user management, and audit history.
 //
 // Where real Firestore data already exists (trail_submissions,
-// hike_rooms, users' self-declared tour_guide/guideVerified fields),
+// hike_rooms, and user profiles),
 // the stat cards and lists below are wired to live streams rather than
 // hardcoded demo numbers — anything without a backing collection yet
 // honestly shows "—" or an empty-state message instead of invented data.
@@ -1663,6 +1661,7 @@ class _RecentActivityPanel extends StatelessWidget {
                   data['targetName']?.toString() ??
                   data['trailName']?.toString() ??
                   data['mountainName']?.toString() ??
+                  data['roomCode']?.toString() ??
                   '';
               final time = _formatTimestamp(data['createdAt']);
               return Padding(
@@ -1984,6 +1983,34 @@ class _OverviewQuickPanels extends StatelessWidget {
 
 String _actionVerb(String action) {
   switch (action) {
+    case 'send_sos':
+      return 'Sent SOS Alert';
+    case 'acknowledge_sos':
+      return 'Acknowledged SOS Alert';
+    case 'bluetooth_connected':
+      return 'Bluetooth Device Connected';
+    case 'bluetooth_disconnected':
+      return 'Bluetooth Device Disconnected';
+    case 'bluetooth_device_changed':
+      return 'Bluetooth Device Updated';
+    case 'create_hike_room':
+      return 'Created Hike Room';
+    case 'start_hike_room':
+      return 'Started Hike Room';
+    case 'end_hike_room':
+      return 'Ended Hike Room';
+    case 'join_hike_room':
+      return 'Joined Hike Room';
+    case 'leave_hike_room':
+      return 'Left Hike Room';
+    case 'remove_hike_participant':
+      return 'Removed Hiker from Room';
+    case 'start_hiking':
+      return 'Started Hiking';
+    case 'return_to_room':
+      return 'Returned to Room';
+    case 'cleanup_orphaned_sos_events':
+      return 'Removed SOS from Deleted Users';
     case 'create_admin':
       return 'Created Admin Account';
     case 'approve_tour_guide':
@@ -3666,6 +3693,52 @@ class _SosMonitoringPage extends StatefulWidget {
 
 class _SosMonitoringPageState extends State<_SosMonitoringPage> {
   bool _cleaningOrphanedAlerts = false;
+  Set<String> _deletedSenderIds = {};
+  String? _deletedSenderLookupError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDeletedSenderIds();
+  }
+
+  Future<void> _loadDeletedSenderIds() async {
+    try {
+      final result = await FirebaseFunctions.instance
+          .httpsCallable('getDeletedSosSenderIds')
+          .call<Map<String, dynamic>>();
+      final senderIds = result.data['senderIds'];
+      if (senderIds is! List || senderIds.any((uid) => uid is! String)) {
+        throw StateError('Invalid response while resolving deleted SOS users.');
+      }
+      if (!mounted) return;
+      setState(() {
+        _deletedSenderIds = senderIds.cast<String>().toSet();
+        _deletedSenderLookupError = null;
+      });
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _deletedSenderLookupError =
+            error.message ?? 'Could not identify deleted SOS users.';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _deletedSenderLookupError = error.toString());
+    }
+  }
+
+  String _senderName(Map<String, dynamic> eventData) {
+    final senderId = eventData['senderId']?.toString() ?? '';
+    final senderName = eventData['senderName']?.toString().trim() ?? '';
+    final wasAnonymized =
+        senderId.isEmpty && senderName.toLowerCase() == 'user';
+    if ((senderId.isNotEmpty && _deletedSenderIds.contains(senderId)) ||
+        wasAnonymized) {
+      return 'Deleted user';
+    }
+    return senderName;
+  }
 
   Stream<QuerySnapshot<Map<String, dynamic>>> _sosEventsStream() {
     return FirebaseFirestore.instance
@@ -3746,7 +3819,7 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
               if (latitude == null || longitude == null) return null;
               return _SosMapPoint(
                 eventId: event.id,
-                senderName: data['senderName']?.toString().trim() ?? '',
+                senderName: _senderName(data),
                 latitude: latitude,
                 longitude: longitude,
               );
@@ -3768,6 +3841,14 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
               'Live SOS events from Firebase.',
               style: TextStyle(color: Colors.black54),
             ),
+            if (_deletedSenderLookupError != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Could not verify deleted SOS users: '
+                '$_deletedSenderLookupError',
+                style: const TextStyle(color: Colors.redAccent),
+              ),
+            ],
             const SizedBox(height: 10),
             Align(
               alignment: Alignment.centerRight,
@@ -3862,7 +3943,11 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
                     data['roomId']?.toString() ??
                     event.reference.parent.parent?.id ??
                     '';
-                return _SosAlertCard(roomId: roomId, eventData: data);
+                return _SosAlertCard(
+                  roomId: roomId,
+                  eventData: data,
+                  senderName: _senderName(data),
+                );
               }),
             ],
           ],
@@ -4006,15 +4091,18 @@ class _SosRoomMapState extends State<_SosRoomMap> {
 }
 
 class _SosAlertCard extends StatelessWidget {
-  const _SosAlertCard({required this.roomId, required this.eventData});
+  const _SosAlertCard({
+    required this.roomId,
+    required this.eventData,
+    required this.senderName,
+  });
 
   final String roomId;
   final Map<String, dynamic> eventData;
+  final String senderName;
 
   @override
   Widget build(BuildContext context) {
-    final senderName = eventData['senderName']?.toString().trim() ?? '';
-
     final acknowledged = eventData['status']?.toString() == 'acknowledged';
 
     final latitude = (eventData['latitude'] as num?)?.toDouble();
@@ -4247,11 +4335,15 @@ class _BluetoothDevicesPage extends StatelessWidget {
                   rows: devices.map((device) {
                     final data = device.data();
                     final deviceId = data['deviceId']?.toString() ?? '';
-                    final name =
-                        data['displayName']?.toString().trim().isNotEmpty ==
-                            true
-                        ? data['displayName'].toString().trim()
-                        : (data['deviceName']?.toString() ?? 'Heltec device');
+                    final advertisedName =
+                        data['deviceName']?.toString().trim() ?? '';
+                    final adminLabel =
+                        data['displayName']?.toString().trim() ?? '';
+                    final name = advertisedName.isNotEmpty
+                        ? advertisedName
+                        : adminLabel.isNotEmpty
+                        ? adminLabel
+                        : 'Heltec device';
                     final lastActivity = data['lastActivityAt'];
                     final activityDate = lastActivity is Timestamp
                         ? lastActivity.toDate()
@@ -4271,9 +4363,22 @@ class _BluetoothDevicesPage extends StatelessWidget {
                     return DataRow(
                       cells: [
                         DataCell(
-                          Text(
-                            name,
-                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Text(
+                                name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (adminLabel.isNotEmpty && adminLabel != name)
+                                Text(
+                                  'Admin label: $adminLabel',
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
+                            ],
                           ),
                         ),
                         DataCell(
@@ -4328,7 +4433,7 @@ class _BluetoothDevicesPage extends StatelessWidget {
                                   deviceData: data,
                                 ),
                                 icon: const Icon(Icons.edit_outlined, size: 18),
-                                label: const Text('Rename'),
+                                label: const Text('Set label'),
                               ),
                             ],
                           ),
@@ -4535,11 +4640,11 @@ Future<void> _renameBluetoothDevice(
   final newName = await showDialog<String>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Set Device Name'),
+      title: const Text('Set Admin Label'),
       content: TextField(
         controller: controller,
         maxLength: 80,
-        decoration: const InputDecoration(labelText: 'Display name'),
+        decoration: const InputDecoration(labelText: 'Admin label'),
       ),
       actions: [
         TextButton(
@@ -5523,8 +5628,11 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
                           // uid only for older records written before that
                           // enrichment existed.
                           final actor =
+                              data['actorName']?.toString() ??
+                              data['actorEmail']?.toString() ??
                               data['adminEmail']?.toString() ??
                               data['submitterName']?.toString() ??
+                              data['actorId']?.toString() ??
                               data['adminId']?.toString() ??
                               data['submittedBy']?.toString() ??
                               (action == 'auto_close_abandoned_room'
@@ -5586,6 +5694,9 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
     final action = data['action']?.toString() ?? 'unknown_action';
     final adminEmail = data['adminEmail']?.toString();
     final adminId = data['adminId']?.toString();
+    final actorName = data['actorName']?.toString();
+    final actorEmail = data['actorEmail']?.toString();
+    final actorId = data['actorId']?.toString();
     final targetName = data['targetName']?.toString();
     final targetEmail = data['targetEmail']?.toString();
     final targetId = data['targetId']?.toString();
@@ -5614,8 +5725,14 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
                       : _formatTimestamp(data['createdAt']),
                 ),
                 _UserDetailRow(
-                  label: 'Admin',
-                  value: adminEmail ?? adminId ?? '—',
+                  label: 'Actor',
+                  value:
+                      actorName ??
+                      actorEmail ??
+                      adminEmail ??
+                      actorId ??
+                      adminId ??
+                      '—',
                 ),
                 if (targetName != null)
                   _UserDetailRow(label: 'Target', value: targetName),
@@ -5628,6 +5745,31 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
                     targetEmail == null &&
                     targetId != null)
                   _UserDetailRow(label: 'Target', value: targetId),
+                if (data['roomCode'] != null)
+                  _UserDetailRow(
+                    label: 'Room',
+                    value: data['roomCode'].toString(),
+                  ),
+                if (data['deviceName'] != null)
+                  _UserDetailRow(
+                    label: 'Bluetooth Device',
+                    value: data['deviceName'].toString(),
+                  ),
+                if (data['transport'] != null)
+                  _UserDetailRow(
+                    label: 'SOS Transport',
+                    value: data['transport'].toString(),
+                  ),
+                if (data['deletedSosEvents'] != null)
+                  _UserDetailRow(
+                    label: 'SOS Alerts Removed',
+                    value: data['deletedSosEvents'].toString(),
+                  ),
+                if (data['deletedSosNotifications'] != null)
+                  _UserDetailRow(
+                    label: 'Notifications Removed',
+                    value: data['deletedSosNotifications'].toString(),
+                  ),
                 if (change.isNotEmpty)
                   _UserDetailRow(label: 'Change', value: change),
                 if (reason != null && reason.isNotEmpty && reason != 'null')
