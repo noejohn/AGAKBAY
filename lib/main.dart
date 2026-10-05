@@ -1485,6 +1485,9 @@ Future<String> _answerHikeAssistantQuestion({
       ? const <_MountainOrganizer>[]
       : await fetchMountainOrganizers(trail);
 
+  final retrievedFaqAnswers = await KyrielleRagService.instance
+      .retrieveRelevantAnswers(question, apiKey: aiApiKey);
+
   if (aiApiKey.isNotEmpty) {
     final contextBuffer = StringBuffer();
     if (extraContext != null && extraContext.isNotEmpty) {
@@ -1495,8 +1498,6 @@ Future<String> _answerHikeAssistantQuestion({
     // instead of always stuffing the whole FAQ list into every prompt.
     // Fails open to an empty list — Gemini still answers using whatever
     // other context is available above.
-    final retrievedFaqAnswers = await KyrielleRagService.instance
-        .retrieveRelevantAnswers(question, apiKey: aiApiKey);
     if (retrievedFaqAnswers.isNotEmpty) {
       contextBuffer.writeln(
         'Relevant Agakbay app facts:\n${retrievedFaqAnswers.join('\n')}',
@@ -1530,7 +1531,7 @@ Future<String> _answerHikeAssistantQuestion({
         '''
 The user asked: "$question"
 $contextBuffer
-Answer the user's actual question directly and helpfully, using your general knowledge (e.g. elevation, difficulty, weather, best season) whenever the app data above doesn't cover it. Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
+Answer the user's actual question directly and helpfully. Treat retrieved Agakbay app facts as authoritative for app workflows and policies; do not contradict them or invent unsupported steps. Use general knowledge when retrieved facts do not cover the question. Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
 ''';
     final aiAnswer = await fetchGeminiResponse(
       apiKey: aiApiKey,
@@ -1540,6 +1541,10 @@ Answer the user's actual question directly and helpfully, using your general kno
     if (aiAnswer.isNotEmpty) {
       return aiAnswer;
     }
+  }
+
+  if (retrievedFaqAnswers.isNotEmpty) {
+    return retrievedFaqAnswers.join('\n');
   }
 
   if (trail == null) {
@@ -4350,6 +4355,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           'authorId': user.uid,
           'authorName': _communityDisplayName(),
           'content': text,
+          'likeCount': 0,
           'createdAt': FieldValue.serverTimestamp(),
         });
         tx.update(postRef, {
@@ -4359,6 +4365,47 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
     } catch (_) {
       _showDashboardSnackBar('Unable to post comment.');
+    }
+  }
+
+  Future<void> _toggleCommunityCommentLike(
+    String postId,
+    String commentId,
+  ) async {
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      _showDashboardSnackBar('Please sign in to like comments.');
+      return;
+    }
+    final commentRef = _firestore
+        .collection('community_posts')
+        .doc(postId)
+        .collection('comments')
+        .doc(commentId);
+    final likeRef = commentRef.collection('likes').doc(user.uid);
+    try {
+      await _firestore.runTransaction((tx) async {
+        final commentSnap = await tx.get(commentRef);
+        if (!commentSnap.exists) {
+          return;
+        }
+        final likeSnap = await tx.get(likeRef);
+        final current = (commentSnap.data()?['likeCount'] is num)
+            ? (commentSnap.data()!['likeCount'] as num).toInt()
+            : 0;
+        if (likeSnap.exists) {
+          tx.delete(likeRef);
+          tx.update(commentRef, {'likeCount': current > 0 ? current - 1 : 0});
+        } else {
+          tx.set(likeRef, {
+            'userId': user.uid,
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+          tx.update(commentRef, {'likeCount': current + 1});
+        }
+      });
+    } catch (_) {
+      _showDashboardSnackBar('Unable to update comment like.');
     }
   }
 
@@ -4624,6 +4671,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 );
                                 final content =
                                     data['content']?.toString() ?? '';
+                                final commentLikeCount =
+                                    (data['likeCount'] as num?)?.toInt() ?? 0;
                                 final isOwnComment =
                                     currentUid != null &&
                                     commentAuthorId == currentUid;
@@ -4653,6 +4702,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                                 color: Colors.white,
                                                 fontWeight: FontWeight.w700,
                                               ),
+                                            ),
+                                          ),
+                                          if (currentUid != null)
+                                            StreamBuilder<
+                                              DocumentSnapshot<
+                                                Map<String, dynamic>
+                                              >
+                                            >(
+                                              stream: _firestore
+                                                  .collection('community_posts')
+                                                  .doc(post.id)
+                                                  .collection('comments')
+                                                  .doc(doc.id)
+                                                  .collection('likes')
+                                                  .doc(currentUid)
+                                                  .snapshots(),
+                                              builder: (context, likeSnapshot) {
+                                                final isLiked =
+                                                    likeSnapshot.data?.exists ==
+                                                    true;
+                                                return IconButton(
+                                                  tooltip: isLiked
+                                                      ? 'Unlike comment'
+                                                      : 'Like comment',
+                                                  visualDensity:
+                                                      VisualDensity.compact,
+                                                  constraints:
+                                                      const BoxConstraints(
+                                                        minWidth: 32,
+                                                        minHeight: 32,
+                                                      ),
+                                                  padding: EdgeInsets.zero,
+                                                  onPressed: () => unawaited(
+                                                    _toggleCommunityCommentLike(
+                                                      post.id,
+                                                      doc.id,
+                                                    ),
+                                                  ),
+                                                  icon: Icon(
+                                                    isLiked
+                                                        ? Icons.favorite_rounded
+                                                        : Icons
+                                                              .favorite_border_rounded,
+                                                    size: 16,
+                                                    color: isLiked
+                                                        ? const Color(
+                                                            0xFFFF7A7A,
+                                                          )
+                                                        : Colors.white54,
+                                                  ),
+                                                );
+                                              },
+                                            ),
+                                          Text(
+                                            '$commentLikeCount',
+                                            style: TextStyle(
+                                              color: Colors.white.withValues(
+                                                alpha: 0.65,
+                                              ),
+                                              fontSize: 12,
                                             ),
                                           ),
                                           if (isOwnComment)
@@ -5898,14 +6007,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
       return;
     }
     final mountainKey = _mountainKeyForTrail(trail);
+    final isCompletedHike =
+        hikeResult.reachedSummit && hikeResult.distanceKm >= 0.1;
     await _firestore.collection('leaderboard').doc(user.uid).set({
       'userId': user.uid,
       'displayName': _communityDisplayName(),
       'accountType': _accountType,
-      'completedMountains': FieldValue.increment(
-        hikeResult.reachedSummit ? 1 : 0,
-      ),
-      'summitsReached': FieldValue.increment(hikeResult.reachedSummit ? 1 : 0),
+      'completedMountains': FieldValue.increment(isCompletedHike ? 1 : 0),
+      'summitsReached': FieldValue.increment(isCompletedHike ? 1 : 0),
       'totalDistanceKm': FieldValue.increment(hikeResult.distanceKm),
       'lastMountainName': trail.name,
       'lastMountainKey': mountainKey,
@@ -7016,16 +7125,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     _menuUserHeader(),
                     const SizedBox(height: 28),
                     _appMenuItem(
-                      icon: Icons.event_available_rounded,
-                      iconColor: const Color(0xFF53D97A),
-                      title: 'My Scheduled Hikes',
-                      subtitle: 'Upcoming hikes and packing lists',
-                      onTap: () {
-                        Navigator.of(dialogContext).pop();
-                        _openScheduledHikesScreen();
-                      },
-                    ),
-                    _appMenuItem(
                       icon: Icons.leaderboard_rounded,
                       iconColor: const Color(0xFFFFD76A),
                       title: 'Leaderboard',
@@ -7216,6 +7315,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: _firestore
             .collection('leaderboard')
+            .where('completedMountains', isGreaterThan: 0)
             .orderBy('completedMountains', descending: true)
             .limit(50)
             .snapshots(),
@@ -7485,6 +7585,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'trail' => const Color(0xFF7CF9A2),
       'safety' => const Color(0xFFFFD76A),
       'comment' => const Color(0xFF48D1FF),
+      'like' => const Color(0xFFFF7A7A),
       'guide_application' => AgakColors.olive,
       _ => const Color(0xFF48D1FF),
     };
@@ -7492,6 +7593,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'sos' => Icons.sos_rounded,
       'trail' => Icons.route_rounded,
       'comment' => Icons.chat_bubble_rounded,
+      'like' => Icons.favorite_rounded,
       'safety' => Icons.health_and_safety_rounded,
       'guide_application' => Icons.badge_rounded,
       _ => Icons.notifications_none_rounded,

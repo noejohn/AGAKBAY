@@ -6,7 +6,7 @@
 /// Bump [kyrielleKnowledgeBaseVersion] whenever this list — or
 /// kyrielle_safety_manual.dart's — changes, so KyrielleRagService.dart knows
 /// its cached embeddings are stale and recomputes them.
-const int kyrielleKnowledgeBaseVersion = 2;
+const int kyrielleKnowledgeBaseVersion = 3;
 
 class KyrielleKnowledgeChunk {
   const KyrielleKnowledgeChunk({required this.id, required this.text});
@@ -19,8 +19,31 @@ const List<KyrielleKnowledgeChunk> kyrielleKnowledgeBase = [
   KyrielleKnowledgeChunk(
     id: 'hike_room_create',
     text:
-        'Only a verified Tour Guide can create a Hike Room in Agakbay. '
-        'Creating one generates a unique room code that hikers enter to join.',
+        'To make or create a Hike Room in Agakbay, you must be an approved, '
+        'verified Tour Guide. Open Explore, search for a mountain, select a '
+        'mapped trail route, then tap Create Hike Room. A route with at least '
+        'two mapped points is required. Agakbay creates the room and a '
+        'six-digit room code; share that code with hikers so they can join. '
+        'A Tour Guide can have only one active room at a time.',
+  ),
+  KyrielleKnowledgeChunk(
+    id: 'hike_room_join',
+    text:
+        'To join a Hike Room in Agakbay, sign in with a Hiker account, open '
+        'Profile, choose Hike SOS Room, enter the six-digit code supplied '
+        'by the Tour Guide, and tap Join Room. You can join only a room that '
+        'is waiting for hikers, and a hiker can belong to only one active '
+        'room at a time. Ask the Tour Guide for the code if you do not have it.',
+  ),
+  KyrielleKnowledgeChunk(
+    id: 'hike_room_manage',
+    text:
+        'In a Hike Room, the Tour Guide can share or copy the room code, see '
+        'participants, and start the hike session when the group is ready. '
+        'When the session is active, participants can start Hiking Mode and '
+        'send an SOS to the Tour Guide. The Tour Guide can end the room; '
+        'ending it removes participants from the active room. A hiker can '
+        'leave a room from its screen.',
   ),
   KyrielleKnowledgeChunk(
     id: 'sos_mechanism',

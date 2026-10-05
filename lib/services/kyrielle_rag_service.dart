@@ -18,6 +18,78 @@ final List<KyrielleKnowledgeChunk> _kyrielleCorpus = [
   ...kyrielleSafetyManualChunks,
 ];
 
+const Set<String> _queryStopWords = {
+  'a',
+  'about',
+  'an',
+  'and',
+  'are',
+  'can',
+  'do',
+  'does',
+  'for',
+  'how',
+  'i',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'of',
+  'on',
+  'please',
+  'the',
+  'to',
+  'what',
+  'when',
+  'where',
+  'which',
+  'with',
+  'you',
+};
+
+List<KyrielleKnowledgeChunk> retrieveRelevantChunksLocally(
+  String question, {
+  int topK = 3,
+}) {
+  final normalizedQuestion = question
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+      .trim();
+  final queryTokens = RegExp(r'[a-z0-9]+')
+      .allMatches(normalizedQuestion)
+      .map((match) => match.group(0)!)
+      .where((token) => !_queryStopWords.contains(token))
+      .toSet();
+  if (queryTokens.isEmpty || topK <= 0) {
+    return const [];
+  }
+
+  final scored = <({KyrielleKnowledgeChunk chunk, double score})>[];
+  for (final chunk in _kyrielleCorpus) {
+    final normalizedText = chunk.text.toLowerCase().replaceAll(
+      RegExp(r'[^a-z0-9]+'),
+      ' ',
+    );
+    final textTokens = RegExp(
+      r'[a-z0-9]+',
+    ).allMatches(normalizedText).map((match) => match.group(0)!).toSet();
+    final overlap = queryTokens.intersection(textTokens).length;
+    if (overlap == 0) {
+      continue;
+    }
+    final phraseMatch =
+        normalizedQuestion.length >= 12 &&
+        normalizedText.contains(normalizedQuestion);
+    scored.add((
+      chunk: chunk,
+      score: overlap / queryTokens.length + (phraseMatch ? 1 : 0),
+    ));
+  }
+  scored.sort((a, b) => b.score.compareTo(a.score));
+  return scored.take(topK).map((entry) => entry.chunk).toList();
+}
+
 /// Lightweight RAG (Retrieval-Augmented Generation) for Kyrielle's
 /// knowledge base. Retrieval is brute-force cosine similarity over a
 /// modest number of precomputed embeddings (~53 entries) rather than a
@@ -41,8 +113,13 @@ class KyrielleRagService {
   // only the incoming question needs a fresh embedding per call.
   Future<Map<String, List<double>>> _loadOrBuildEmbeddings(
     String apiKey,
+    Iterable<KyrielleKnowledgeChunk> chunks,
   ) async {
-    if (_cachedEmbeddings != null) {
+    final requestedChunks = chunks.toList(growable: false);
+    if (_cachedEmbeddings != null &&
+        requestedChunks.every(
+          (chunk) => _isValidEmbedding(_cachedEmbeddings![chunk.id]),
+        )) {
       return _cachedEmbeddings!;
     }
     // Multiple near-simultaneous questions before the first build finishes
@@ -56,32 +133,42 @@ class KyrielleRagService {
     final completer = Completer<void>();
     _buildFuture = completer.future;
     try {
+      final embeddings = _cachedEmbeddings ?? <String, List<double>>{};
       final file = await _cacheFile();
-      if (await file.exists()) {
+      if (embeddings.isEmpty && await file.exists()) {
         try {
           final decoded = json.decode(await file.readAsString());
           if (decoded is Map<String, dynamic> &&
               decoded['version'] == kyrielleKnowledgeBaseVersion) {
             final entries = decoded['embeddings'] as Map<String, dynamic>;
-            _cachedEmbeddings = entries.map(
-              (key, value) => MapEntry(
-                key,
-                (value as List).map((v) => (v as num).toDouble()).toList(),
-              ),
-            );
-            return _cachedEmbeddings!;
+            final knownChunkIds = _kyrielleCorpus
+                .map((chunk) => chunk.id)
+                .toSet();
+            for (final entry in entries.entries) {
+              if (!knownChunkIds.contains(entry.key) || entry.value is! List) {
+                continue;
+              }
+              final vector = (entry.value as List)
+                  .whereType<num>()
+                  .map((value) => value.toDouble())
+                  .toList(growable: false);
+              if (_isValidEmbedding(vector)) {
+                embeddings[entry.key] = vector;
+              }
+            }
           }
         } catch (_) {
           // Corrupt/unreadable cache — fall through and rebuild.
         }
       }
 
-      // Embedded in small concurrent batches rather than one-by-one — with
-      // ~53 chunks, a strictly sequential first build would take a while.
-      final embeddings = <String, List<double>>{};
+      _cachedEmbeddings = embeddings;
+      final missingChunks = requestedChunks
+          .where((chunk) => !_isValidEmbedding(embeddings[chunk.id]))
+          .toList(growable: false);
       const batchSize = 8;
-      for (var start = 0; start < _kyrielleCorpus.length; start += batchSize) {
-        final batch = _kyrielleCorpus.skip(start).take(batchSize);
+      for (var start = 0; start < missingChunks.length; start += batchSize) {
+        final batch = missingChunks.skip(start).take(batchSize);
         final results = await Future.wait(
           batch.map(
             (chunk) async => MapEntry(
@@ -91,7 +178,7 @@ class KyrielleRagService {
           ),
         );
         for (final result in results) {
-          if (result.value != null) {
+          if (_isValidEmbedding(result.value)) {
             embeddings[result.key] = result.value!;
           }
         }
@@ -117,11 +204,18 @@ class KyrielleRagService {
     }
   }
 
+  bool _isValidEmbedding(List<double>? embedding) {
+    return embedding != null &&
+        embedding.isNotEmpty &&
+        embedding.every((value) => value.isFinite);
+  }
+
   double _cosineSimilarity(List<double> a, List<double> b) {
+    if (a.length != b.length) return 0;
     var dot = 0.0;
     var normA = 0.0;
     var normB = 0.0;
-    for (var i = 0; i < a.length && i < b.length; i++) {
+    for (var i = 0; i < a.length; i++) {
       dot += a[i] * b[i];
       normA += a[i] * a[i];
       normB += b[i] * b[i];
@@ -130,62 +224,79 @@ class KyrielleRagService {
     return dot / (sqrt(normA) * sqrt(normB));
   }
 
-  /// Returns the [topK] most relevant knowledge-base chunks for [question],
-  /// ranked by embedding similarity. Returns an empty list (fail-open) if
-  /// the API key is missing, embeddings are unavailable (e.g. depleted
-  /// Gemini credits), or nothing clears [minScore] — callers must treat an
-  /// empty result as "answer without retrieved context", never an error.
-  ///
-  /// [minScore] is a starting default, not a tuned value — adjust it once
-  /// there's a working API key to test real questions against.
+  /// Uses local keyword matching first, then reranks matching chunks with
+  /// Gemini embeddings when available. Retrieval remains useful offline or
+  /// when Gemini embeddings fail.
   Future<List<String>> retrieveRelevantAnswers(
     String question, {
     required String apiKey,
     int topK = 3,
     double minScore = 0.5,
   }) async {
-    if (apiKey.isEmpty || question.trim().isEmpty) {
-      debugPrint('[KyrielleRAG] skipped — no API key or empty question');
+    if (question.trim().isEmpty || topK <= 0) {
       return const [];
     }
 
-    final corpusEmbeddings = await _loadOrBuildEmbeddings(apiKey);
-    debugPrint(
-      '[KyrielleRAG] corpus ready: ${corpusEmbeddings.length}/${_kyrielleCorpus.length} chunks embedded',
+    final localMatches = retrieveRelevantChunksLocally(
+      question,
+      topK: max(topK * 4, 12),
     );
-    if (corpusEmbeddings.isEmpty) {
-      return const [];
+    if (apiKey.isEmpty || localMatches.isEmpty) {
+      return localMatches.take(topK).map((chunk) => chunk.text).toList();
     }
 
-    final questionVector = await fetchGeminiEmbedding(
-      apiKey: apiKey,
-      text: question,
-    );
-    if (questionVector == null) {
-      debugPrint('[KyrielleRAG] could not embed the question — Gemini call failed');
-      return const [];
+    try {
+      final corpusEmbeddings = await _loadOrBuildEmbeddings(
+        apiKey,
+        localMatches,
+      );
+      final questionVector = await fetchGeminiEmbedding(
+        apiKey: apiKey,
+        text: question,
+      );
+      if (questionVector == null) {
+        return localMatches.take(topK).map((chunk) => chunk.text).toList();
+      }
+
+      final localScores = <String, double>{};
+      final localRanked = retrieveRelevantChunksLocally(
+        question,
+        topK: max(topK * 4, 12),
+      );
+      for (var index = 0; index < localRanked.length; index++) {
+        localScores[localRanked[index].id] =
+            1 - index / max(localRanked.length, 1);
+      }
+
+      final textById = {
+        for (final chunk in _kyrielleCorpus) chunk.id: chunk.text,
+      };
+      final scored = <({String id, double score})>[];
+      for (final chunk in localMatches) {
+        final embedding = corpusEmbeddings[chunk.id];
+        if (!_isValidEmbedding(embedding)) {
+          continue;
+        }
+        final similarity = _cosineSimilarity(questionVector, embedding!);
+        final lexicalScore = localScores[chunk.id] ?? 0;
+        if (similarity >= minScore || lexicalScore > 0) {
+          scored.add((id: chunk.id, score: similarity + lexicalScore * 0.35));
+        }
+      }
+      scored.sort((a, b) => b.score.compareTo(a.score));
+
+      final semanticResults = scored
+          .take(topK)
+          .map((entry) => textById[entry.id])
+          .whereType<String>()
+          .toList();
+      if (semanticResults.isNotEmpty) {
+        return semanticResults;
+      }
+    } catch (error) {
+      debugPrint('[KyrielleRAG] semantic retrieval failed: $error');
     }
 
-    final scored = <MapEntry<String, double>>[
-      for (final entry in corpusEmbeddings.entries)
-        MapEntry(entry.key, _cosineSimilarity(questionVector, entry.value)),
-    ]..sort((a, b) => b.value.compareTo(a.value));
-
-    debugPrint(
-      '[KyrielleRAG] top matches for "$question": '
-      '${scored.take(5).map((e) => '${e.key}=${e.value.toStringAsFixed(3)}').join(', ')}',
-    );
-
-    final textById = {
-      for (final chunk in _kyrielleCorpus) chunk.id: chunk.text,
-    };
-    final results = scored
-        .where((entry) => entry.value >= minScore)
-        .take(topK)
-        .map((entry) => textById[entry.key])
-        .whereType<String>()
-        .toList();
-    debugPrint('[KyrielleRAG] retrieved ${results.length} chunk(s) above minScore=$minScore');
-    return results;
+    return localMatches.take(topK).map((chunk) => chunk.text).toList();
   }
 }

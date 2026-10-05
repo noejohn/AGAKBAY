@@ -108,8 +108,30 @@ service cloud.firestore {
           && request.resource.data.authorId == request.auth.uid
           && request.resource.data.content is string
           && request.resource.data.content.size() < 1000;
-        allow update, delete: if signedIn()
+        allow update: if signedIn() && (
+          resource.data.authorId == request.auth.uid ||
+          (
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['likeCount']) &&
+            (
+              request.resource.data.likeCount ==
+                (resource.data.likeCount is int
+                  ? resource.data.likeCount + 1
+                  : 1) ||
+              request.resource.data.likeCount ==
+                (resource.data.likeCount is int
+                  ? resource.data.likeCount - 1
+                  : 0)
+            )
+          )
+        );
+        allow delete: if signedIn()
           && resource.data.authorId == request.auth.uid;
+
+        match /likes/{userId} {
+          allow read: if signedIn();
+          allow create, update, delete: if isOwner(userId);
+        }
       }
 
       match /likes/{userId} {
