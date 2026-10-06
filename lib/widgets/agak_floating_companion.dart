@@ -51,6 +51,8 @@ class AgakFloatingCompanion extends StatefulWidget {
     super.key,
     required this.onTap,
     required this.onDragDelta,
+    required this.onDismissed,
+    this.playEntranceAnimation = false,
   });
 
   final VoidCallback onTap;
@@ -59,6 +61,18 @@ class AgakFloatingCompanion extends StatefulWidget {
   /// owns the actual on-screen position (it's the one positioning this
   /// widget via `Positioned`), so this widget only ever reports deltas.
   final ValueChanged<Offset> onDragDelta;
+
+  /// Fired once the "fly away" animation (double-tap on AGAK) finishes —
+  /// the parent stops rendering this widget at that point. An advisor flagged
+  /// the always-on mascot as annoying during a project consultation, so this
+  /// gives it a dismiss/recall gesture instead of removing it outright.
+  final VoidCallback onDismissed;
+
+  /// True only on the remount right after the player double-taps the
+  /// screen to bring AGAK back (see the parent's recall handler) — plays
+  /// the reverse "flying in" entrance instead of just appearing. False on
+  /// every other mount, including the very first one on app launch.
+  final bool playEntranceAnimation;
 
   @override
   State<AgakFloatingCompanion> createState() => _AgakFloatingCompanionState();
@@ -71,6 +85,8 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
 
   static const String _initialGreeting =
       "Hi there! I'm Kyrielle — how are you doing today?";
+
+  static const String _recallMessage = "Knew you'd need me again, huh?";
 
   /// Message + the emotion art to show while that specific reaction is
   /// up — null keeps whatever AGAK was already displaying, for the two
@@ -108,6 +124,14 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
   late final AnimationController _idleController;
   late final AnimationController _pokeController;
 
+  /// 0 = AGAK sitting normally at her resting position; 1 = fully flown
+  /// off-screen. Driven forward (0→1) to dismiss, or starts at 1 and runs
+  /// in reverse (1→0) to fly back in — [_flightOffset]/[_flightOpacity]
+  /// read off the same value either way, so only the drive direction
+  /// differs between dismiss and recall.
+  late final AnimationController _flightController;
+  bool _isFlying = false;
+
   @override
   void initState() {
     super.initState();
@@ -127,6 +151,51 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
       vsync: this,
       duration: const Duration(milliseconds: 500),
     );
+    _flightController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 650),
+    );
+    if (widget.playEntranceAnimation) {
+      _isFlying = true;
+      _flightController.value = 1;
+      _flightController.reverse().whenComplete(() {
+        if (!mounted) return;
+        setState(() {
+          _isFlying = false;
+          _displayedMessage = _recallMessage;
+          _displayedEmotion = AgakEmotionState.youCalledMe;
+          _lastChangeAt = DateTime.now();
+          _bubbleVisible = true;
+        });
+        _scheduleFade(_recallMessage);
+      });
+    }
+  }
+
+  Offset get _flightOffset => Offset(
+    -_flightController.value * 420,
+    -_flightController.value * 60,
+  );
+
+  double get _flightOpacity => (1 - _flightController.value).clamp(0.0, 1.0);
+
+  /// Double-tap on AGAK herself — plays the "fly away" exit, then tells the
+  /// parent to stop rendering this widget. Bring her back with a double tap
+  /// anywhere on screen (handled by the parent, see onDismissed).
+  Future<void> _flyAway() async {
+    if (_isFlying) return;
+    setState(() {
+      _isFlying = true;
+      _bubbleVisible = false;
+      _pokeReaction = null;
+      _pokeEmotion = null;
+    });
+    _fadeTimer?.cancel();
+    _pokeTimer?.cancel();
+    _pendingSwapTimer?.cancel();
+    await _flightController.forward(from: 0);
+    if (!mounted) return;
+    widget.onDismissed();
   }
 
   @override
@@ -136,6 +205,7 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
     _fadeTimer?.cancel();
     _idleController.dispose();
     _pokeController.dispose();
+    _flightController.dispose();
     super.dispose();
   }
 
@@ -274,46 +344,63 @@ class _AgakFloatingCompanionState extends State<AgakFloatingCompanion>
               ),
               const SizedBox(height: 4),
               GestureDetector(
-                onTap: _poke,
+                onTap: _isFlying ? null : _poke,
+                onDoubleTap: _flyAway,
                 onTapDown: (_) => setState(() => _characterPressed = true),
                 onTapCancel: () => setState(() => _characterPressed = false),
                 onTapUp: (_) => setState(() => _characterPressed = false),
                 behavior: HitTestBehavior.opaque,
                 child: AnimatedBuilder(
-                  animation: Listenable.merge([
-                    _idleController,
-                    _pokeController,
-                  ]),
-                  builder: (context, child) {
-                    final breathe = 1.0 + (_idleController.value * 0.035);
-                    final pokeBounce =
-                        1.0 +
-                        (Curves.elasticOut.transform(_pokeController.value) *
-                            0.22 *
-                            (1 - _pokeController.value));
-                    final pressScale = _characterPressed ? 0.95 : 1.0;
-                    return Transform.scale(
-                      scale: breathe * pokeBounce * pressScale,
-                      child: child,
-                    );
-                  },
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 280),
-                    child: Builder(
-                      builder: (context) {
-                        final shownEmotion = _pokeEmotion ?? _displayedEmotion;
-                        return Image.asset(
-                          shownEmotion.assetPath,
-                          key: ValueKey(shownEmotion),
-                          width: _characterWidth,
-                          fit: BoxFit.contain,
-                          errorBuilder: (context, error, stackTrace) =>
-                              const SizedBox(
-                                width: _characterWidth,
-                                height: _characterWidth,
-                              ),
-                        );
-                      },
+                  animation: _flightController,
+                  builder: (context, child) => Transform.translate(
+                    offset: _flightOffset,
+                    child: Opacity(opacity: _flightOpacity, child: child),
+                  ),
+                  child: AnimatedBuilder(
+                    animation: Listenable.merge([
+                      _idleController,
+                      _pokeController,
+                    ]),
+                    builder: (context, child) {
+                      final breathe = 1.0 + (_idleController.value * 0.035);
+                      final pokeBounce =
+                          1.0 +
+                          (Curves.elasticOut.transform(_pokeController.value) *
+                              0.22 *
+                              (1 - _pokeController.value));
+                      final pressScale = _characterPressed ? 0.95 : 1.0;
+                      return Transform.scale(
+                        scale: breathe * pokeBounce * pressScale,
+                        child: child,
+                      );
+                    },
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 280),
+                      child: Builder(
+                        builder: (context) {
+                          if (_isFlying) {
+                            return Image.asset(
+                              'assets/images/fly.png',
+                              key: const ValueKey('flying'),
+                              width: _characterWidth,
+                              fit: BoxFit.contain,
+                            );
+                          }
+                          final shownEmotion =
+                              _pokeEmotion ?? _displayedEmotion;
+                          return Image.asset(
+                            shownEmotion.assetPath,
+                            key: ValueKey(shownEmotion),
+                            width: _characterWidth,
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stackTrace) =>
+                                const SizedBox(
+                                  width: _characterWidth,
+                                  height: _characterWidth,
+                                ),
+                          );
+                        },
+                      ),
                     ),
                   ),
                 ),

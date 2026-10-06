@@ -17,10 +17,11 @@ async function endHikeRoomForGuide(db, roomId, guideId) {
   ));
   const pendingWrites = [];
 
+  const stillPresent = new Set(["active", "stopped"]);
   for (let index = 0; index < participants.docs.length; index++) {
     const participant = participants.docs[index];
     const data = participant.data();
-    if ((data.membershipStatus || "active") === "active") {
+    if (stillPresent.has(data.membershipStatus || "active")) {
       pendingWrites.push({
         ref: participant.ref,
         data: {

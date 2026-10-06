@@ -30,8 +30,8 @@
 // connects to the physically correct device instead of any nearby one.
 #define DEVICE_NAME "AGAKBAY-TourGuide"
 
-// These five UUIDs must match lib/services/heltec_ble_service.dart
-// exactly, or the app will never find the matching service/characteristics.
+// These UUIDs must match lib/services/heltec_ble_service.dart exactly, or
+// the app will never find the matching service/characteristics.
 #define SERVICE_UUID "d64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0001"
 #define LOCATION_CHAR_UUID "d64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0002"
 #define SOS_CHAR_UUID "d64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0003"
@@ -40,6 +40,11 @@
 // LoRa from another Heltec, so the guide's app can show it with no
 // internet/cellular signal at all.
 #define SOS_RELAY_CHAR_UUID "d64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0005"
+// "I Can't Continue" — a hiker stopping partway through an active hike,
+// not an emergency (that's SOS above), relayed the same way over LoRa so
+// it still reaches the guide with zero signal.
+#define STOP_CHAR_UUID "d64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0006"
+#define STOP_RELAY_CHAR_UUID "d64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0007"
 
 // Confirmed working over the air in the standalone LoRa ping-pong test
 // (firmware/agakbay_heltec_lora_test) — keep this in sync with whatever
@@ -62,6 +67,7 @@ static SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RS
 TinyGPSPlus gps;
 BLECharacteristic *locationCharacteristic;
 BLECharacteristic *sosRelayCharacteristic;
+BLECharacteristic *stopRelayCharacteristic;
 bool deviceConnected = false;
 unsigned long lastNotifyMs = 0;
 const unsigned long notifyIntervalMs = 5000;
@@ -114,6 +120,21 @@ const unsigned long sosBannerDurationMs = 30000;
 unsigned long powerButtonPressedAtMs = 0;
 bool powerButtonShutdownStarted = false;
 
+// --- "I Can't Continue" relay state ---
+// Same send/receive plumbing as SOS above, kept as its own set of
+// variables (rather than reusing the SOS ones) so a stop message can never
+// be mistaken for, or overwrite, a real SOS in flight.
+volatile bool stopPending = false;
+String pendingStopName = "Hiker";
+String pendingStopReason = "";
+
+String lastRelayStopHikerName = "";
+String lastRelayStopReason = "";
+unsigned long stopBannerUntilMs = 0;
+// Shorter than the SOS banner — this isn't an emergency, just a status
+// update the guide should notice without it dominating the small screen.
+const unsigned long stopBannerDurationMs = 15000;
+
 void VextOn() {
   pinMode(Vext, OUTPUT);
   digitalWrite(Vext, LOW);
@@ -124,6 +145,18 @@ void buzzSOS() {
   digitalWrite(BUZZER_PIN, HIGH);
   delay(10000);
   digitalWrite(BUZZER_PIN, LOW);
+}
+
+// Two short beeps — deliberately much gentler than buzzSOS(), since this
+// fires for "a hiker stopped, not an emergency," not a real SOS. The guide
+// should notice it, not be startled by it.
+void buzzStop() {
+  for (int i = 0; i < 2; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(200);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(150);
+  }
 }
 
 // Redraws the whole screen from current state. Called on every state change
@@ -150,6 +183,25 @@ void updateDisplay() {
             : "Location: no GPS fix yet");
 
     display.drawString(0, 50, "via LoRa - no signal");
+
+    display.display();
+    return;
+  }
+
+  // A relayed "can't continue" banner — only shown once there's no active
+  // SOS banner, since a real emergency always takes priority over this.
+  if (stopBannerUntilMs != 0 && millis() < stopBannerUntilMs) {
+    display.drawString(0, 0, "Hiker Stopped");
+
+    display.drawStringMaxWidth(
+        0, 16, 128,
+        "From: " + lastRelayStopHikerName);
+
+    display.drawStringMaxWidth(
+        0, 34, 128,
+        lastRelayStopReason.length() > 0 ? lastRelayStopReason : "(no reason given)");
+
+    display.drawString(0, 54, "via LoRa - no signal");
 
     display.display();
     return;
@@ -272,6 +324,32 @@ class SosCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+class StopCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) override {
+    // Phone writes "STOP|<hikerName>|<reason>" — reason is free text and
+    // may itself contain '|', so it's taken as everything after the
+    // second separator rather than split any further.
+    String value = String(characteristic->getValue().c_str());
+    String hikerName = "Hiker";
+    String reason = "";
+    int p1 = value.indexOf('|');
+    if (p1 != -1) {
+      int p2 = value.indexOf('|', p1 + 1);
+      if (p2 != -1) {
+        hikerName = value.substring(p1 + 1, p2);
+        reason = value.substring(p2 + 1);
+      } else if (p1 + 1 < (int)value.length()) {
+        hikerName = value.substring(p1 + 1);
+      }
+    }
+    Serial.printf("Stop-hiking triggered from phone app: %s (%s)\n",
+                  hikerName.c_str(), reason.c_str());
+    pendingStopName = hikerName;
+    pendingStopReason = reason;
+    stopPending = true;
+  }
+};
+
 
 
 // --- LoRa radio callbacks ---
@@ -296,8 +374,7 @@ void onLoraTxTimeout() {
 // hasFix matters: a board with no GPS lock yet (common right after power-on,
 // or indoors) would otherwise send 0.0,0.0 — a real spot in the ocean — and
 // the guide could mistake that for the hiker's actual position.
-void handleReceivedLoraPacket(const String &packet, int16_t rssi) {
-  if (!packet.startsWith("SOS|")) return;
+void handleReceivedLoraSosPacket(const String &packet, int16_t rssi) {
   int p1 = packet.indexOf('|', 4);
   int p2 = p1 == -1 ? -1 : packet.indexOf('|', p1 + 1);
   int p3 = p2 == -1 ? -1 : packet.indexOf('|', p2 + 1);
@@ -325,6 +402,38 @@ void handleReceivedLoraPacket(const String &packet, int16_t rssi) {
   sosRelayCharacteristic->notify();
 
   updateDisplay();
+}
+
+// Wire format from a neighbor board: "STOP|<hikerName>|<reason>". reason is
+// free text and may itself contain '|', so everything after the hiker
+// name's separator is taken as-is rather than split any further.
+void handleReceivedLoraStopPacket(const String &packet, int16_t rssi) {
+  int p1 = packet.indexOf('|', 5);
+  if (p1 == -1) return;
+
+  lastRelayStopHikerName = packet.substring(5, p1);
+  lastRelayStopReason = packet.substring(p1 + 1);
+  stopBannerUntilMs = millis() + stopBannerDurationMs;
+
+  buzzStop();
+
+  Serial.printf("LoRa: stop-hiking received from %s: %s (RSSI %d)\n",
+                lastRelayStopHikerName.c_str(), lastRelayStopReason.c_str(), rssi);
+
+  // Forward to this board's own connected phone — "hikerName|reason".
+  String relayPayload = lastRelayStopHikerName + "|" + lastRelayStopReason;
+  stopRelayCharacteristic->setValue((uint8_t *)relayPayload.c_str(), relayPayload.length());
+  stopRelayCharacteristic->notify();
+
+  updateDisplay();
+}
+
+void handleReceivedLoraPacket(const String &packet, int16_t rssi) {
+  if (packet.startsWith("SOS|")) {
+    handleReceivedLoraSosPacket(packet, rssi);
+  } else if (packet.startsWith("STOP|")) {
+    handleReceivedLoraStopPacket(packet, rssi);
+  }
 }
 
 void onLoraRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
@@ -417,6 +526,15 @@ void setupBle() {
       SOS_RELAY_CHAR_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   sosRelayCharacteristic->addDescriptor(new BLE2902());
+
+  BLECharacteristic *stopCharacteristic = service->createCharacteristic(
+      STOP_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE);
+  stopCharacteristic->setCallbacks(new StopCallbacks());
+
+  stopRelayCharacteristic = service->createCharacteristic(
+      STOP_RELAY_CHAR_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  stopRelayCharacteristic->addDescriptor(new BLE2902());
 
   service->start();
 
@@ -553,6 +671,21 @@ void loop() {
     if (!pendingSosHasFix) {
       Serial.println("LoRa: WARNING - no location from phone, sending without one.");
     }
+    Radio.Sleep();
+    Radio.Send((uint8_t *)loraTxBuffer, strlen(loraTxBuffer));
+    radioState = RADIO_TX;
+  } else if (stopPending && radioState == RADIO_RX) {
+    // SOS always wins the radio if both happen to be pending at once —
+    // checked above as an "else if" so a real emergency is never delayed
+    // behind a routine "can't continue" message.
+    stopPending = false;
+    // Truncate defensively so "STOP|<name>|<reason>" can never overflow
+    // loraTxBuffer — the phone-side UI keeps the reason short, but the
+    // firmware doesn't assume that.
+    snprintf(loraTxBuffer, LORA_BUFFER_SIZE, "STOP|%s|%s",
+             pendingStopName.c_str(), pendingStopReason.c_str());
+    Serial.print("LoRa: sending STOP -> ");
+    Serial.println(loraTxBuffer);
     Radio.Sleep();
     Radio.Send((uint8_t *)loraTxBuffer, strlen(loraTxBuffer));
     radioState = RADIO_TX;

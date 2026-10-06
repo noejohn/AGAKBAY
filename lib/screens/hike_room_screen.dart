@@ -194,6 +194,83 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObse
     });
   }
 
+  Future<void> _stopHiking(String roomId) async {
+    final reasonController = TextEditingController();
+    final deviceConnected = HeltecBleService.instance.isConnected;
+    final choice = await showDialog<(String, String)>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("Can't continue?"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              "Let your Tour Guide know why you're stopping — they'll see "
+              'this right away and you can keep using SOS if you need help '
+              'heading back down.',
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: reasonController,
+              autofocus: true,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                hintText: 'e.g. too tired, twisted my ankle, weather',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          if (deviceConnected)
+            OutlinedButton(
+              onPressed: () => Navigator.of(
+                dialogContext,
+              ).pop((reasonController.text.trim(), 'device')),
+              child: const Text('Send via Device'),
+            ),
+          FilledButton(
+            onPressed: () => Navigator.of(
+              dialogContext,
+            ).pop((reasonController.text.trim(), 'internet')),
+            child: const Text('Send via Internet'),
+          ),
+        ],
+      ),
+    );
+    reasonController.dispose();
+    if (choice == null || choice.$1.isEmpty || !mounted) {
+      return;
+    }
+    final (reason, transport) = choice;
+    if (transport == 'device') {
+      await _run(() async {
+        final sent = await HeltecBleService.instance.sendStop(
+          hikerName: _displayName,
+          reason: reason,
+        );
+        if (sent) {
+          _message('Sent over the device — no internet needed.');
+        } else {
+          throw StateError(
+            HeltecBleService.instance.lastError ??
+                'Failed to send to the device.',
+          );
+        }
+      });
+      return;
+    }
+    await _run(() async {
+      await _service.stopHiking(roomId, reason: reason);
+      _message('Your Tour Guide has been notified.');
+    });
+  }
+
   Future<void> _kickParticipant(
     HikeRoom room,
     HikeRoomParticipant participant,
@@ -436,7 +513,11 @@ Future<void> _stopParticipantLocationTracking() async {
                   initialData: 'active',
                   builder: (context, membershipSnapshot) {
                     final membership = membershipSnapshot.data ?? 'active';
-                    if (membership != 'active') {
+                    // 'stopped' (used "I Can't Continue") still counts as
+                    // present — they keep SOS and location sharing in case
+                    // they need help heading back down alone. Only 'left'/
+                    // 'removed'/'room_ended' show the "no longer here" screen.
+                    if (membership != 'active' && membership != 'stopped') {
                       return Center(
                         child: Padding(
                           padding: const EdgeInsets.all(24),
@@ -680,6 +761,18 @@ Future<void> _stopParticipantLocationTracking() async {
           ),
           const SizedBox(height: 8),
           _SosList(roomId: room.id, service: _service, isGuide: _isGuide),
+          if (_isGuide) ...[
+            const SizedBox(height: 20),
+            Text(
+              'Hikers Who Stopped',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            _StoppedHikersList(roomId: room.id, service: _service),
+            const _OfflineStopRelayCard(),
+          ],
           const _OfflineSosRelayCard(),
           const SizedBox(height: 22),
           if (_isGuide && room.status == HikeRoomStatus.waiting)
@@ -747,6 +840,39 @@ Future<void> _stopParticipantLocationTracking() async {
               onPressed: _submitting ? null : () => _leaveRoom(room.id),
               icon: const Icon(Icons.logout_rounded),
               label: const Text('Leave Room'),
+            ),
+          if (!_isGuide && room.status == HikeRoomStatus.active)
+            StreamBuilder<HikeRoomParticipant?>(
+              stream: _service.watchCurrentParticipant(room.id),
+              builder: (context, snapshot) {
+                final me = snapshot.data;
+                if (me?.stopReason != null) {
+                  return Card(
+                    color: Colors.orange.withValues(alpha: 0.12),
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.pan_tool_rounded,
+                        color: Colors.orange,
+                      ),
+                      title: const Text("You've stopped"),
+                      subtitle: Text(
+                        me!.stopAcknowledged
+                            ? '${me.stopReason} — your guide has seen this'
+                            : '${me.stopReason} — waiting for your guide to see this',
+                      ),
+                    ),
+                  );
+                }
+                return OutlinedButton.icon(
+                  onPressed: _submitting ? null : () => _stopHiking(room.id),
+                  icon: const Icon(Icons.pan_tool_rounded),
+                  label: const Text("I Can't Continue"),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.orange,
+                    side: const BorderSide(color: Colors.orange),
+                  ),
+                );
+              },
             ),
         ],
       ),
@@ -1034,6 +1160,44 @@ class _OfflineSosRelayCard extends StatelessWidget {
   }
 }
 
+class _OfflineStopRelayCard extends StatelessWidget {
+  const _OfflineStopRelayCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: HeltecBleService.instance,
+      builder: (context, _) {
+        final ble = HeltecBleService.instance;
+        final name = ble.lastStopRelaySenderName;
+        final reason = ble.lastStopRelayReason;
+        final at = ble.lastStopRelayAt;
+        if (name == null || reason == null) {
+          return const SizedBox.shrink();
+        }
+        final minutesAgo = at == null
+            ? null
+            : DateTime.now().difference(at).inMinutes;
+        return Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Card(
+            color: Colors.orange.withValues(alpha: 0.18),
+            child: ListTile(
+              leading: const Icon(Icons.pan_tool_rounded, color: Colors.orange),
+              title: Text("$name can't continue — Offline (LoRa relay)"),
+              subtitle: Text(
+                '$reason\n'
+                '${minutesAgo == null ? 'Just now' : '$minutesAgo min ago'} • no internet used',
+              ),
+              isThreeLine: true,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// [_HeltecStatusCard] only sends the guide's Heltec a hiker-count
 /// snapshot at the moment it connects — without this, the OLED goes
 /// stale the instant anyone joins or leaves afterward. This has no UI
@@ -1127,6 +1291,71 @@ class _SosList extends StatelessWidget {
                             onPressed: () async {
                               try {
                                 await service.acknowledgeSos(roomId, event.id);
+                              } catch (error) {
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(error.toString())),
+                                );
+                              }
+                            },
+                            child: const Text('Acknowledge'),
+                          ),
+                  ),
+                );
+              })
+              .toList(growable: false),
+        );
+      },
+    );
+  }
+}
+
+class _StoppedHikersList extends StatelessWidget {
+  const _StoppedHikersList({required this.roomId, required this.service});
+
+  final String roomId;
+  final HikeRoomService service;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<HikeRoomParticipant>>(
+      stream: service.watchStoppedParticipants(roomId),
+      builder: (context, snapshot) {
+        final stopped = snapshot.data ?? const [];
+        if (stopped.isEmpty) {
+          return const Card(
+            child: ListTile(
+              leading: Icon(Icons.check_circle_outline_rounded),
+              title: Text('Everyone is still on the trail'),
+            ),
+          );
+        }
+        return Column(
+          children: stopped
+              .map((participant) {
+                final acknowledged = participant.stopAcknowledged;
+                return Card(
+                  color: acknowledged
+                      ? Colors.green.withValues(alpha: 0.12)
+                      : Colors.orange.withValues(alpha: 0.18),
+                  child: ListTile(
+                    leading: Icon(
+                      acknowledged
+                          ? Icons.done_all_rounded
+                          : Icons.pan_tool_rounded,
+                      color: acknowledged ? Colors.greenAccent : Colors.orange,
+                    ),
+                    title: Text("${participant.name} can't continue"),
+                    subtitle: Text(participant.stopReason ?? ''),
+                    trailing: acknowledged
+                        ? const Text('ACKNOWLEDGED')
+                        : FilledButton(
+                            onPressed: () async {
+                              try {
+                                await service.acknowledgeStop(
+                                  roomId,
+                                  participant.userId,
+                                );
                               } catch (error) {
                                 if (!context.mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(

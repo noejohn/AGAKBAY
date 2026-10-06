@@ -115,7 +115,7 @@ class _AgakScheduledHikesScreenState extends State<AgakScheduledHikesScreen> {
                     const SizedBox(width: 4),
                     const Expanded(
                       child: Text(
-                        'My Scheduled Hikes',
+                        'My Hiking Plan',
                         style: TextStyle(
                           color: AgakColors.ink,
                           fontSize: 20,
@@ -237,7 +237,7 @@ class _EmptyState extends StatelessWidget {
               ),
               icon: const Icon(Icons.event_available_rounded),
               label: const Text(
-                'Schedule a Hike',
+                'Plan a Hike',
                 style: TextStyle(fontWeight: FontWeight.w800),
               ),
             ),
