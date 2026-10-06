@@ -2281,26 +2281,14 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
-                if (idUrl != null)
-                  Image.network(idUrl, fit: BoxFit.contain)
-                else
-                  const Text(
-                    'Not provided.',
-                    style: TextStyle(color: Colors.black45),
-                  ),
+                _DocumentImage(url: idUrl),
                 const SizedBox(height: 20),
                 const Text(
                   'Certificate',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
-                if (certUrl != null)
-                  Image.network(certUrl, fit: BoxFit.contain)
-                else
-                  const Text(
-                    'Not provided.',
-                    style: TextStyle(color: Colors.black45),
-                  ),
+                _DocumentImage(url: certUrl),
               ],
             ),
           ),
@@ -2456,6 +2444,118 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
       ),
     );
   }
+}
+
+/// A submitted ID/certificate photo. Firebase Storage download URLs embed
+/// their own access token, so [Image.network] alone should be able to load
+/// one regardless of Storage security rules — but a plain Image.network
+/// with no errorBuilder fails completely silently on Flutter Web (CORS and
+/// permission failures both just render nothing, with no clue why), which
+/// is exactly what made these look "not submitted" even when they were.
+/// This surfaces the actual error and a copyable link as a fallback the
+/// admin can open directly in a new tab.
+class _DocumentImage extends StatelessWidget {
+  const _DocumentImage({required this.url});
+
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = this.url;
+    if (url == null || url.isEmpty) {
+      return const Text('Not provided.', style: TextStyle(color: Colors.black45));
+    }
+    final thumbnail = ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 320),
+      child: Image.network(
+        url,
+        fit: BoxFit.contain,
+        loadingBuilder: (context, child, progress) {
+          if (progress == null) return child;
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        },
+        // Kept only as a fallback — storage.setCorsConfiguration (see
+        // scripts/setStorageCors.js) should make this the rare path now,
+        // not the normal one. Without it, a failed load used to render as
+        // nothing at all, which read as "the applicant submitted nothing."
+        errorBuilder: (context, error, stackTrace) => Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.red.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Could not load this image here (likely a browser CORS or '
+                'permission restriction on the admin web dashboard).',
+                style: TextStyle(color: Colors.red),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Open directly instead:',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 4),
+              SelectableText(url, style: const TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+      ),
+    );
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () => _showFullImageView(context, url),
+        child: thumbnail,
+      ),
+    );
+  }
+}
+
+void _showFullImageView(BuildContext context, String url) {
+  showDialog<void>(
+    context: context,
+    barrierColor: Colors.black87,
+    builder: (dialogContext) => GestureDetector(
+      // Tap anywhere outside the image to close — standard lightbox
+      // behavior, no close button needed to find first.
+      onTap: () => Navigator.of(dialogContext).pop(),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: Stack(
+          children: [
+            Center(
+              child: InteractiveViewer(
+                maxScale: 5,
+                child: GestureDetector(
+                  // Swallow taps on the image itself so only the backdrop
+                  // closes the viewer — otherwise pinch/pan gestures on the
+                  // image would also trigger the dismiss-on-tap above.
+                  onTap: () {},
+                  child: Image.network(url, fit: BoxFit.contain),
+                ),
+              ),
+            ),
+            Positioned(
+              top: 16,
+              right: 16,
+              child: IconButton(
+                tooltip: 'Close',
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                icon: const Icon(Icons.close_rounded, color: Colors.white, size: 32),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 List<LatLng> _decodeRoutePoints(Object? value) {

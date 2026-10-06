@@ -19,7 +19,10 @@ const {
   updateParticipantBluetoothStatus,
   renameBluetoothDevice,
 } = require("./bluetoothActivity");
-const { closeAbandonedHikeRooms } = require("./hikeRoomMaintenance");
+const {
+  closeAbandonedHikeRooms,
+  notifyGuideOfStoppedHiker,
+} = require("./hikeRoomMaintenance");
 const { endHikeRoom } = require("./endHikeRoom");
 const { backfillAuditLogNames } = require("./auditLogMaintenance");
 const { reviewTrailSubmission } = require("./trailReview");
@@ -36,6 +39,7 @@ exports.getDeletedSosSenderIds = getDeletedSosSenderIds;
 exports.updateParticipantBluetoothStatus = updateParticipantBluetoothStatus;
 exports.renameBluetoothDevice = renameBluetoothDevice;
 exports.closeAbandonedHikeRooms = closeAbandonedHikeRooms;
+exports.notifyGuideOfStoppedHiker = notifyGuideOfStoppedHiker;
 exports.endHikeRoom = endHikeRoom;
 exports.backfillAuditLogNames = backfillAuditLogNames;
 exports.reviewTrailSubmission = reviewTrailSubmission;

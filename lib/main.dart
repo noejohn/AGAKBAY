@@ -4013,6 +4013,137 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return name.isNotEmpty ? name : phone;
   }
 
+  String _contactNumber() {
+    return _currentUserProfile['contactNumber']?.toString().trim() ?? '';
+  }
+
+  String _contactNumberSummary() {
+    final number = _contactNumber();
+    return number.isEmpty ? 'Not set' : number;
+  }
+
+  // Used to gate hike-starting (see _ensureReadyToHike) — SOS and emergency
+  // response depend on the hiker's own number and a reachable emergency
+  // contact, so a hike should not start with either left blank.
+  bool _isSafetyProfileComplete() {
+    return _contactNumber().isNotEmpty &&
+        _emergencyContactName().isNotEmpty &&
+        _emergencyContactPhone().isNotEmpty;
+  }
+
+  Future<void> _openContactNumberDialog() async {
+    final numberController = TextEditingController(text: _contactNumber());
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF072117),
+          title: const Text(
+            'Contact Number',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: TextField(
+            controller: numberController,
+            keyboardType: TextInputType.phone,
+            textInputAction: TextInputAction.done,
+            autofocus: true,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              labelText: 'Your phone number',
+              labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
+              prefixIcon: const Icon(Icons.phone_iphone_rounded),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => _unfocusThenPop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () =>
+                  _unfocusThenPop(dialogContext, numberController.text.trim()),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+    numberController.dispose();
+    if (result == null || !mounted) {
+      return;
+    }
+    if (result.isEmpty) {
+      _showDashboardSnackBar('Enter a phone number.');
+      return;
+    }
+    final user = _firebaseAuth.currentUser;
+    if (user == null) {
+      _showDashboardSnackBar('Sign in to save your contact number.');
+      return;
+    }
+    try {
+      await _firestore.collection('users').doc(user.uid).set({
+        'contactNumber': result,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      setState(() {
+        _currentUserProfile = {..._currentUserProfile, 'contactNumber': result};
+      });
+      _showDashboardSnackBar('Contact number saved.');
+    } catch (_) {
+      _showDashboardSnackBar('Unable to save contact number.');
+    }
+  }
+
+  // Shared gate for every "start hiking" entry point (solo, from a Hike
+  // Room, and the trail-recording path) — SOS and emergency contact only
+  // work if this data actually exists, so none of them should let a hike
+  // start while it's missing. Returns true (and does nothing) once the
+  // profile is already complete.
+  Future<bool> _ensureReadyToHike() async {
+    if (_isSafetyProfileComplete()) {
+      return true;
+    }
+    if (!mounted) {
+      return false;
+    }
+    final missing = <String>[
+      if (_contactNumber().isEmpty) 'your contact number',
+      if (_emergencyContactName().isEmpty || _emergencyContactPhone().isEmpty)
+        'your emergency contact',
+    ].join(' and ');
+    final goToProfile = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF072117),
+        icon: const Icon(Icons.health_and_safety_rounded, color: Color(0xFFFF7A7A)),
+        title: const Text(
+          'Complete Your Safety Details',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: Text(
+          'Please fill out $missing before starting a hike — this is how '
+          'Agakbay and your Tour Guide can reach you in an emergency.',
+          style: TextStyle(color: Colors.white.withValues(alpha: 0.85)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Go to Profile'),
+          ),
+        ],
+      ),
+    );
+    if (goToProfile == true && mounted) {
+      setState(() => _selectedNavIndex = 3);
+    }
+    return false;
+  }
+
   Future<void> _refreshLocationAccessStatus() async {
     if (_checkingLocationAccessStatus) {
       return;
@@ -5249,6 +5380,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _showDashboardSnackBar('This room does not have a usable trail route.');
       return;
     }
+    if (!await _ensureReadyToHike() || !mounted) {
+      return;
+    }
     final trail = _NearbyTrail(
       placeId: room.mountainPlaceId.isEmpty
           ? 'hike_room_${room.id}'
@@ -5512,6 +5646,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _startTrailRecordingForMountain(_NearbyTrail trail) async {
     if (_firebaseAuth.currentUser == null) {
       _showDashboardSnackBar('Sign in before recording a trail route.');
+      return;
+    }
+    if (!await _ensureReadyToHike() || !mounted) {
       return;
     }
 
@@ -6968,6 +7105,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   Offset? _agakOffset;
 
+  // Double-tap AGAK to dismiss her (an advisor flagged the always-on mascot
+  // as annoying), double-tap anywhere on screen to bring her back.
+  bool _agakDismissed = false;
+  bool _agakPlayEntranceAnimation = false;
+
+  void _recallAgak() {
+    setState(() {
+      _agakDismissed = false;
+      _agakPlayEntranceAnimation = true;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
@@ -6982,12 +7131,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
           return Stack(
             children: [
               _buildActiveTab(keyboardOpen),
-              if (!keyboardOpen)
+              if (!keyboardOpen && _agakDismissed)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onDoubleTap: _recallAgak,
+                  ),
+                ),
+              if (!keyboardOpen && !_agakDismissed)
                 Positioned(
                   left: _agakOffset!.dx,
                   top: _agakOffset!.dy,
                   child: AgakFloatingCompanion(
                     onTap: _openKyrielleCompanion,
+                    playEntranceAnimation: _agakPlayEntranceAnimation,
+                    onDismissed: () {
+                      setState(() {
+                        _agakDismissed = true;
+                        _agakPlayEntranceAnimation = false;
+                      });
+                    },
                     onDragDelta: (delta) {
                       setState(() {
                         final maxX = bodySize.width - _agakFootprint.width - 4;
@@ -7529,11 +7692,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  Future<void> _markAllNotificationsRead(String uid) async {
+    final unread = await _firestore
+        .collection('users')
+        .doc(uid)
+        .collection('notifications')
+        .where('read', isEqualTo: false)
+        .get();
+    if (unread.docs.isEmpty) return;
+    final batch = _firestore.batch();
+    for (final doc in unread.docs) {
+      batch.update(doc.reference, {'read': true});
+    }
+    try {
+      await batch.commit();
+    } catch (_) {
+      // Non-fatal — the badge/rows just stay as they were.
+    }
+  }
+
+  Future<void> _markNotificationRead(String uid, String notificationId) async {
+    try {
+      await _firestore
+          .collection('users')
+          .doc(uid)
+          .collection('notifications')
+          .doc(notificationId)
+          .update({'read': true});
+    } catch (_) {
+      // Non-fatal — tapping again will just retry the same update.
+    }
+  }
+
   Future<void> _openNotificationsSheet() {
     final user = _firebaseAuth.currentUser;
     return _openDatabaseSheet(
       title: 'Notifications',
       icon: Icons.notifications_none_rounded,
+      headerAction: user == null
+          ? null
+          : TextButton(
+              onPressed: () => _markAllNotificationsRead(user.uid),
+              child: const Text('Mark all as read'),
+            ),
       child: user == null
           ? _sheetEmptyState(
               icon: Icons.login_rounded,
@@ -7564,7 +7765,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 return Column(
                   children: [
                     for (var index = 0; index < docs.length; index++) ...[
-                      _notificationRow(docs[index].data()),
+                      _notificationRow(
+                        docs[index].data(),
+                        onTap: docs[index].data()['read'] == true
+                            ? null
+                            : () =>
+                                  _markNotificationRead(user.uid, docs[index].id),
+                      ),
                       if (index != docs.length - 1)
                         Divider(color: Colors.white.withValues(alpha: 0.08)),
                     ],
@@ -7575,11 +7782,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _notificationRow(Map<String, dynamic> data) {
+  Widget _notificationRow(Map<String, dynamic> data, {VoidCallback? onTap}) {
     final title = data['title']?.toString() ?? 'Notification';
     final body = data['body']?.toString() ?? '';
     final type = data['type']?.toString() ?? 'info';
     final createdAt = data['createdAt'];
+    final isUnread = data['read'] != true;
     final color = switch (type) {
       'sos' => const Color(0xFFFF7A7A),
       'trail' => const Color(0xFF7CF9A2),
@@ -7587,6 +7795,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'comment' => const Color(0xFF48D1FF),
       'like' => const Color(0xFFFF7A7A),
       'guide_application' => AgakColors.olive,
+      'hiker_stopped' => Colors.orange,
       _ => const Color(0xFF48D1FF),
     };
     final icon = switch (type) {
@@ -7596,6 +7805,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'like' => Icons.favorite_rounded,
       'safety' => Icons.health_and_safety_rounded,
       'guide_application' => Icons.badge_rounded,
+      'hiker_stopped' => Icons.pan_tool_rounded,
       _ => Icons.notifications_none_rounded,
     };
     DateTime? date;
@@ -7603,56 +7813,77 @@ class _DashboardScreenState extends State<DashboardScreen> {
       date = createdAt.toDate();
     }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.14),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Icon(icon, color: color, size: 21),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: AgakColors.ink,
-                    fontWeight: FontWeight.w900,
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Opacity(
+        opacity: isUnread ? 1 : 0.55,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: color, size: 21),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: AgakColors.ink,
+                        fontWeight: isUnread
+                            ? FontWeight.w900
+                            : FontWeight.w600,
+                      ),
+                    ),
+                    if (body.trim().isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        body,
+                        style: TextStyle(
+                          color: AgakColors.ink.withValues(alpha: 0.7),
+                          height: 1.3,
+                        ),
+                      ),
+                    ],
+                    if (date != null) ...[
+                      const SizedBox(height: 5),
+                      Text(
+                        _formatDate(date),
+                        style: TextStyle(
+                          color: AgakColors.ink.withValues(alpha: 0.48),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (isUnread)
+                Padding(
+                  padding: const EdgeInsets.only(left: 8, top: 4),
+                  child: Container(
+                    width: 9,
+                    height: 9,
+                    decoration: const BoxDecoration(
+                      color: AgakColors.maroon,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                 ),
-                if (body.trim().isNotEmpty) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    body,
-                    style: TextStyle(
-                      color: AgakColors.ink.withValues(alpha: 0.7),
-                      height: 1.3,
-                    ),
-                  ),
-                ],
-                if (date != null) ...[
-                  const SizedBox(height: 5),
-                  Text(
-                    _formatDate(date),
-                    style: TextStyle(
-                      color: AgakColors.ink.withValues(alpha: 0.48),
-                      fontSize: 11,
-                    ),
-                  ),
-                ],
-              ],
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -7661,6 +7892,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     required String title,
     required IconData icon,
     required Widget child,
+    Widget? headerAction,
   }) {
     return showModalBottomSheet<void>(
       context: context,
@@ -7705,6 +7937,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             ),
                           ),
                         ),
+                        ?headerAction,
                         IconButton(
                           onPressed: () => Navigator.of(sheetContext).pop(),
                           icon: Icon(
@@ -9689,6 +9922,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   subtitle: _emergencyContactSummary(),
                   trailing: Icons.edit_rounded,
                   onTap: _openEmergencyContactDialog,
+                ),
+                _profileActionTile(
+                  icon: Icons.phone_iphone_rounded,
+                  iconColor: const Color(0xFF7CF9A2),
+                  title: 'Contact Number',
+                  subtitle: _contactNumberSummary(),
+                  trailing: Icons.edit_rounded,
+                  onTap: _openContactNumberDialog,
                 ),
                 _profileActionTile(
                   icon: Icons.location_on_rounded,
@@ -11828,7 +12069,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             ),
                             icon: const Icon(Icons.event_available_rounded),
                             label: const Text(
-                              'Schedule this Hike',
+                              'Plan this Hike',
                               style: TextStyle(fontWeight: FontWeight.w800),
                             ),
                             style: OutlinedButton.styleFrom(
@@ -11852,6 +12093,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 if (!mounted || !shouldRecord) {
                                   return;
                                 }
+                              }
+                              if (!await _ensureReadyToHike() || !mounted) {
+                                return;
                               }
                               final communityTrail = await _fetchCommunityTrail(
                                 trail,

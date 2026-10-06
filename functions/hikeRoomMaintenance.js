@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onDocumentUpdated } = require("firebase-functions/v2/firestore");
 
 // A guide's device refreshes guideLastActiveAt every ~60s while a room is
 // active and their app is in the foreground (HikeRoomScreen.sendGuideHeartbeat).
@@ -19,9 +20,10 @@ async function closeAbandonedRoom(db, roomDoc) {
     autoEndedReason: "guide_inactive",
   });
 
+  const stillPresent = new Set(["active", "stopped"]);
   const participants = await roomDoc.ref.collection("participants").get();
   for (const participant of participants.docs) {
-    if ((participant.data().membershipStatus || "active") !== "active") continue;
+    if (!stillPresent.has(participant.data().membershipStatus || "active")) continue;
     batch.update(db.collection("users").doc(participant.id), {
       activeHikeRoomId: admin.firestore.FieldValue.delete(),
     });
@@ -61,5 +63,57 @@ exports.closeAbandonedHikeRooms = onSchedule(
     }
 
     return null;
+  },
+);
+
+// A hiker's own device writes "I Can't Continue" straight onto their own
+// participant doc (HikeRoomService.stopHiking) — firestore.rules lets them
+// update that doc, but never lets them write into the guide's own
+// notifications collection. This bridges the two with the Admin SDK, the
+// same shape as every other cross-user notification in this app.
+exports.notifyGuideOfStoppedHiker = onDocumentUpdated(
+  {
+    document: "hike_rooms/{roomId}/participants/{participantId}",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!before || !after) return;
+    // Only the transition INTO "stopped" should notify — not every
+    // subsequent edit to this participant doc (e.g. a later location update).
+    if (before.membershipStatus === "stopped" || after.membershipStatus !== "stopped") {
+      return;
+    }
+
+    const { roomId, participantId } = event.params;
+    const db = admin.firestore();
+    const roomSnap = await db.collection("hike_rooms").doc(roomId).get();
+    if (!roomSnap.exists) return;
+    const guideId = String(roomSnap.data()?.guideId || "").trim();
+    if (!guideId || guideId === participantId) return;
+
+    const hikerName = String(after.name || "A hiker").trim();
+    const reason = String(after.stopReason || "").trim();
+
+    // Deterministic ID so a retried Firestore event can't double-notify.
+    await db
+      .collection("users")
+      .doc(guideId)
+      .collection("notifications")
+      .doc(`hiker_stopped_${roomId}_${participantId}`)
+      .set(
+        {
+          type: "hiker_stopped",
+          title: `${hikerName} can't continue`,
+          body: reason || `${hikerName} stopped their hike and may need help.`,
+          roomId,
+          participantId,
+          read: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
   },
 );

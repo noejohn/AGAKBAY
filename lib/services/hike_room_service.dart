@@ -102,6 +102,10 @@ class HikeRoomParticipant {
     this.latitude,
     this.longitude,
     this.lastLocationAt,
+    this.stopReason,
+    this.stoppedAt,
+    this.stopAcknowledgedBy,
+    this.stopAcknowledgedAt,
   });
 
   final String userId;
@@ -117,20 +121,26 @@ class HikeRoomParticipant {
   // When the location was last successfully recorded in Firestore.
   final DateTime? lastLocationAt;
 
+  // Set when this hiker used "I Can't Continue" to stop partway through an
+  // active hike (see HikeRoomService.stopHiking) — only present on
+  // participants streamed via watchStoppedParticipants.
+  final String? stopReason;
+  final DateTime? stoppedAt;
+  final String? stopAcknowledgedBy;
+  final DateTime? stopAcknowledgedAt;
+
   bool get hasLocation =>
       latitude != null && longitude != null;
+
+  bool get stopAcknowledged => stopAcknowledgedBy != null;
 
   factory HikeRoomParticipant.fromSnapshot(
     DocumentSnapshot<Map<String, dynamic>> snapshot,
   ) {
     final data = snapshot.data() ?? <String, dynamic>{};
 
-    final rawLastLocationAt = data['lastLocationAt'];
-
-    DateTime? lastLocationAt;
-    if (rawLastLocationAt is Timestamp) {
-      lastLocationAt = rawLastLocationAt.toDate();
-    }
+    DateTime? asDate(dynamic value) =>
+        value is Timestamp ? value.toDate() : null;
 
     return HikeRoomParticipant(
       userId: snapshot.id,
@@ -140,7 +150,11 @@ class HikeRoomParticipant {
       activityStatus: data['activityStatus']?.toString() ?? 'in_room',
       latitude: (data['latitude'] as num?)?.toDouble(),
       longitude: (data['longitude'] as num?)?.toDouble(),
-      lastLocationAt: lastLocationAt,
+      lastLocationAt: asDate(data['lastLocationAt']),
+      stopReason: data['stopReason']?.toString(),
+      stoppedAt: asDate(data['stoppedAt']),
+      stopAcknowledgedBy: data['stopAcknowledgedBy']?.toString(),
+      stopAcknowledgedAt: asDate(data['stopAcknowledgedAt']),
     );
   }
 }
@@ -262,6 +276,19 @@ class HikeRoomService {
     );
   }
 
+  // The signed-in hiker's own participant doc — used to show/hide the "I
+  // Can't Continue" button and, once used, their own stop reason.
+  Stream<HikeRoomParticipant?> watchCurrentParticipant(String roomId) {
+    return _roomRef(roomId)
+        .collection('participants')
+        .doc(_user.uid)
+        .snapshots()
+        .map(
+          (snapshot) =>
+              snapshot.exists ? HikeRoomParticipant.fromSnapshot(snapshot) : null,
+        );
+  }
+
   Stream<String> watchCurrentMembership(String roomId) {
     return _roomRef(roomId)
         .collection('participants')
@@ -274,7 +301,12 @@ class HikeRoomService {
         );
   }
 
+  // 'stopped' participants stay included (not just 'active') — someone who
+  // used "I Can't Continue" mid-hike may still be descending alone, so the
+  // guide needs to keep seeing their live location here, not just in the
+  // one-time stop-reason alert (see watchStoppedParticipants).
   Stream<List<HikeRoomParticipant>> watchParticipants(String roomId) {
+    const visibleStatuses = {'active', 'stopped'};
     return _roomRef(roomId)
         .collection('participants')
         .orderBy('joinedAt')
@@ -282,10 +314,26 @@ class HikeRoomService {
         .map(
           (snapshot) => snapshot.docs
               .where(
-                (doc) =>
-                    (doc.data()['membershipStatus']?.toString() ?? 'active') ==
-                    'active',
+                (doc) => visibleStatuses.contains(
+                  doc.data()['membershipStatus']?.toString() ?? 'active',
+                ),
               )
+              .map(HikeRoomParticipant.fromSnapshot)
+              .toList(growable: false),
+        );
+  }
+
+  // Surfaces hikers who stopped partway through an active hike as a
+  // dedicated, attention-grabbing list (same treatment as SOS events) so
+  // the guide doesn't have to notice a status change buried in the regular
+  // participant list.
+  Stream<List<HikeRoomParticipant>> watchStoppedParticipants(String roomId) {
+    return _roomRef(roomId)
+        .collection('participants')
+        .where('membershipStatus', isEqualTo: 'stopped')
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
               .map(HikeRoomParticipant.fromSnapshot)
               .toList(growable: false),
         );
@@ -615,6 +663,43 @@ class HikeRoomService {
       'status': 'acknowledged',
       'acknowledgedBy': _user.uid,
       'acknowledgedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // For a hiker who can't continue partway through an active hike — not an
+  // emergency (that's sendSos), just "I'm stopping here." Takes effect
+  // immediately on the hiker's own participant doc; it does not wait on the
+  // guide's acknowledgment, so a guide who is slow to notice (or also out of
+  // signal) never traps the hiker in limbo. They stay a visible participant
+  // (see watchParticipants) rather than being removed — SOS and location
+  // sharing both keep working in case they need help while heading back
+  // down alone. notifyGuideOfStoppedHiker (functions/hikeRoomMaintenance.js)
+  // delivers the alert to the guide, since a hiker can't write directly into
+  // the guide's own notifications collection under firestore.rules.
+  Future<void> stopHiking(String roomId, {required String reason}) async {
+    final trimmedReason = reason.trim();
+    if (trimmedReason.isEmpty) {
+      throw ArgumentError('A reason is required.');
+    }
+    await _roomRef(roomId).collection('participants').doc(_user.uid).update({
+      'membershipStatus': 'stopped',
+      'stopReason': trimmedReason,
+      'stoppedAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> acknowledgeStop(String roomId, String participantId) async {
+    final room = HikeRoom.fromSnapshot(await _roomRef(roomId).get());
+    if (room.guideId != _user.uid) {
+      throw StateError('Only the Tour Guide can acknowledge this.');
+    }
+    await _roomRef(
+      roomId,
+    ).collection('participants').doc(participantId).update({
+      'stopAcknowledgedBy': _user.uid,
+      'stopAcknowledgedAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
