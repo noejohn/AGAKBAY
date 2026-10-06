@@ -48,6 +48,7 @@ exports.updateParticipantBluetoothStatus = onCall(
     const statusChanged = previous.deviceStatus !== deviceStatus || previous.deviceId !== deviceId;
     const eventType = statusChanged ? deviceStatus : "device_changed";
     const batch = db.batch();
+    const auditRef = db.collection("admin_actions").doc();
     const participantUpdate = {
       deviceId,
       deviceName: nextName,
@@ -78,6 +79,20 @@ exports.updateParticipantBluetoothStatus = onCall(
       participantId: uid,
       participantName: previous.name || "Hiker",
       occurredAt: now,
+    });
+    batch.set(auditRef, {
+      action: `bluetooth_${eventType}`,
+      actorId: uid,
+      actorName: previous.name || "Hiker",
+      targetId: deviceId,
+      targetName: nextName,
+      deviceName: nextName,
+      roomId,
+      roomCode: roomSnap.data()?.roomCode || roomId,
+      previousStatus: previous.deviceStatus || null,
+      newStatus: deviceStatus,
+      notifyAdmins: false,
+      createdAt: now,
     });
     await batch.commit();
     return { recorded: true, eventId: activityRef.id };

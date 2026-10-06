@@ -18,7 +18,8 @@ class HikeRoomScreen extends StatefulWidget {
   State<HikeRoomScreen> createState() => _HikeRoomScreenState();
 }
 
-class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObserver {
+class _HikeRoomScreenState extends State<HikeRoomScreen>
+    with WidgetsBindingObserver {
   final HikeRoomService _service = HikeRoomService();
   VoidCallback? _bleListener;
   String? _activeRoomId;
@@ -65,7 +66,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObse
               roomId,
               deviceStatus: ble.isConnected ? 'connected' : 'disconnected',
               deviceId: deviceId,
-              deviceName: HeltecBleService.hikerDeviceName,
+              deviceName: ble.deviceName,
             )
             .catchError((Object error) {
               debugPrint('Could not record Bluetooth activity: $error');
@@ -311,12 +312,9 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObse
     }
 
     try {
-    _activeRoomId = room.id;
+      _activeRoomId = room.id;
 
-    await _service.setCurrentParticipantHiking(
-      room.id,
-      isHiking: true,
-    );
+      await _service.setCurrentParticipantHiking(room.id, isHiking: true);
 
       await _startParticipantLocationTracking(room.id);
 
@@ -327,10 +325,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObse
       await _stopParticipantLocationTracking();
 
       try {
-        await _service.setCurrentParticipantHiking(
-          room.id,
-          isHiking: false,
-        );
+        await _service.setCurrentParticipantHiking(room.id, isHiking: false);
       } catch (_) {
         // The guide may have removed the participant while they were hiking.
       }
@@ -360,45 +355,44 @@ class _HikeRoomScreenState extends State<HikeRoomScreen> with WidgetsBindingObse
   }
 
   Future<void> _startParticipantLocationTracking(String roomId) async {
-  await _stopParticipantLocationTracking();
+    await _stopParticipantLocationTracking();
 
-  // Get an immediate GPS position so Firestore does not have to
-  // wait for the first stream event.
-  final initialPosition = await _getPhoneLocation();
+    // Get an immediate GPS position so Firestore does not have to
+    // wait for the first stream event.
+    final initialPosition = await _getPhoneLocation();
 
-  await _service.updateCurrentParticipantLocation(
-    roomId,
-    latitude: initialPosition.latitude,
-    longitude: initialPosition.longitude,
-  );
+    await _service.updateCurrentParticipantLocation(
+      roomId,
+      latitude: initialPosition.latitude,
+      longitude: initialPosition.longitude,
+    );
 
-  const locationSettings = LocationSettings(
-    accuracy: LocationAccuracy.high,
-    distanceFilter: 5,
-  );
+    const locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5,
+    );
 
-  _locationSubscription = Geolocator.getPositionStream(
-    locationSettings: locationSettings,
-  ).listen(
-    (position) async {
-      try {
-        await _service.updateCurrentParticipantLocation(
-          roomId,
-          latitude: position.latitude,
-          longitude: position.longitude,
+    _locationSubscription =
+        Geolocator.getPositionStream(locationSettings: locationSettings).listen(
+          (position) async {
+            try {
+              await _service.updateCurrentParticipantLocation(
+                roomId,
+                latitude: position.latitude,
+                longitude: position.longitude,
+              );
+            } catch (_) {
+              // Ignore individual location-update failures.
+              // The next GPS position will try again.
+            }
+          },
         );
-      } catch (_) {
-        // Ignore individual location-update failures.
-        // The next GPS position will try again.
-      }
-    },
-  );
-}
+  }
 
-Future<void> _stopParticipantLocationTracking() async {
-  await _locationSubscription?.cancel();
-  _locationSubscription = null;
-}
+  Future<void> _stopParticipantLocationTracking() async {
+    await _locationSubscription?.cancel();
+    _locationSubscription = null;
+  }
 
   Future<void> _sendSos(String roomId) async {
     await _run(() async {
@@ -1099,7 +1093,9 @@ class _HeltecStatusCard extends StatelessWidget {
               color: connected ? Colors.greenAccent : Colors.orange,
             ),
             title: Text(
-              connected ? 'Heltec device: Connected' : 'Heltec device: Not connected',
+              connected
+                  ? 'Heltec device: Connected'
+                  : 'Heltec device: Not connected',
             ),
             subtitle: Text(subtitle),
             trailing: connected

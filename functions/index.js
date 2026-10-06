@@ -1,7 +1,10 @@
 const crypto = require("node:crypto");
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
-const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const {
+  onDocumentCreated,
+  onDocumentUpdated,
+} = require("firebase-functions/v2/firestore");
 const { getRedisClient, weatherCacheKey } = require("./redisCache");
 const { enforceRateLimit } = require("./rateLimit");
 const { exchangeAuth0Token } = require("./auth0Exchange");
@@ -10,6 +13,7 @@ const {
   manageUserAccount,
   createAdminAccount,
   cleanupOrphanedSosEvents,
+  getDeletedSosSenderIds,
 } = require("./userAccountActions");
 const {
   updateParticipantBluetoothStatus,
@@ -31,6 +35,7 @@ exports.reviewTourGuideApplication = reviewTourGuideApplication;
 exports.manageUserAccount = manageUserAccount;
 exports.createAdminAccount = createAdminAccount;
 exports.cleanupOrphanedSosEvents = cleanupOrphanedSosEvents;
+exports.getDeletedSosSenderIds = getDeletedSosSenderIds;
 exports.updateParticipantBluetoothStatus = updateParticipantBluetoothStatus;
 exports.renameBluetoothDevice = renameBluetoothDevice;
 exports.closeAbandonedHikeRooms = closeAbandonedHikeRooms;
@@ -319,6 +324,20 @@ exports.sendSosEvent = onCall(
         now.toMillis() + SOS_COOLDOWN_SECONDS * 1000,
       ),
     });
+    const auditRef = db.collection("admin_actions")
+      .doc(`sos_sent_${roomId}_${eventRef.id}`);
+    batch.set(auditRef, {
+      action: "send_sos",
+      actorId: uid,
+      actorName: senderName,
+      targetId: roomId,
+      targetName: `Hike Room ${room.roomCode || roomId}`,
+      roomId,
+      roomCode: room.roomCode || roomId,
+      newStatus: "sent",
+      notifyAdmins: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
     await batch.commit();
 
     return { sent: true, eventId: eventRef.id };
@@ -376,6 +395,193 @@ exports.onSosEventCreated = onDocumentCreated(
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
+  },
+);
+
+async function writeOperationalAudit(event, action, fields) {
+  const eventId = String(event.id).replace(/[^A-Za-z0-9_-]/g, "_");
+  const auditRef = db.collection("admin_actions")
+    .doc(`event_${action}_${eventId}`);
+  await db.runTransaction(async (transaction) => {
+    const auditSnapshot = await transaction.get(auditRef);
+    if (auditSnapshot.exists) return;
+    transaction.create(auditRef, {
+      action,
+      ...fields,
+      notifyAdmins: false,
+      createdAt: event.time
+        ? admin.firestore.Timestamp.fromDate(new Date(event.time))
+        : admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+exports.onSosEventAcknowledged = onDocumentUpdated(
+  {
+    document: "hike_rooms/{roomId}/sos_events/{eventId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after ||
+        before.status === "acknowledged" ||
+        after.status !== "acknowledged") return;
+
+    const roomId = event.params.roomId;
+    const roomSnapshot = await db.collection("hike_rooms").doc(roomId).get();
+    const room = roomSnapshot.data() || {};
+    await writeOperationalAudit(event, "acknowledge_sos", {
+      actorId: after.acknowledgedBy || room.guideId || "",
+      actorName: room.guideName || "Tour Guide",
+      targetId: after.senderId || event.params.eventId,
+      targetName: after.senderName || "Hiker",
+      roomId,
+      roomCode: room.roomCode || roomId,
+      previousStatus: before.status || "sent",
+      newStatus: after.status,
+    });
+  },
+);
+
+exports.onHikeRoomCreated = onDocumentCreated(
+  {
+    document: "hike_rooms/{roomId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const room = event.data?.data();
+    if (!room) return;
+    await writeOperationalAudit(event, "create_hike_room", {
+      actorId: room.guideId || "",
+      actorName: room.guideName || "Tour Guide",
+      targetId: event.params.roomId,
+      targetName: room.mountainName || "Hike Room",
+      roomId: event.params.roomId,
+      roomCode: room.roomCode || "",
+      newStatus: room.status || "waiting",
+    });
+  },
+);
+
+exports.onHikeRoomStatusChanged = onDocumentUpdated(
+  {
+    document: "hike_rooms/{roomId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after || before.status === after.status) return;
+
+    const action = after.status === "active"
+      ? "start_hike_room"
+      : after.status === "ended" && !after.autoEndedReason
+        ? "end_hike_room"
+        : null;
+    if (!action) return;
+
+    await writeOperationalAudit(event, action, {
+      actorId: after.guideId || "",
+      actorName: after.guideName || "Tour Guide",
+      targetId: event.params.roomId,
+      targetName: after.mountainName || "Hike Room",
+      roomId: event.params.roomId,
+      roomCode: after.roomCode || "",
+      previousStatus: before.status || "",
+      newStatus: after.status,
+    });
+  },
+);
+
+exports.onHikeRoomParticipantCreated = onDocumentCreated(
+  {
+    document: "hike_rooms/{roomId}/participants/{participantId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const participant = event.data?.data();
+    if (!participant || participant.role !== "hiker") return;
+    const roomId = event.params.roomId;
+    const roomSnapshot = await db.collection("hike_rooms").doc(roomId).get();
+    const room = roomSnapshot.data() || {};
+    await writeOperationalAudit(event, "join_hike_room", {
+      actorId: participant.userId || event.params.participantId,
+      actorName: participant.name || "Hiker",
+      targetId: roomId,
+      targetName: `Hike Room ${room.roomCode || roomId}`,
+      roomId,
+      roomCode: room.roomCode || roomId,
+      newStatus: "active",
+    });
+  },
+);
+
+exports.onHikeRoomParticipantUpdated = onDocumentUpdated(
+  {
+    document: "hike_rooms/{roomId}/participants/{participantId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after) return;
+    const roomId = event.params.roomId;
+    const roomSnapshot = await db.collection("hike_rooms").doc(roomId).get();
+    const room = roomSnapshot.data() || {};
+    const participantId = after.userId || event.params.participantId;
+
+    if (before.membershipStatus !== after.membershipStatus) {
+      let action;
+      let actorId;
+      let actorName;
+      if (after.membershipStatus === "left") {
+        action = "leave_hike_room";
+        actorId = participantId;
+        actorName = after.name || "Hiker";
+      } else if (after.membershipStatus === "removed") {
+        action = "remove_hike_participant";
+        actorId = after.removedBy || room.guideId || "";
+        actorName = room.guideName || "Tour Guide";
+      }
+      if (action) {
+        await writeOperationalAudit(event, action, {
+          actorId,
+          actorName,
+          targetId: participantId,
+          targetName: after.name || "Hiker",
+          roomId,
+          roomCode: room.roomCode || roomId,
+          previousStatus: before.membershipStatus || "active",
+          newStatus: after.membershipStatus,
+        });
+      }
+    }
+
+    if (before.activityStatus !== after.activityStatus) {
+      const action = after.activityStatus === "hiking"
+        ? "start_hiking"
+        : after.activityStatus === "in_room"
+          ? "return_to_room"
+          : null;
+      if (action) {
+        await writeOperationalAudit(event, action, {
+          actorId: participantId,
+          actorName: after.name || "Hiker",
+          targetId: roomId,
+          targetName: `Hike Room ${room.roomCode || roomId}`,
+          roomId,
+          roomCode: room.roomCode || roomId,
+          previousStatus: before.activityStatus || "",
+          newStatus: after.activityStatus,
+        });
+      }
+    }
   },
 );
 
@@ -660,6 +866,7 @@ exports.onAdminActionCreated = onDocumentCreated(
     if (!snapshot) return;
 
     const data = snapshot.data() || {};
+    if (data.notifyAdmins === false) return;
     const actionId = event.params.actionId;
     const action = String(data.action || "admin_action");
     const notificationId = action === "submit_trail_route"
@@ -674,6 +881,7 @@ exports.onAdminActionCreated = onDocumentCreated(
       suspend: "Suspended an account",
       restore: "Restored an account",
       delete_user_account: "Deleted a user account",
+      cleanup_orphaned_sos_events: "Removed SOS alerts from deleted users",
       rename_bluetooth_device: "Renamed a Bluetooth device",
       submit_trail_route: "Received a trail route submission",
       approve_trail_submission: "Approved a trail submission",

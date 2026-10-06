@@ -91,6 +91,77 @@ async function deleteUserHikeRecords(db, uid) {
   }
 }
 
+async function findDeletedSosSenderIds(db, auth, eventDocs) {
+  const docs = eventDocs ?? (await db.collectionGroup("sos_events").get()).docs;
+  const senderIds = [...new Set(docs
+    .map((event) => event.data().senderId)
+    .filter((uid) => typeof uid === "string" && uid))];
+
+  // A missing profile alone does not mean its owner deleted their account.
+  // Use Firebase Authentication as the source of truth.
+  const deletedSenderIds = new Set();
+  for (let offset = 0; offset < senderIds.length; offset += 100) {
+    const batchIds = senderIds.slice(offset, offset + 100);
+    const result = await auth.getUsers(batchIds.map((uid) => ({ uid })));
+    for (const missingUser of result.notFound) {
+      if (missingUser.uid) deletedSenderIds.add(missingUser.uid);
+    }
+  }
+  return deletedSenderIds;
+}
+
+exports.findDeletedSosSenderIds = findDeletedSosSenderIds;
+
+async function writeSosCleanupAudit(db, auth, counts) {
+  const auditRef = db.collection("admin_actions").doc();
+  const notificationRef = db.collection("notifications")
+    .doc(`admin_action_${auditRef.id}`);
+  const action = "cleanup_orphaned_sos_events";
+  const adminName = auth.token?.name || auth.token?.email || auth.uid;
+  const message = `${adminName}: Cleaned up deleted users' SOS alerts — ` +
+    `Removed ${counts.deletedSosEvents} SOS alerts and ` +
+    `${counts.deletedSosNotifications} notifications.`;
+  const createdAt = admin.firestore.FieldValue.serverTimestamp();
+  const batch = db.batch();
+  batch.set(auditRef, {
+    adminId: auth.uid,
+    adminEmail: auth.token?.email || null,
+    action,
+    targetName: "Deleted users' SOS alerts",
+    deletedSosEvents: counts.deletedSosEvents,
+    deletedSosNotifications: counts.deletedSosNotifications,
+    createdAt,
+    notifyAdmins: false,
+  });
+  batch.set(notificationRef, {
+    type: "admin_action",
+    title: "Admin Activity",
+    message,
+    actionId: auditRef.id,
+    action,
+    isRead: false,
+    createdAt,
+  });
+  await batch.commit();
+}
+
+exports.writeSosCleanupAudit = writeSosCleanupAudit;
+
+exports.getDeletedSosSenderIds = onCall(
+  { timeoutSeconds: 300, memory: "512MiB" },
+  async (request) => {
+    if (request.auth?.token?.admin !== true) {
+      throw new HttpsError("permission-denied", "Admin access required.");
+    }
+
+    const deletedSenderIds = await findDeletedSosSenderIds(
+      admin.firestore(),
+      admin.auth(),
+    );
+    return { senderIds: [...deletedSenderIds] };
+  },
+);
+
 exports.cleanupOrphanedSosEvents = onCall(
   { timeoutSeconds: 300, memory: "512MiB" },
   async (request) => {
@@ -99,31 +170,18 @@ exports.cleanupOrphanedSosEvents = onCall(
     }
 
     const db = admin.firestore();
-    const [events, anonymizedEvents] = await Promise.all([
-      db.collectionGroup("sos_events").where("senderId", "!=", "").get(),
-      db.collectionGroup("sos_events").where("senderName", "==", "user").get(),
-    ]);
+    const events = await db.collectionGroup("sos_events").get();
+    const deletedSenderIds = await findDeletedSosSenderIds(
+      db,
+      admin.auth(),
+      events.docs,
+    );
 
-    const candidates = new Map();
-    for (const event of events.docs) candidates.set(event.ref.path, event);
-    // Older account deletion code anonymized senderName and removed senderId.
-    for (const event of anonymizedEvents.docs) {
-      if (!event.data().senderId) candidates.set(event.ref.path, event);
-    }
-
-    const senderIds = [...new Set([...candidates.values()]
-      .map((event) => event.data().senderId)
-      .filter((uid) => typeof uid === "string" && uid))];
-    const profileExists = new Map();
-    for (let offset = 0; offset < senderIds.length; offset += 400) {
-      const batchIds = senderIds.slice(offset, offset + 400);
-      const profiles = await db.getAll(...batchIds.map((uid) => db.collection("users").doc(uid)));
-      profiles.forEach((profile) => profileExists.set(profile.id, profile.exists));
-    }
-
-    const orphaned = [...candidates.values()].filter((event) => {
-      const uid = event.data().senderId;
-      return !uid || profileExists.get(uid) === false;
+    const orphaned = events.docs.filter((event) => {
+      const data = event.data();
+      const senderId = data.senderId?.toString() ?? "";
+      return deletedSenderIds.has(senderId) ||
+          (!senderId && data.senderName?.toString().trim().toLowerCase() === "user");
     });
     const notifications = new Map();
     for (const event of orphaned) {
@@ -131,6 +189,19 @@ exports.cleanupOrphanedSosEvents = onCall(
       if (roomId) {
         const notificationRef = db.collection("notifications").doc(`sos_${roomId}_${event.id}`);
         notifications.set(notificationRef.path, notificationRef);
+      }
+    }
+
+    // Also remove any older SOS notification for a deleted sender, including
+    // notifications whose event was already removed in an earlier cleanup.
+    for (const uid of deletedSenderIds) {
+      const senderNotifications = await db.collection("notifications")
+        .where("senderId", "==", uid)
+        .get();
+      for (const notification of senderNotifications.docs) {
+        if (notification.data().type === "sos") {
+          notifications.set(notification.ref.path, notification.ref);
+        }
       }
     }
 
@@ -153,9 +224,16 @@ exports.cleanupOrphanedSosEvents = onCall(
       await batch.commit();
     }
 
+    const deletedSosEvents = orphaned.length;
+    const deletedSosNotifications = existingNotificationRefs.length;
+    await writeSosCleanupAudit(db, request.auth, {
+      deletedSosEvents,
+      deletedSosNotifications,
+    });
+
     return {
-      deletedSosEvents: orphaned.length,
-      deletedSosNotifications: existingNotificationRefs.length,
+      deletedSosEvents,
+      deletedSosNotifications,
     };
   },
 );
