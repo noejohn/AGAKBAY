@@ -8,8 +8,8 @@
         "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/variants/heltec_wireless_tracker",
         "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/variants/**",
         "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/hardware/esp32/3.3.8/libraries/**",
-        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/esp32-arduino-libs/**/include/**",
-        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/esp32-arduino-libs/**/include/newlib/platform_include",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/esp32-arduino-libs",
+        "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/esp32-arduino-libs/*/include/newlib/platform_include",
         "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/xtensa-esp-elf-gcc/*/xtensa-esp-elf/include",
         "${env:LOCALAPPDATA}/Arduino15/packages/Heltec-esp32/tools/xtensa-esp-elf-gcc/*/xtensa-esp-elf/sys-include",
         "${env:USERPROFILE}/Documents/Arduino/libraries/**"

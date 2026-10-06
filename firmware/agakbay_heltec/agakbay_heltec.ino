@@ -28,7 +28,7 @@
 // hiker's unit, "AGAKBAY-TourGuide" for the tour guide's unit. The app
 // scans for the name matching its own user's role, so each phone
 // connects to the physically correct device instead of any nearby one.
-#define DEVICE_NAME "AGAKBAY-TourGuide"
+#define DEVICE_NAME "AGAKBAY-Hiker"
 
 // These five UUIDs must match lib/services/heltec_ble_service.dart
 // exactly, or the app will never find the matching service/characteristics.
