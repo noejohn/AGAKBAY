@@ -10,8 +10,12 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == userId;
     }
 
+    // .get() with a default: a user with no `admin` claim at all (e.g. an
+    // email/password sign-up that never went through exchangeAuth0Token)
+    // must count as "not admin" — reading a missing claim directly is a rules
+    // evaluation ERROR, which denied those users even ordinary reads.
     function isAdmin() {
-      return signedIn() && request.auth.token.admin == true;
+      return signedIn() && request.auth.token.get('admin', false) == true;
     }
 
     function isTourismAdmin() {
@@ -43,15 +47,21 @@ service cloud.firestore {
       // ever happens server-side, via reviewTourGuideApplication approving
       // a tour_guide_applications doc (see that collection below). "admin"
       // is blocked the same way — only trusted Admin SDK paths grant it.
+      // Every field is read with .get(field, safe default): the app's real
+      // sign-up payload (AuthDatabaseService.signUpUser) doesn't include
+      // adminAccess / adminRole / managedMountainName at all, and reading a
+      // missing field directly is an evaluation ERROR that denied every
+      // email/password sign-up. A missing field is exactly as safe as its
+      // default here, so this is no looser than before.
       allow create: if isOwner(userId)
-        && request.resource.data.guideVerified != true
-        && request.resource.data.role != 'admin'
-        && request.resource.data.accountType != 'admin'
-        && request.resource.data.adminAccess != true
-        && request.resource.data.adminRole == null
-        && request.resource.data.managedMountainName == null
-        && request.resource.data.role != 'tour_guide'
-        && request.resource.data.accountType != 'tour_guide';
+        && request.resource.data.get('guideVerified', null) != true
+        && request.resource.data.get('role', '') != 'admin'
+        && request.resource.data.get('accountType', '') != 'admin'
+        && request.resource.data.get('adminAccess', false) != true
+        && request.resource.data.get('adminRole', null) == null
+        && request.resource.data.get('managedMountainName', null) == null
+        && request.resource.data.get('role', '') != 'tour_guide'
+        && request.resource.data.get('accountType', '') != 'tour_guide';
 
       allow update: if isOwner(userId)
         && !request.resource.data.diff(resource.data).affectedKeys()

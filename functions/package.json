@@ -19,7 +19,9 @@
     "jose": "^4.15.9"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "eslint": "^8.57.0",
+    "firebase": "^12.19.0",
     "jest": "^29.7.0"
   }
 }
