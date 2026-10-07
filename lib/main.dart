@@ -5,6 +5,7 @@ import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -50,6 +51,8 @@ import 'package:tunga/widgets/agak_floating_companion.dart';
 import 'package:tunga/widgets/agak_theme.dart';
 import 'package:tunga/widgets/agak_tip_popup.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
+
+
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

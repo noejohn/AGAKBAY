@@ -60,6 +60,7 @@ dependencies:
   google_fonts: ^6.2.1
   speech_to_text: ^7.0.0
   flutter_blue_plus: ^1.35.3
+  firebase_analytics: ^11.6.0
 
 dev_dependencies:
   flutter_test:
