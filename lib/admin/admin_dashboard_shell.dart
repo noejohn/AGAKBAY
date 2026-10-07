@@ -36,6 +36,17 @@ const _navItems = [
   _NavItem('Audit Logs', Icons.description_outlined),
 ];
 
+EdgeInsets _adminPagePadding(BuildContext context) {
+  final width = MediaQuery.sizeOf(context).width;
+  return EdgeInsets.all(
+    width < 600
+        ? 16
+        : width < 1000
+        ? 22
+        : 28,
+  );
+}
+
 class _AdminAccess {
   const _AdminAccess({required this.isMountainHead, this.managedMountainName});
 
@@ -1500,7 +1511,7 @@ class _DashboardOverviewPage extends StatelessWidget {
       );
     }
     return SingleChildScrollView(
-      padding: EdgeInsets.all(MediaQuery.sizeOf(context).width < 700 ? 16 : 24),
+      padding: _adminPagePadding(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -2296,7 +2307,7 @@ class _TourGuideVerificationPage extends StatelessWidget {
         .where('mountainsHandled', isEqualTo: access.managedMountainName);
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
+      padding: _adminPagePadding(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -2883,7 +2894,7 @@ class _TrailVerificationPage extends StatelessWidget {
     }
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
+      padding: _adminPagePadding(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -3613,7 +3624,7 @@ class _HikeRoomMonitoringPage extends StatelessWidget {
     }
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
+      padding: _adminPagePadding(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -4121,14 +4132,43 @@ class _SosMonitoringPage extends StatefulWidget {
 }
 
 class _SosMonitoringPageState extends State<_SosMonitoringPage> {
+  final _scrollController = ScrollController();
   bool _cleaningOrphanedAlerts = false;
+  double _scrollProgress = 0;
+  _SosAlertFilter _filter = _SosAlertFilter.all;
   Set<String> _deletedSenderIds = {};
   String? _deletedSenderLookupError;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_updateScrollProgress);
     if (widget.access.isTourismAdmin) _loadDeletedSenderIds();
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_updateScrollProgress)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _updateScrollProgress() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    final progress = position.maxScrollExtent == 0
+        ? 0.0
+        : (position.pixels / position.maxScrollExtent).clamp(0.0, 1.0);
+    if ((progress - _scrollProgress).abs() < 0.01) return;
+    setState(() => _scrollProgress = progress);
+  }
+
+  void _selectFilter(_SosAlertFilter filter) {
+    setState(() => _filter = filter);
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _updateScrollProgress(),
+    );
   }
 
   Future<void> _loadDeletedSenderIds() async {
@@ -4236,17 +4276,25 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
         }
 
         final events = snapshot.data!.docs;
-        final acknowledgedCount = events
+        final acknowledgedEvents = events
             .where(
               (event) => event.data()['status']?.toString() == 'acknowledged',
             )
-            .length;
+            .toList(growable: false);
         final unacknowledgedEvents = events
             .where(
               (event) => event.data()['status']?.toString() != 'acknowledged',
             )
             .toList(growable: false);
-        final sosPoints = unacknowledgedEvents
+        final displayedEvents = switch (_filter) {
+          _SosAlertFilter.all => events,
+          _SosAlertFilter.acknowledged => acknowledgedEvents,
+          _SosAlertFilter.unacknowledged => unacknowledgedEvents,
+        };
+        final mapEvents = _filter == _SosAlertFilter.acknowledged
+            ? acknowledgedEvents
+            : unacknowledgedEvents;
+        final sosPoints = mapEvents
             .map((event) {
               final data = event.data();
               final latitude = (data['latitude'] as num?)?.toDouble();
@@ -4262,136 +4310,253 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
             .whereType<_SosMapPoint>()
             .toList(growable: false);
 
-        return ListView(
-          padding: const EdgeInsets.all(28),
+        return Column(
           children: [
-            Text(
-              'SOS Monitoring',
-              style: Theme.of(
-                context,
-              ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Live SOS events from Firebase.',
-              style: TextStyle(color: Colors.black54),
-            ),
-            if (widget.access.isTourismAdmin &&
-                _deletedSenderLookupError != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Could not verify deleted SOS users: '
-                '$_deletedSenderLookupError',
-                style: const TextStyle(color: Colors.redAccent),
-              ),
-            ],
-            const SizedBox(height: 10),
-            if (widget.access.isTourismAdmin)
-              Align(
-                alignment: Alignment.centerRight,
-                child: OutlinedButton.icon(
-                  onPressed: _cleaningOrphanedAlerts
-                      ? null
-                      : _removeOrphanedAlerts,
-                  icon: _cleaningOrphanedAlerts
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.delete_sweep_outlined),
-                  label: const Text('Remove SOS from deleted users'),
-                ),
-              ),
-            const SizedBox(height: 14),
-
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-              decoration: BoxDecoration(
-                color: unacknowledgedEvents.isEmpty
-                    ? const Color(0xFFEAF5EF)
-                    : const Color(0xFFFFF1E8),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: unacknowledgedEvents.isEmpty
-                      ? const Color(0xFFCDE8D8)
-                      : const Color(0xFFFFD7C7),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    Icons.warning_rounded,
-                    color: unacknowledgedEvents.isEmpty
-                        ? const Color(0xFF12805A)
-                        : const Color(0xFFD92F3D),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '${events.length} total SOS alert${events.length == 1 ? '' : 's'}',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w800,
-                        color: unacknowledgedEvents.isEmpty
-                            ? const Color(0xFF12805A)
-                            : const Color(0xFFD92F3D),
-                      ),
+            Expanded(
+              child: Scrollbar(
+                controller: _scrollController,
+                thumbVisibility: true,
+                child: ListView(
+                  controller: _scrollController,
+                  padding: _adminPagePadding(context),
+                  children: [
+                    Text(
+                      'SOS Monitoring',
+                      style: Theme.of(context).textTheme.headlineMedium
+                          ?.copyWith(fontWeight: FontWeight.w800),
                     ),
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Live SOS events from Firebase.',
+                      style: TextStyle(color: Colors.black54),
+                    ),
+                    if (widget.access.isTourismAdmin &&
+                        _deletedSenderLookupError != null) ...[
+                      const SizedBox(height: 8),
                       Text(
-                        '${unacknowledgedEvents.length} not acknowledged',
-                        style: const TextStyle(
-                          color: Color(0xFFD92F3D),
-                          fontSize: 12,
-                        ),
-                      ),
-                      Text(
-                        '$acknowledgedCount acknowledged',
-                        style: const TextStyle(
-                          color: Color(0xFF12805A),
-                          fontSize: 12,
-                        ),
+                        'Could not verify deleted SOS users: '
+                        '$_deletedSenderLookupError',
+                        style: const TextStyle(color: Colors.redAccent),
                       ),
                     ],
+                    const SizedBox(height: 10),
+                    if (widget.access.isTourismAdmin)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: OutlinedButton.icon(
+                          onPressed: _cleaningOrphanedAlerts
+                              ? null
+                              : _removeOrphanedAlerts,
+                          icon: _cleaningOrphanedAlerts
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.delete_sweep_outlined),
+                          label: const Text('Remove SOS from deleted users'),
+                        ),
+                      ),
+                    const SizedBox(height: 14),
+
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 14,
+                      ),
+                      decoration: BoxDecoration(
+                        color: unacknowledgedEvents.isEmpty
+                            ? const Color(0xFFEAF5EF)
+                            : const Color(0xFFFFF1E8),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: unacknowledgedEvents.isEmpty
+                              ? const Color(0xFFCDE8D8)
+                              : const Color(0xFFFFD7C7),
+                        ),
+                      ),
+                      child: Wrap(
+                        alignment: WrapAlignment.spaceBetween,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        runSpacing: 8,
+                        spacing: 16,
+                        children: [
+                          Icon(
+                            Icons.warning_rounded,
+                            color: unacknowledgedEvents.isEmpty
+                                ? const Color(0xFF12805A)
+                                : const Color(0xFFD92F3D),
+                          ),
+                          const SizedBox(width: 10),
+                          SizedBox(
+                            width: MediaQuery.sizeOf(context).width < 600
+                                ? double.infinity
+                                : 260,
+                            child: Text(
+                              '${events.length} total SOS alert${events.length == 1 ? '' : 's'}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                color: unacknowledgedEvents.isEmpty
+                                    ? const Color(0xFF12805A)
+                                    : const Color(0xFFD92F3D),
+                              ),
+                            ),
+                          ),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(
+                                '${unacknowledgedEvents.length} not acknowledged',
+                                style: const TextStyle(
+                                  color: Color(0xFFD92F3D),
+                                  fontSize: 12,
+                                ),
+                              ),
+                              Text(
+                                '${acknowledgedEvents.length} acknowledged',
+                                style: const TextStyle(
+                                  color: Color(0xFF12805A),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    if (events.isNotEmpty &&
+                        (_filter == _SosAlertFilter.acknowledged ||
+                            sosPoints.isNotEmpty)) ...[
+                      _SosRoomMap(
+                        points: sosPoints,
+                        showMarkers: _filter != _SosAlertFilter.acknowledged,
+                      ),
+                      const SizedBox(height: 18),
+                    ],
+                    if (events.isEmpty)
+                      const _SosPageMessage(
+                        icon: Icons.check_circle_outline_rounded,
+                        message: 'No SOS alerts recorded.',
+                        detail:
+                            'New alerts will appear here when a hiker sends an SOS.',
+                      )
+                    else if (displayedEvents.isEmpty)
+                      _SosPageMessage(
+                        icon: Icons.filter_alt_off_rounded,
+                        message:
+                            'No ${_filter.label.toLowerCase()} SOS alerts.',
+                        detail:
+                            'Choose another filter to view more SOS alerts.',
+                      )
+                    else ...[
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          _SosFilterChip(
+                            label: 'All',
+                            count: events.length,
+                            selected: _filter == _SosAlertFilter.all,
+                            onSelected: () =>
+                                _selectFilter(_SosAlertFilter.all),
+                          ),
+                          _SosFilterChip(
+                            label: 'Acknowledged',
+                            count: acknowledgedEvents.length,
+                            selected: _filter == _SosAlertFilter.acknowledged,
+                            onSelected: () =>
+                                _selectFilter(_SosAlertFilter.acknowledged),
+                          ),
+                          _SosFilterChip(
+                            label: 'Unacknowledged',
+                            count: unacknowledgedEvents.length,
+                            selected: _filter == _SosAlertFilter.unacknowledged,
+                            onSelected: () =>
+                                _selectFilter(_SosAlertFilter.unacknowledged),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      ...displayedEvents.map((event) {
+                        final data = event.data();
+                        final roomId =
+                            data['roomId']?.toString() ??
+                            event.reference.parent.parent?.id ??
+                            '';
+                        return _SosAlertCard(
+                          roomId: roomId,
+                          eventData: data,
+                          senderName: _senderName(data),
+                        );
+                      }),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 12),
+              child: Row(
+                children: [
+                  Text(
+                    'Scroll ${(100 * _scrollProgress).round()}%',
+                    style: const TextStyle(
+                      color: Colors.black54,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: LinearProgressIndicator(
+                      value: _scrollProgress,
+                      minHeight: 5,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 18),
-
-            if (events.isEmpty)
-              const _SosPageMessage(
-                icon: Icons.check_circle_outline_rounded,
-                message: 'No SOS alerts recorded.',
-                detail:
-                    'New alerts will appear here when a hiker sends an SOS.',
-              )
-            else ...[
-              if (unacknowledgedEvents.isNotEmpty && sosPoints.isNotEmpty) ...[
-                _SosRoomMap(points: sosPoints),
-                const SizedBox(height: 18),
-              ],
-              ...events.map((event) {
-                final data = event.data();
-                final roomId =
-                    data['roomId']?.toString() ??
-                    event.reference.parent.parent?.id ??
-                    '';
-                return _SosAlertCard(
-                  roomId: roomId,
-                  eventData: data,
-                  senderName: _senderName(data),
-                );
-              }),
-            ],
           ],
         );
       },
     );
   }
+}
+
+enum _SosAlertFilter { all, acknowledged, unacknowledged }
+
+extension on _SosAlertFilter {
+  String get label => switch (this) {
+    _SosAlertFilter.all => 'all',
+    _SosAlertFilter.acknowledged => 'acknowledged',
+    _SosAlertFilter.unacknowledged => 'unacknowledged',
+  };
+}
+
+class _SosFilterChip extends StatelessWidget {
+  const _SosFilterChip({
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final String label;
+  final int count;
+  final bool selected;
+  final VoidCallback onSelected;
+
+  @override
+  Widget build(BuildContext context) => ChoiceChip(
+    label: Text('$label ($count)'),
+    selected: selected,
+    onSelected: (_) => onSelected(),
+  );
 }
 
 class _SosMapPoint {
@@ -4409,9 +4574,10 @@ class _SosMapPoint {
 }
 
 class _SosRoomMap extends StatefulWidget {
-  const _SosRoomMap({required this.points});
+  const _SosRoomMap({required this.points, required this.showMarkers});
 
   final List<_SosMapPoint> points;
+  final bool showMarkers;
 
   @override
   State<_SosRoomMap> createState() => _SosRoomMapState();
@@ -4479,27 +4645,26 @@ class _SosRoomMapState extends State<_SosRoomMap> {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.points.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    final firstPoint = widget.points.first;
-
-    final markers = widget.points.map((point) {
-      return Marker(
-        markerId: MarkerId(point.eventId),
-        position: LatLng(point.latitude, point.longitude),
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-        infoWindow: InfoWindow(
-          title: point.senderName.isEmpty
-              ? 'SOS alert'
-              : 'SOS: ${point.senderName}',
-          snippet:
-              '${point.latitude.toStringAsFixed(6)}, '
-              '${point.longitude.toStringAsFixed(6)}',
-        ),
-      );
-    }).toSet();
+    final firstPoint = widget.points.firstOrNull;
+    final markers = widget.showMarkers
+        ? widget.points.map((point) {
+            return Marker(
+              markerId: MarkerId(point.eventId),
+              position: LatLng(point.latitude, point.longitude),
+              icon: BitmapDescriptor.defaultMarkerWithHue(
+                BitmapDescriptor.hueRed,
+              ),
+              infoWindow: InfoWindow(
+                title: point.senderName.isEmpty
+                    ? 'SOS alert'
+                    : 'SOS: ${point.senderName}',
+                snippet:
+                    '${point.latitude.toStringAsFixed(6)}, '
+                    '${point.longitude.toStringAsFixed(6)}',
+              ),
+            );
+          }).toSet()
+        : const <Marker>{};
 
     return Container(
       height: 320,
@@ -4508,8 +4673,10 @@ class _SosRoomMapState extends State<_SosRoomMap> {
       clipBehavior: Clip.antiAlias,
       child: GoogleMap(
         initialCameraPosition: CameraPosition(
-          target: LatLng(firstPoint.latitude, firstPoint.longitude),
-          zoom: 14,
+          target: firstPoint == null
+              ? const LatLng(7.0731, 125.6128)
+              : LatLng(firstPoint.latitude, firstPoint.longitude),
+          zoom: firstPoint == null ? 11 : 14,
         ),
         markers: markers,
         onMapCreated: (controller) {
@@ -4551,6 +4718,24 @@ class _SosAlertCard extends StatelessWidget {
         : null;
     final acknowledgedAt = eventData['acknowledgedAt'];
 
+    final statusChip = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: (acknowledged ? const Color(0xFF12805A) : Colors.red).withValues(
+          alpha: 0.15,
+        ),
+      ),
+      child: Text(
+        acknowledged ? 'ACKNOWLEDGED' : 'NOT ACKNOWLEDGED',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          color: acknowledged ? const Color(0xFF12805A) : Colors.redAccent,
+        ),
+      ),
+    );
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
@@ -4558,47 +4743,54 @@ class _SosAlertCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(
-                  acknowledged ? Icons.check_circle_rounded : Icons.sos_rounded,
-                  color: acknowledged
-                      ? const Color(0xFF12805A)
-                      : Colors.redAccent,
-                  size: 28,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: senderName.isEmpty
-                      ? const SizedBox.shrink()
-                      : Text(
-                          'SOS from $senderName',
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(20),
-                    color: (acknowledged ? const Color(0xFF12805A) : Colors.red)
-                        .withValues(alpha: 0.15),
-                  ),
-                  child: Text(
-                    acknowledged ? 'ACKNOWLEDGED' : 'NOT ACKNOWLEDGED',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final titleRow = Row(
+                  children: [
+                    Icon(
+                      acknowledged
+                          ? Icons.check_circle_rounded
+                          : Icons.sos_rounded,
                       color: acknowledged
                           ? const Color(0xFF12805A)
                           : Colors.redAccent,
+                      size: 28,
                     ),
-                  ),
-                ),
-              ],
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        senderName.isEmpty
+                            ? 'SOS alert'
+                            : 'SOS from $senderName',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w800),
+                      ),
+                    ),
+                  ],
+                );
+                if (constraints.maxWidth < 520) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      titleRow,
+                      const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 38),
+                        child: statusChip,
+                      ),
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: titleRow),
+                    const SizedBox(width: 10),
+                    statusChip,
+                  ],
+                );
+              },
             ),
 
             const SizedBox(height: 14),
@@ -4629,14 +4821,16 @@ class _SosAlertCard extends StatelessWidget {
               ),
             if (acknowledged && acknowledgedAt is Timestamp) ...[
               const SizedBox(height: 8),
-              Row(
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 4,
                 children: [
                   const Icon(
                     Icons.check_circle_outline_rounded,
                     size: 20,
                     color: Color(0xFF12805A),
                   ),
-                  const SizedBox(width: 8),
                   Text(
                     'Tour guide acknowledged ${_formatSosTime(acknowledgedAt.toDate())}',
                   ),
@@ -4725,7 +4919,7 @@ class _BluetoothDevicesPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
-      padding: const EdgeInsets.all(28),
+      padding: _adminPagePadding(context),
       children: [
         Text(
           'Bluetooth Devices',
@@ -5312,7 +5506,7 @@ class _UserManagementPageState extends State<_UserManagementPage> {
         : usersCollection.orderBy('email');
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
+      padding: _adminPagePadding(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -6118,7 +6312,7 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           return Padding(
-            padding: const EdgeInsets.all(28),
+            padding: _adminPagePadding(context),
             child: _StreamErrorRow(snapshot.error),
           );
         }
@@ -6132,11 +6326,15 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
         }
 
         return Padding(
-          padding: const EdgeInsets.all(28),
+          padding: _adminPagePadding(context),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 12,
+                runSpacing: 12,
                 children: [
                   Text(
                     'Audit Logs (${logs.length})',
@@ -6145,7 +6343,6 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
-                  const Spacer(),
                   OutlinedButton.icon(
                     onPressed: _backfilling ? null : _backfillOlderRecords,
                     icon: _backfilling
@@ -6167,77 +6364,10 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: SingleChildScrollView(
-                      child: DataTable(
-                        columns: const [
-                          DataColumn(label: Text('Date')),
-                          DataColumn(label: Text('Action')),
-                          DataColumn(label: Text('Actor')),
-                          DataColumn(label: Text('Target')),
-                          DataColumn(label: Text('Status Change')),
-                          DataColumn(label: Text('Record')),
-                        ],
-                        rows: logs.map((log) {
-                          final data = log.data();
-                          final action =
-                              data['action']?.toString() ?? 'unknown_action';
-                          final previous = data['previousStatus']?.toString();
-                          final next = data['newStatus']?.toString();
-                          // Prefers the human-readable email/name written at
-                          // the time of the action; falls back to the raw
-                          // uid only for older records written before that
-                          // enrichment existed.
-                          final actor =
-                              data['actorName']?.toString() ??
-                              data['actorEmail']?.toString() ??
-                              data['adminEmail']?.toString() ??
-                              data['submitterName']?.toString() ??
-                              data['actorId']?.toString() ??
-                              data['adminId']?.toString() ??
-                              data['submittedBy']?.toString() ??
-                              (action == 'auto_close_abandoned_room'
-                                  ? 'System'
-                                  : null);
-                          final target =
-                              data['targetName']?.toString() ??
-                              data['trailName']?.toString() ??
-                              data['mountainName']?.toString() ??
-                              data['targetEmail']?.toString() ??
-                              data['targetId']?.toString();
-                          final statusChange = [
-                            if (previous != null && previous != 'null')
-                              previous,
-                            if (next != null && next != 'null') next,
-                          ].join(' → ');
-                          return DataRow(
-                            cells: [
-                              DataCell(
-                                Text(
-                                  _formatTimestamp(data['createdAt']).isEmpty
-                                      ? 'Unknown'
-                                      : _formatTimestamp(data['createdAt']),
-                                ),
-                              ),
-                              DataCell(Text(_actionVerb(action))),
-                              DataCell(Text(actor ?? '—')),
-                              DataCell(Text(target ?? '—')),
-                              DataCell(
-                                Text(statusChange.isEmpty ? '—' : statusChange),
-                              ),
-                              DataCell(
-                                TextButton(
-                                  onPressed: () =>
-                                      _showAuditRecord(context, log.id, data),
-                                  child: const Text('View details'),
-                                ),
-                              ),
-                            ],
-                          );
-                        }).toList(),
-                      ),
-                    ),
+                  child: _AuditLogsResponsiveTable(
+                    logs: logs,
+                    onOpenRecord: (log) =>
+                        _showAuditRecord(context, log.id, log.data()),
                   ),
                 ),
               ),
@@ -6347,6 +6477,192 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AuditLogsResponsiveTable extends StatelessWidget {
+  const _AuditLogsResponsiveTable({
+    required this.logs,
+    required this.onOpenRecord,
+  });
+
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> logs;
+  final ValueChanged<QueryDocumentSnapshot<Map<String, dynamic>>> onOpenRecord;
+
+  Map<String, String> _values(QueryDocumentSnapshot<Map<String, dynamic>> log) {
+    final data = log.data();
+    final action = data['action']?.toString() ?? 'unknown_action';
+    final previous = data['previousStatus']?.toString();
+    final next = data['newStatus']?.toString();
+    final actor =
+        data['actorName']?.toString() ??
+        data['actorEmail']?.toString() ??
+        data['adminEmail']?.toString() ??
+        data['submitterName']?.toString() ??
+        data['actorId']?.toString() ??
+        data['adminId']?.toString() ??
+        data['submittedBy']?.toString() ??
+        (action == 'auto_close_abandoned_room' ? 'System' : null);
+    final target =
+        data['targetName']?.toString() ??
+        data['trailName']?.toString() ??
+        data['mountainName']?.toString() ??
+        data['targetEmail']?.toString() ??
+        data['targetId']?.toString();
+    final statusChange = [
+      if (previous != null && previous != 'null') previous,
+      if (next != null && next != 'null') next,
+    ].join(' → ');
+
+    return {
+      'date': _formatTimestamp(data['createdAt']).isEmpty
+          ? 'Unknown'
+          : _formatTimestamp(data['createdAt']),
+      'action': _actionVerb(action),
+      'actor': actor ?? '—',
+      'target': target ?? '—',
+      'status': statusChange.isEmpty ? '—' : statusChange,
+    };
+  }
+
+  Widget _cell(String value, {bool header = false}) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+    child: Text(
+      value,
+      softWrap: true,
+      maxLines: header ? 2 : null,
+      overflow: header ? TextOverflow.ellipsis : null,
+      style: TextStyle(
+        fontWeight: header ? FontWeight.w700 : FontWeight.normal,
+        fontSize: header ? 12 : 13,
+      ),
+    ),
+  );
+
+  Widget _mobileRecord(QueryDocumentSnapshot<Map<String, dynamic>> log) {
+    final values = _values(log);
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    values['action']!,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                    softWrap: true,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => onOpenRecord(log),
+                  child: const Text('View details'),
+                ),
+              ],
+            ),
+            const Divider(height: 12),
+            for (final entry in [
+              MapEntry('Date', values['date']!),
+              MapEntry('Actor', values['actor']!),
+              MapEntry('Target', values['target']!),
+              MapEntry('Status change', values['status']!),
+            ])
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: 94,
+                      child: Text(
+                        entry.key,
+                        style: const TextStyle(
+                          color: Colors.black54,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    Expanded(child: Text(entry.value, softWrap: true)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  TableRow _desktopRecord(QueryDocumentSnapshot<Map<String, dynamic>> log) {
+    final values = _values(log);
+    return TableRow(
+      children: [
+        _cell(values['date']!),
+        _cell(values['action']!),
+        _cell(values['actor']!),
+        _cell(values['target']!),
+        _cell(values['status']!),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+          child: TextButton(
+            onPressed: () => onOpenRecord(log),
+            child: const Text(
+              'View details',
+              softWrap: true,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 760) {
+          return ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            itemCount: logs.length,
+            itemBuilder: (context, index) => _mobileRecord(logs[index]),
+          );
+        }
+
+        return SingleChildScrollView(
+          child: Table(
+            border: const TableBorder(
+              horizontalInside: BorderSide(color: Color(0xFFE5E7E6)),
+            ),
+            columnWidths: const {
+              0: FlexColumnWidth(1.15),
+              1: FlexColumnWidth(1.2),
+              2: FlexColumnWidth(1.45),
+              3: FlexColumnWidth(1.35),
+              4: FlexColumnWidth(1.2),
+              5: FlexColumnWidth(0.9),
+            },
+            children: [
+              TableRow(
+                decoration: const BoxDecoration(color: Color(0xFFF7F8F7)),
+                children: [
+                  _cell('Date', header: true),
+                  _cell('Action', header: true),
+                  _cell('Actor', header: true),
+                  _cell('Target', header: true),
+                  _cell('Status Change', header: true),
+                  _cell('Record', header: true),
+                ],
+              ),
+              for (final log in logs) _desktopRecord(log),
+            ],
+          ),
+        );
+      },
     );
   }
 }
