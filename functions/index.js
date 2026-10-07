@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const admin = require("firebase-admin");
+require("./emulatorAdminFix");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const {
   onDocumentCreated,

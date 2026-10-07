@@ -8,6 +8,7 @@
   "scripts": {
     "lint": "eslint .",
     "test": "jest --coverage",
+    "test:api": "node integration/run.js",
     "serve": "firebase emulators:start --only functions",
     "deploy": "firebase deploy --only functions"
   },
