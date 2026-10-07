@@ -61,6 +61,23 @@ it("rejects when the caller lacks the admin claim", async () => {
   expect(mockSubmissionGet).not.toHaveBeenCalled();
 });
 
+it("does not allow a Mountain Head to finalize a trail approval", async () => {
+  await expect(
+    callHandler(
+      { submissionId: "sub-1", decision: "approve" },
+      {
+        uid: "head-uid",
+        token: {
+          admin: true,
+          adminRole: "mountain_head",
+          managedMountainName: "Mt. Apo",
+        },
+      },
+    ),
+  ).rejects.toMatchObject({ code: "permission-denied" });
+  expect(mockSubmissionGet).not.toHaveBeenCalled();
+});
+
 it("rejects an invalid decision value", async () => {
   await expect(callHandler({ submissionId: "sub-1", decision: "maybe" })).rejects.toThrow(
     /approve.*reject/,

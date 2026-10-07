@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { assertTourismAdmin } = require("./adminAuthorization");
 
 exports.updateParticipantBluetoothStatus = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
@@ -102,9 +103,7 @@ exports.updateParticipantBluetoothStatus = onCall(
 exports.renameBluetoothDevice = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
     const deviceId = request.data?.deviceId;
     const displayName = typeof request.data?.displayName === "string"
       ? request.data.displayName.trim()

@@ -1,5 +1,10 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const {
+  assertTourismAdmin,
+  assertMountainHead,
+  normalizeMountainNames,
+} = require("./adminAuthorization");
 
 // Called from the Admin Web dashboard's Tour Guide Verification page.
 // Gated on the `admin` custom claim (mirrored by exchangeAuth0Token from
@@ -16,9 +21,7 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 exports.reviewTourGuideApplication = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
     const applicationId = request.data?.applicationId;
     const decision = request.data?.decision;
@@ -56,10 +59,23 @@ exports.reviewTourGuideApplication = onCall(
 
     if (approved) {
       const userRef = db.collection("users").doc(targetUid);
+      const mountainNames = Array.isArray(application.mountainNames)
+        ? application.mountainNames
+          .filter((name) => typeof name === "string")
+          .map((name) => name.trim())
+          .filter(Boolean)
+        : typeof application.mountainsHandled === "string"
+          ? application.mountainsHandled
+            .split(/[,;\n]/)
+            .map((name) => name.trim())
+            .filter(Boolean)
+          : [];
       await userRef.update({
         role: "tour_guide",
         accountType: "tour_guide",
         guideVerified: true,
+        mountainNames: [...new Set(mountainNames)],
+        mountainsHandled: application.mountainsHandled || mountainNames.join(", "),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       await admin.auth().setCustomUserClaims(targetUid, {
@@ -98,5 +114,75 @@ exports.reviewTourGuideApplication = onCall(
     });
 
     return { decision };
+  },
+);
+
+exports.recommendAdminReview = onCall(
+  { timeoutSeconds: 30, memory: "256MiB" },
+  async (request) => {
+    const managedMountainName = assertMountainHead(request.auth);
+    const targetType = request.data?.targetType;
+    const targetId = request.data?.targetId;
+    const decision = request.data?.decision;
+    const reason = typeof request.data?.reason === "string"
+      ? request.data.reason.trim()
+      : "";
+
+    if (!["tour_guide_application", "trail_submission"].includes(targetType)) {
+      throw new HttpsError("invalid-argument", "Unsupported review type.");
+    }
+    if (typeof targetId !== "string" || !targetId.trim()) {
+      throw new HttpsError("invalid-argument", "targetId is required.");
+    }
+    if (!["approve", "reject"].includes(decision)) {
+      throw new HttpsError("invalid-argument", "decision must be 'approve' or 'reject'.");
+    }
+
+    const db = admin.firestore();
+    const collectionName = targetType === "tour_guide_application"
+      ? "tour_guide_applications"
+      : "trail_submissions";
+    const targetRef = db.collection(collectionName).doc(targetId);
+    const targetSnap = await targetRef.get();
+    if (!targetSnap.exists) {
+      throw new HttpsError("not-found", "The item to review was not found.");
+    }
+    const target = targetSnap.data() || {};
+    if (target.status !== "pending") {
+      throw new HttpsError("failed-precondition", "This item has already been reviewed.");
+    }
+
+    const assignedMountain = managedMountainName.toLocaleLowerCase();
+    const mountainMatches = targetType === "trail_submission"
+      ? String(target.mountainName || "").trim().toLocaleLowerCase() === assignedMountain
+      : normalizeMountainNames(target.mountainNames ?? target.mountainsHandled)
+        .includes(assignedMountain);
+    if (!mountainMatches) {
+      throw new HttpsError(
+        "permission-denied",
+        "This item is outside your managed mountain.",
+      );
+    }
+
+    const recommendation = {
+      decision,
+      reason: reason || null,
+      mountainName: managedMountainName,
+      recommendedBy: request.auth.uid,
+      recommendedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    await targetRef.update({ mountainHeadRecommendation: recommendation });
+    await db.collection("admin_actions").add({
+      adminId: request.auth.uid,
+      adminEmail: request.auth.token.email || null,
+      action: "mountain_head_recommendation",
+      targetId,
+      targetName: target.trailName || target.fullName || target.applicantEmail || targetId,
+      mountainName: managedMountainName,
+      recommendation: decision,
+      reason: reason || null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { decision, targetId };
   },
 );

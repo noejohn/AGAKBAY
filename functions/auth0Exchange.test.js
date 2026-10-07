@@ -147,6 +147,33 @@ describe("exchangeAuth0Token", () => {
     });
   });
 
+  it("mirrors the Mountain Head role and assigned mountain into admin claims", async () => {
+    mockJwtVerify.mockResolvedValue({
+      payload: { email: "head@b.com", email_verified: true, name: "Mountain Head" },
+    });
+    mockGetUserByEmail.mockResolvedValue({ uid: "head-uid" });
+    mockDocGet.mockResolvedValue({
+      data: () => ({
+        role: "admin",
+        accountType: "admin",
+        adminRole: "mountain_head",
+        managedMountainName: "Mt. Apo",
+        guideVerified: null,
+      }),
+    });
+
+    await callHandler({ idToken: "tok" });
+
+    expect(mockSetCustomUserClaims).toHaveBeenCalledWith("head-uid", {
+      role: "admin",
+      accountType: "admin",
+      guideVerified: null,
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mt. Apo",
+    });
+  });
+
   it("bootstraps a fresh hiker doc and default claims for a brand-new user", async () => {
     mockJwtVerify.mockResolvedValue({
       payload: { email: "fresh@b.com", email_verified: true, name: "Fresh Hiker" },
@@ -188,4 +215,3 @@ describe("exchangeAuth0Token", () => {
     expect(mockGetUserByEmail).not.toHaveBeenCalled();
   });
 });
-

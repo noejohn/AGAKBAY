@@ -1,5 +1,6 @@
 const admin = require("firebase-admin");
-const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onCall } = require("firebase-functions/v2/https");
+const { assertTourismAdmin } = require("./adminAuthorization");
 
 // Actions whose targetId is a users/{uid} doc — worth resolving to a name/
 // email. Other actions (rename_bluetooth_device, submit_trail_route) either
@@ -25,9 +26,7 @@ const USER_TARGET_ACTIONS = new Set([
 exports.backfillAuditLogNames = onCall(
   { timeoutSeconds: 120, memory: "256MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
     const db = admin.firestore();
     const auth = admin.auth();

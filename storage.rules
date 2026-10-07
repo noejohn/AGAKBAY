@@ -2,6 +2,15 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
+    function isTourismAdmin() {
+      return request.auth != null
+        && request.auth.token.admin == true
+        && (
+          request.auth.token.adminRole == null ||
+          request.auth.token.adminRole == 'tourism_admin'
+        );
+    }
+
     match /profile_photos/{userId}/{fileName} {
       allow read: if true;
       allow write: if request.auth != null
@@ -20,11 +29,12 @@ service firebase.storage {
 
     // Government ID / certification photos for a "Apply as Tour Guide"
     // submission — unlike the two paths above, this is NOT public read:
-    // only the applicant themselves or an admin (reviewing the
-    // application) may view it.
+    // only the applicant themselves or a Tourism Admin (reviewing the
+    // application) may fetch it directly. Scoped Mountain Heads consume
+    // the download URLs on applications their Firestore rules expose.
     match /tour_guide_applications/{userId}/{fileName} {
       allow read: if request.auth != null
-        && (request.auth.uid == userId || request.auth.token.admin == true);
+        && (request.auth.uid == userId || isTourismAdmin());
       allow write: if request.auth != null
         && request.auth.uid == userId
         && request.resource.size < 8 * 1024 * 1024

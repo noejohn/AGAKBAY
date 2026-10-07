@@ -10,7 +10,10 @@
     "source": "functions"
   },
   "hosting": {
-    "public": "build/web",
+    "public": "build/admin-web",
+    "predeploy": [
+      "flutter build web --release -t lib/admin_main.dart --output build/admin-web"
+    ],
     "ignore": ["firebase.json", "**/.*"],
     "rewrites": [
       {

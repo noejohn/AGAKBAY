@@ -14,10 +14,27 @@ service cloud.firestore {
       return signedIn() && request.auth.token.admin == true;
     }
 
+    function isTourismAdmin() {
+      return isAdmin()
+        && request.auth.token.get('adminRole', 'tourism_admin') == 'tourism_admin';
+    }
+
+    function isMountainHead() {
+      return isAdmin()
+        && request.auth.token.get('adminRole', '') == 'mountain_head'
+        && request.auth.token.get('managedMountainName', '') is string
+        && request.auth.token.get('managedMountainName', '') != '';
+    }
+
     match /users/{userId} {
       allow read: if signedIn() && (
-        isAdmin() ||
-        resource.data.accountType == 'tour_guide' ||
+        isTourismAdmin() ||
+        (isMountainHead()
+          && resource.data.accountType == 'tour_guide'
+          && resource.data.get('mountainNames', []).hasAny([
+            request.auth.token.managedMountainName
+          ])) ||
+        (!isAdmin() && resource.data.accountType == 'tour_guide') ||
         isOwner(userId)
       );
 
@@ -25,11 +42,14 @@ service cloud.firestore {
       // tour guide" self-declaration at signup. Becoming a tour guide only
       // ever happens server-side, via reviewTourGuideApplication approving
       // a tour_guide_applications doc (see that collection below). "admin"
-      // is blocked the same way — only scripts/grantAdminRole.js grants it.
+      // is blocked the same way — only trusted Admin SDK paths grant it.
       allow create: if isOwner(userId)
         && request.resource.data.guideVerified != true
         && request.resource.data.role != 'admin'
         && request.resource.data.accountType != 'admin'
+        && request.resource.data.adminAccess != true
+        && request.resource.data.adminRole == null
+        && request.resource.data.managedMountainName == null
         && request.resource.data.role != 'tour_guide'
         && request.resource.data.accountType != 'tour_guide';
 
@@ -39,7 +59,13 @@ service cloud.firestore {
               'role',
               'accountType',
               'guideVerified',
-              'accountTypeConfirmed'
+              'accountTypeConfirmed',
+              'adminRole',
+              'adminAccess',
+              'managedMountainName',
+              'mountainName',
+              'mountainNames',
+              'mountainsHandled'
             ]);
 
       match /notifications/{notificationId} {
@@ -141,7 +167,14 @@ service cloud.firestore {
     }
 
     match /hike_rooms/{roomId} {
-      allow read: if signedIn();
+      allow read: if signedIn()
+        && (
+          !isAdmin() ||
+          isTourismAdmin() ||
+          (isMountainHead()
+            && resource.data.get('mountainName', '') ==
+              request.auth.token.managedMountainName)
+        );
       allow create: if signedIn()
         && request.resource.data.guideId == request.auth.uid;
       // The guide can edit room details and start the room. Ending is handled
@@ -156,7 +189,14 @@ service cloud.firestore {
       );
 
       match /participants/{participantId} {
-        allow read: if signedIn();
+        allow read: if signedIn()
+          && (
+            !isAdmin() ||
+            isTourismAdmin() ||
+            (isMountainHead() && get(
+              /databases/$(database)/documents/hike_rooms/$(roomId)
+            ).data.mountainName == request.auth.token.managedMountainName)
+          );
         // Every participant doc is created by its own owner (createRoom
         // for the guide, joinRoom for a hiker) — doc id and userId field
         // both equal the creator's own uid.
@@ -174,7 +214,17 @@ service cloud.firestore {
       }
 
       match /sos_events/{eventId} {
-        allow read: if signedIn();
+        allow read: if signedIn() && (
+          isTourismAdmin() ||
+          !isAdmin() ||
+          (isMountainHead() && (
+            resource.data.get('mountainName', '') ==
+              request.auth.token.managedMountainName ||
+            get(
+              /databases/$(database)/documents/hike_rooms/$(roomId)
+            ).data.mountainName == request.auth.token.managedMountainName
+          ))
+        );
         // Creation goes through the sendSosEvent Cloud Function only (see
         // functions/index.js), which re-verifies room/participant status
         // server-side and enforces a per-user cooldown before writing via
@@ -201,16 +251,25 @@ service cloud.firestore {
     // Enables the admin dashboard to count active SOS events with a
     // collection-group query across every hike room.
     match /{path=**}/sos_events/{eventId} {
-      allow read: if isAdmin();
+      allow read: if isTourismAdmin()
+        || (isMountainHead()
+          && resource.data.get('mountainName', '') ==
+            request.auth.token.managedMountainName);
     }
 
     match /trail_submissions/{submissionId} {
-      // Admin dashboard's "pending submissions" list needs to read every
-      // hiker's submission, not just its own — without isAdmin() here,
+      // Admin dashboards need to read submissions beyond the caller's own —
+      // without the appropriate Tourism Admin or mountain-scoped role here,
       // that query is rejected outright (Firestore refuses a list query
       // it can't prove is fully authorized, it doesn't just filter).
       allow read: if signedIn()
-        && (resource.data.submittedBy == request.auth.uid || isAdmin());
+        && (
+          resource.data.submittedBy == request.auth.uid ||
+          isTourismAdmin() ||
+          (isMountainHead()
+            && resource.data.get('mountainName', '') ==
+              request.auth.token.managedMountainName)
+        );
       allow create: if signedIn() && request.resource.data.submittedBy == request.auth.uid;
       allow update, delete: if false;
     }
@@ -231,11 +290,11 @@ service cloud.firestore {
     // Device identity and immutable connectivity history are written by
     // updateParticipantBluetoothStatus via the Admin SDK.
     match /bluetooth_devices/{deviceId} {
-      allow read: if isAdmin();
+      allow read: if isTourismAdmin();
       allow write: if false;
 
       match /activity/{activityId} {
-        allow read: if isAdmin();
+        allow read: if isTourismAdmin();
         allow write: if false;
       }
     }
@@ -243,12 +302,22 @@ service cloud.firestore {
     // A hiker's "Apply as Tour Guide" submission (ID/certificate photos,
     // experience). Only the applicant or an admin can read it — it
     // includes government ID. Status can only move off "pending" via
-    // reviewTourGuideApplication's Admin SDK write (see
+    // Tourism Admin's reviewTourGuideApplication Admin SDK write (see
     // functions/adminActions.js) — never directly by any client, which is
     // what stops an applicant from just marking their own application
     // approved.
     match /tour_guide_applications/{applicationId} {
-      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow read: if signedIn() && (
+        resource.data.uid == request.auth.uid ||
+        isTourismAdmin() ||
+        (isMountainHead()
+          && resource.data.get('mountainNames', []).hasAny([
+            request.auth.token.managedMountainName
+          ])) ||
+        (isMountainHead()
+          && resource.data.get('mountainsHandled', '') ==
+            request.auth.token.managedMountainName)
+      );
       allow create: if signedIn()
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.status == 'pending';
@@ -258,19 +327,29 @@ service cloud.firestore {
     // Written only by reviewTourGuideApplication (functions/adminActions.js)
     // via the Admin SDK — never directly by any client.
     match /admin_actions/{actionId} {
-      allow read: if isAdmin();
+      allow read: if isTourismAdmin();
       allow write: if false;
     }
 
     match /notifications/{notificationId} {
-    allow read: if isAdmin();
+    allow read: if isTourismAdmin()
+      || (isMountainHead()
+        && resource.data.get('type', '') in ['sos', 'trail_submission']
+        && resource.data.get('mountainName', '') ==
+          request.auth.token.managedMountainName);
 
     allow create: if false;
     allow delete: if false;
 
-    allow update: if isAdmin()
-      && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['isRead']);
+    allow update: if request.resource.data.diff(resource.data)
+        .affectedKeys().hasOnly(['isRead'])
+      && (
+        isTourismAdmin() ||
+        (isMountainHead()
+          && resource.data.get('type', '') in ['sos', 'trail_submission']
+          && resource.data.get('mountainName', '') ==
+            request.auth.token.managedMountainName)
+      );
   }
 
     match /{document=**} {

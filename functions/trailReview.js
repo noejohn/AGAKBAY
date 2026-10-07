@@ -1,6 +1,7 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { sanitizeRoutePoints } = require("./routePoints");
+const { assertTourismAdmin } = require("./adminAuthorization");
 
 async function notifyHikersOfNewTrail(db, { mountainKey, mountainName, submitterUid }) {
   const displayName = mountainName || "a nearby mountain";
@@ -48,9 +49,7 @@ async function notifyHikersOfNewTrail(db, { mountainKey, mountainName, submitter
 exports.reviewTrailSubmission = onCall(
   { timeoutSeconds: 60, memory: "256MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
     const submissionId = request.data?.submissionId;
     const decision = request.data?.decision;

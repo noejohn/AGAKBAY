@@ -332,6 +332,12 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
     final contact = _contactController.text.trim();
     final experience = _experienceController.text.trim();
     final mountains = _mountainsController.text.trim();
+    final mountainNames = mountains
+        .split(RegExp(r'[,;\n]'))
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty)
+        .toSet()
+        .toList();
 
     if (fullName.isEmpty || contact.isEmpty || experience.isEmpty || mountains.isEmpty) {
       ScaffoldMessenger.of(
@@ -363,6 +369,7 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
         'contactNumber': contact,
         'experienceYears': experience,
         'mountainsHandled': mountains,
+        'mountainNames': mountainNames,
         'idImageUrl': idUrl,
         'certificateImageUrl': certUrl,
         'status': 'pending',

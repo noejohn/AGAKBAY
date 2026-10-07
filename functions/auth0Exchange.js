@@ -137,6 +137,8 @@ exports.exchangeAuth0Token = onCall(
     let role = "hiker";
     let accountType = "hiker";
     let guideVerified = null;
+    let adminRole = null;
+    let managedMountainName = null;
     if (isNew) {
       await bootstrapNewUserDoc({ db, uid, email, displayName: payload.name });
     } else {
@@ -145,6 +147,8 @@ exports.exchangeAuth0Token = onCall(
       role = data.role || "hiker";
       accountType = data.accountType || "hiker";
       guideVerified = data.guideVerified ?? null;
+      adminRole = data.adminRole || null;
+      managedMountainName = data.managedMountainName || null;
     }
 
     // setCustomUserClaims must happen before createCustomToken: it's what
@@ -152,18 +156,21 @@ exports.exchangeAuth0Token = onCall(
     // claim passed only as createCustomToken's additionalClaims would
     // otherwise silently vanish after the token's first refresh (~1 hour).
     // `admin` is a boolean mirror of role === "admin" so Firestore rules
-    // and Cloud Functions can gate on `request.auth.token.admin` directly
-    // instead of a string comparison — the role is only ever granted via
-    // scripts/grantAdminRole.js (Admin SDK), never through a client write.
+    // and Cloud Functions can gate on `request.auth.token.admin` directly.
+    // Admin roles and mountain assignments are copied only from trusted
+    // server-written profile fields, never from client-supplied claims.
     await admin.auth().setCustomUserClaims(uid, {
       role,
       accountType,
       guideVerified,
       admin: role === "admin",
+      ...(role === "admin" && adminRole ? { adminRole } : {}),
+      ...(role === "admin" && adminRole === "mountain_head" && managedMountainName
+        ? { managedMountainName }
+        : {}),
     });
     const firebaseCustomToken = await admin.auth().createCustomToken(uid);
 
     return { firebaseCustomToken, isNewUser: isNew };
   },
 );
-

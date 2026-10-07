@@ -36,7 +36,7 @@ class AdminApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AGAKBAY',
+      title: 'AGAKBAY Admin Dashboard',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: AdminColors.accent),
       home: const AdminLoginScreen(),
     );

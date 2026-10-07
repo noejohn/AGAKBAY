@@ -1,17 +1,88 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { assertTourismAdmin } = require("./adminAuthorization");
+
+exports.refreshAdminClaims = onCall(
+  { timeoutSeconds: 30, memory: "256MiB" },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+      throw new HttpsError("unauthenticated", "Sign in to verify admin access.");
+    }
+
+    let phase = "read-admin-profile";
+    try {
+      const db = admin.firestore();
+      const profileSnap = await db.collection("users").doc(uid).get();
+      if (!profileSnap.exists) {
+        throw new HttpsError("permission-denied", "No admin profile was found.");
+      }
+
+      const profile = profileSnap.data() || {};
+      if (
+        profile.adminAccess !== true &&
+        profile.role !== "admin" &&
+        profile.accountType !== "admin"
+      ) {
+        throw new HttpsError("permission-denied", "Admin access is not enabled.");
+      }
+
+      const adminRole = profile.adminRole || "tourism_admin";
+      if (!["tourism_admin", "mountain_head"].includes(adminRole)) {
+        throw new HttpsError("failed-precondition", "Unsupported admin role.");
+      }
+
+      const managedMountainName = typeof profile.managedMountainName === "string"
+        ? profile.managedMountainName.trim()
+        : "";
+      if (adminRole === "mountain_head" && !managedMountainName) {
+        throw new HttpsError(
+          "failed-precondition",
+          "This Mountain Head account has no assigned mountain.",
+        );
+      }
+
+      phase = "read-auth-user";
+      const auth = admin.auth();
+      const userRecord = await auth.getUser(uid);
+      const claims = {
+        ...(userRecord.customClaims || {}),
+        admin: true,
+        role: "admin",
+        accountType: "admin",
+        adminRole,
+      };
+      if (adminRole === "mountain_head") {
+        claims.managedMountainName = managedMountainName;
+      } else {
+        delete claims.managedMountainName;
+      }
+      phase = "write-custom-claims";
+      await auth.setCustomUserClaims(uid, claims);
+
+      return { adminRole, managedMountainName: managedMountainName || null };
+    } catch (error) {
+      if (error instanceof HttpsError) throw error;
+      console.error("refreshAdminClaims failed", {
+        uid,
+        phase,
+        code: error?.code || null,
+        message: error?.message || String(error),
+      });
+      throw new HttpsError(
+        "internal",
+        `Admin role refresh failed during ${phase}. Check Cloud Function logs.`,
+      );
+    }
+  },
+);
 
 // User-owned hike data is stored under hike_rooms, not users/{uid}. Remove
 // their SOS event details and membership, and end any room they guide so
 // other participants are not left in a live room without its guide.
 async function deleteUserHikeRecords(db, uid) {
-  const [sosEvents, participants, sosNotifications, rooms] = await Promise.all([
-    db.collectionGroup("sos_events").where("senderId", "==", uid).get(),
-    db.collectionGroup("participants").where("userId", "==", uid).get(),
-    db.collection("notifications")
-      .where("type", "==", "sos")
-      .where("senderId", "==", uid)
-      .get(),
+  const [notifications, rooms] = await Promise.all([
+    db.collection("notifications").get(),
     db.collection("hike_rooms").get(),
   ]);
 
@@ -19,24 +90,32 @@ async function deleteUserHikeRecords(db, uid) {
   const queueUpdate = (ref, data) => writesByPath.set(ref.path, { ref, data });
   const queueDelete = (ref) => writesByPath.set(ref.path, { ref, delete: true });
 
-  for (const doc of sosEvents.docs) queueDelete(doc.ref);
-  for (const doc of sosNotifications.docs) {
-    queueDelete(doc.ref);
-  }
-  for (const doc of sosEvents.docs) {
-    const roomId = doc.ref.parent.parent?.id;
-    if (roomId) {
-      queueDelete(db.collection("notifications").doc(`sos_${roomId}_${doc.id}`));
+  for (const notification of notifications.docs) {
+    const data = notification.data();
+    if (data.type === "sos" && data.senderId === uid) {
+      queueDelete(notification.ref);
     }
   }
 
-  // Close rooms led by this user, finish memberships for the remaining
-  // participants, and clear their active-room pointers.
+  // Walk rooms directly so deletion does not depend on collection-group
+  // indexes for participant or SOS sender fields.
   for (const room of rooms.docs) {
     const targetParticipantRef = room.ref.collection("participants").doc(uid);
     const targetParticipant = await targetParticipantRef.get();
     if (targetParticipant.exists) queueDelete(targetParticipantRef);
+
+    const sosEvents = await room.ref.collection("sos_events").get();
+    for (const event of sosEvents.docs) {
+      if (event.data().senderId !== uid) continue;
+      queueDelete(event.ref);
+      queueDelete(
+        db.collection("notifications").doc(`sos_${room.id}_${event.id}`),
+      );
+    }
+
+    queueDelete(room.ref.collection("sos_cooldowns").doc(uid));
     if (room.data().guideId !== uid) continue;
+
     queueUpdate(room.ref, {
       status: "ended",
       endedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -66,19 +145,6 @@ async function deleteUserHikeRecords(db, uid) {
     }
   }
 
-  // Remove the deleted user's participant rows from rooms led by other users.
-  for (const participant of participants.docs) {
-    const roomRef = participant.ref.parent.parent;
-    if (!roomRef) continue;
-    const room = rooms.docs.find((doc) => doc.ref.path === roomRef.path);
-    if (room?.data().guideId === uid) continue;
-    queueDelete(participant.ref);
-  }
-
-  for (const room of rooms.docs) {
-    queueDelete(room.ref.collection("sos_cooldowns").doc(uid));
-  }
-
   const writes = [...writesByPath.values()];
 
   for (let offset = 0; offset < writes.length; offset += 450) {
@@ -90,6 +156,28 @@ async function deleteUserHikeRecords(db, uid) {
     await batch.commit();
   }
 }
+
+async function deletePrivateUserData(db, uid, storage = admin.storage()) {
+  const applications = await db.collection("tour_guide_applications")
+    .where("uid", "==", uid)
+    .get();
+
+  for (let offset = 0; offset < applications.docs.length; offset += 450) {
+    const batch = db.batch();
+    for (const application of applications.docs.slice(offset, offset + 450)) {
+      batch.delete(application.ref);
+    }
+    await batch.commit();
+  }
+
+  const bucket = storage.bucket();
+  await Promise.all([
+    bucket.deleteFiles({ prefix: `profile_photos/${uid}/` }),
+    bucket.deleteFiles({ prefix: `tour_guide_applications/${uid}/` }),
+  ]);
+}
+
+exports.deletePrivateUserData = deletePrivateUserData;
 
 async function findDeletedSosSenderIds(db, auth, eventDocs) {
   const docs = eventDocs ?? (await db.collectionGroup("sos_events").get()).docs;
@@ -147,12 +235,72 @@ async function writeSosCleanupAudit(db, auth, counts) {
 
 exports.writeSosCleanupAudit = writeSosCleanupAudit;
 
+async function deleteUserAccount({
+  db,
+  auth,
+  request,
+  uid,
+  profile,
+  userRef,
+  isAdmin,
+  deleteAuthUser,
+  cleanupHikeData = deleteUserHikeRecords,
+  cleanupPrivateData = deletePrivateUserData,
+}) {
+  let phase = "write-audit-log";
+  try {
+    await db.collection("admin_actions").add({
+      adminId: request.auth.uid,
+      adminEmail: request.auth.token.email || null,
+      action: "delete_user_account",
+      targetId: uid,
+      targetEmail: profile.email || null,
+      targetName: profile.fullName || profile.displayName || null,
+      previousStatus: isAdmin ? "admin" : "standard",
+      newStatus: "deleted",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    phase = "clean-up-hike-data";
+    await cleanupHikeData(db, uid);
+
+    phase = "delete-private-user-data";
+    await cleanupPrivateData(db, uid);
+
+    if (deleteAuthUser) {
+      phase = "delete-auth-account";
+      try {
+        await auth.deleteUser(uid);
+      } catch (error) {
+        if (error.code !== "auth/user-not-found") throw error;
+      }
+    }
+
+    phase = "delete-firestore-profile";
+    await db.recursiveDelete(userRef);
+    return { action: "delete", status: "deleted" };
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    console.error("manageUserAccount delete failed", {
+      uid,
+      adminUid: request.auth.uid,
+      phase,
+      code: error?.code || null,
+      message: error?.message || String(error),
+    });
+    throw new HttpsError(
+      "internal",
+      `Account deletion failed during ${phase}. Check Cloud Function logs.`,
+    );
+  }
+}
+
+exports.deleteUserAccount = deleteUserAccount;
+
 exports.getDeletedSosSenderIds = onCall(
   { timeoutSeconds: 300, memory: "512MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
     const deletedSenderIds = await findDeletedSosSenderIds(
       admin.firestore(),
@@ -165,9 +313,7 @@ exports.getDeletedSosSenderIds = onCall(
 exports.cleanupOrphanedSosEvents = onCall(
   { timeoutSeconds: 300, memory: "512MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
     const db = admin.firestore();
     const events = await db.collectionGroup("sos_events").get();
@@ -241,9 +387,7 @@ exports.cleanupOrphanedSosEvents = onCall(
 exports.manageUserAccount = onCall(
   { timeoutSeconds: 120, memory: "256MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
     const uid = request.data?.uid;
     const action = request.data?.action;
@@ -266,7 +410,9 @@ exports.manageUserAccount = onCall(
       throw new HttpsError("not-found", "User profile not found.");
     }
     const profile = userSnap.data() || {};
-    const isAdmin = profile.adminAccess === true || profile.role === "admin" || profile.accountType === "admin";
+    const isAdmin = profile.adminAccess === true ||
+      profile.role === "admin" ||
+      profile.accountType === "admin";
 
     let target;
     try {
@@ -283,20 +429,16 @@ exports.manageUserAccount = onCall(
           "This profile has no sign-in account — it can only be deleted, not suspended or restored.",
         );
       }
-      await deleteUserHikeRecords(db, uid);
-      await db.collection("admin_actions").add({
-        adminId: request.auth.uid,
-        adminEmail: request.auth.token.email || null,
-        action: "delete_user_account",
-        targetId: uid,
-        targetEmail: profile.email || null,
-        targetName: profile.fullName || profile.displayName || null,
-        previousStatus: isAdmin ? "admin" : "standard",
-        newStatus: "deleted",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      return deleteUserAccount({
+        db,
+        auth,
+        request,
+        uid,
+        profile,
+        userRef,
+        isAdmin,
+        deleteAuthUser: false,
       });
-      await db.recursiveDelete(userRef);
-      return { action, status: "deleted" };
     }
 
     if (["revoke_admin", "suspend", "delete"].includes(action) && isAdmin) {
@@ -309,7 +451,9 @@ exports.manageUserAccount = onCall(
         ...legacyAccountTypeAdmins.docs,
       ].map((doc) => [doc.id, doc.data()]));
       const activeAdminsRemaining = [...admins.entries()].filter(
-        ([adminUid, data]) => adminUid !== uid && data.accountSuspended !== true,
+        ([adminUid, data]) => adminUid !== uid &&
+          data.adminRole !== "mountain_head" &&
+          data.accountSuspended !== true,
       ).length;
       if (activeAdminsRemaining === 0 && profile.accountSuspended !== true) {
         throw new HttpsError("failed-precondition", "You cannot remove, suspend, or delete the last admin.");
@@ -317,21 +461,16 @@ exports.manageUserAccount = onCall(
     }
 
     if (action === "delete") {
-      await db.collection("admin_actions").add({
-        adminId: request.auth.uid,
-        adminEmail: request.auth.token.email || null,
-        action: "delete_user_account",
-        targetId: uid,
-        targetEmail: profile.email || null,
-        targetName: profile.fullName || profile.displayName || null,
-        previousStatus: isAdmin ? "admin" : "standard",
-        newStatus: "deleted",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      return deleteUserAccount({
+        db,
+        auth,
+        request,
+        uid,
+        profile,
+        userRef,
+        isAdmin,
+        deleteAuthUser: true,
       });
-      await deleteUserHikeRecords(db, uid);
-      await auth.deleteUser(uid);
-      await db.recursiveDelete(userRef);
-      return { action, status: "deleted" };
     }
 
     const claims = { ...(target.customClaims || {}) };
@@ -341,10 +480,14 @@ exports.manageUserAccount = onCall(
 
     if (action === "revoke_admin") {
       claims.admin = false;
+      delete claims.adminRole;
+      delete claims.managedMountainName;
       claims.role = profile.accountType && profile.accountType !== "admin"
         ? profile.accountType
         : "hiker";
       updates.adminAccess = false;
+      updates.adminRole = admin.firestore.FieldValue.delete();
+      updates.managedMountainName = admin.firestore.FieldValue.delete();
       updates.role = profile.accountType && profile.accountType !== "admin"
         ? profile.accountType
         : "hiker";
@@ -381,10 +524,25 @@ exports.manageUserAccount = onCall(
 exports.createAdminAccount = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
   async (request) => {
-    if (request.auth?.token?.admin !== true) {
-      throw new HttpsError("permission-denied", "Admin access required.");
-    }
+    assertTourismAdmin(request.auth);
 
+    const adminRole = request.data?.adminRole;
+    if (!["tourism_admin", "mountain_head"].includes(adminRole)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Choose either Tourism Admin or Mountain Head.",
+      );
+    }
+    const managedMountainName = typeof request.data?.managedMountainName === "string"
+      ? request.data.managedMountainName.trim()
+      : "";
+    if (adminRole === "mountain_head" &&
+        (!managedMountainName || managedMountainName.length > 120)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "A managed mountain is required for a Mountain Head.",
+      );
+    }
     const email = typeof request.data?.email === "string"
       ? request.data.email.trim().toLowerCase()
       : "";
@@ -412,9 +570,10 @@ exports.createAdminAccount = onCall(
         admin: true,
         role: "admin",
         accountType: "admin",
+        adminRole,
+        ...(adminRole === "mountain_head" ? { managedMountainName } : {}),
         guideVerified: null,
       };
-      await auth.setCustomUserClaims(createdUser.uid, claims);
       await db.collection("users").doc(createdUser.uid).set({
         uid: createdUser.uid,
         email,
@@ -423,6 +582,8 @@ exports.createAdminAccount = onCall(
         username: email.split("@")[0],
         role: "admin",
         accountType: "admin",
+        adminRole,
+        ...(adminRole === "mountain_head" ? { managedMountainName } : {}),
         adminAccess: true,
         accountSuspended: false,
         guideVerified: null,
@@ -433,6 +594,7 @@ exports.createAdminAccount = onCall(
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+      await auth.setCustomUserClaims(createdUser.uid, claims);
       const resetLink = await auth.generatePasswordResetLink(email);
       await db.collection("admin_actions").add({
         adminId: request.auth.uid,
@@ -442,10 +604,18 @@ exports.createAdminAccount = onCall(
         targetEmail: email,
         targetName: fullName,
         previousStatus: null,
-        newStatus: "admin",
+        newStatus: adminRole,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
-      return { uid: createdUser.uid, email, resetLink };
+      return {
+        uid: createdUser.uid,
+        email,
+        adminRole,
+        managedMountainName: adminRole === "mountain_head"
+          ? managedMountainName
+          : null,
+        resetLink,
+      };
     } catch (error) {
       if (createdUser) {
         await auth.deleteUser(createdUser.uid).catch(() => {});

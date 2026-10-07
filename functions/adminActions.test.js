@@ -33,10 +33,14 @@ jest.mock("firebase-admin", () => ({
   ),
 }));
 
-const { reviewTourGuideApplication } = require("./adminActions");
+const {
+  recommendAdminReview,
+  reviewTourGuideApplication,
+} = require("./adminActions");
 
 const adminAuth = { uid: "admin-uid", token: { admin: true } };
 const callHandler = (data, auth = adminAuth) => reviewTourGuideApplication.run({ data, auth });
+const callRecommendation = (data, auth) => recommendAdminReview.run({ data, auth });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -56,6 +60,96 @@ it("rejects when not signed in at all", async () => {
   await expect(
     callHandler({ applicationId: "app-1", decision: "approve" }, null),
   ).rejects.toMatchObject({ code: "permission-denied" });
+});
+
+it("does not allow Mountain Heads to make final guide approval decisions", async () => {
+  await expect(
+    callHandler(
+      { applicationId: "app-1", decision: "approve" },
+      {
+        uid: "head-uid",
+        token: {
+          admin: true,
+          adminRole: "mountain_head",
+          managedMountainName: "Mt. Apo",
+        },
+      },
+    ),
+  ).rejects.toMatchObject({ code: "permission-denied" });
+  expect(mockAppDocGet).not.toHaveBeenCalled();
+});
+
+it("accepts a mountain-matched recommendation without changing application status", async () => {
+  mockAppDocGet.mockResolvedValue({
+    exists: true,
+    data: () => ({
+      uid: "guide-1",
+      status: "pending",
+      mountainNames: ["Mt. Apo", "Mt. Talomo"],
+      fullName: "Guide One",
+    }),
+  });
+
+  await callRecommendation(
+    {
+      targetType: "tour_guide_application",
+      targetId: "app-1",
+      decision: "approve",
+    },
+    {
+      uid: "head-uid",
+      token: {
+        admin: true,
+        adminRole: "mountain_head",
+        managedMountainName: "Mt. Apo",
+      },
+    },
+  );
+
+  expect(mockAppDocUpdate).toHaveBeenCalledWith({
+    mountainHeadRecommendation: expect.objectContaining({
+      decision: "approve",
+      mountainName: "Mt. Apo",
+      recommendedBy: "head-uid",
+    }),
+  });
+  expect(mockCollectionAdd).toHaveBeenCalledWith(
+    expect.objectContaining({
+      action: "mountain_head_recommendation",
+      recommendation: "approve",
+      mountainName: "Mt. Apo",
+    }),
+  );
+});
+
+it("rejects a Mountain Head recommendation outside its assigned mountain", async () => {
+  mockAppDocGet.mockResolvedValue({
+    exists: true,
+    data: () => ({
+      uid: "guide-1",
+      status: "pending",
+      mountainNames: ["Mt. Talomo"],
+    }),
+  });
+
+  await expect(
+    callRecommendation(
+      {
+        targetType: "tour_guide_application",
+        targetId: "app-1",
+        decision: "approve",
+      },
+      {
+        uid: "head-uid",
+        token: {
+          admin: true,
+          adminRole: "mountain_head",
+          managedMountainName: "Mt. Apo",
+        },
+      },
+    ),
+  ).rejects.toMatchObject({ code: "permission-denied" });
+  expect(mockAppDocUpdate).not.toHaveBeenCalled();
 });
 
 it("rejects an invalid decision value", async () => {
@@ -88,7 +182,12 @@ describe("approve", () => {
   beforeEach(() => {
     mockAppDocGet.mockResolvedValue({
       exists: true,
-      data: () => ({ uid: "guide-1", status: "pending" }),
+      data: () => ({
+        uid: "guide-1",
+        status: "pending",
+        mountainsHandled: "Mt. Apo, Mt. Talomo",
+        mountainNames: ["Mt. Apo", "Mt. Talomo"],
+      }),
     });
   });
 
@@ -103,6 +202,8 @@ describe("approve", () => {
         role: "tour_guide",
         accountType: "tour_guide",
         guideVerified: true,
+        mountainNames: ["Mt. Apo", "Mt. Talomo"],
+        mountainsHandled: "Mt. Apo, Mt. Talomo",
       }),
     );
     expect(mockSetCustomUserClaims).toHaveBeenCalledWith("guide-1", {

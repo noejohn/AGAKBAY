@@ -36,6 +36,15 @@ const _navItems = [
   _NavItem('Audit Logs', Icons.description_outlined),
 ];
 
+class _AdminAccess {
+  const _AdminAccess({required this.isMountainHead, this.managedMountainName});
+
+  final bool isMountainHead;
+  final String? managedMountainName;
+
+  bool get isTourismAdmin => !isMountainHead;
+}
+
 class AdminDashboardShell extends StatefulWidget {
   const AdminDashboardShell({
     super.key,
@@ -52,15 +61,76 @@ class AdminDashboardShell extends StatefulWidget {
 
 class _AdminDashboardShellState extends State<AdminDashboardShell> {
   int _selected = 0;
+  late final Future<_AdminAccess> _accessFuture = _loadAccess();
+
+  Future<_AdminAccess> _loadAccess() async {
+    final claims = (await widget.user.getIdTokenResult(true)).claims ?? {};
+    if (claims['admin'] != true) {
+      throw StateError('Admin access is no longer available. Sign in again.');
+    }
+    if (claims['adminRole'] == 'mountain_head') {
+      final mountainName = claims['managedMountainName'];
+      if (mountainName is! String || mountainName.trim().isEmpty) {
+        throw StateError('This Mountain Head account has no managed mountain.');
+      }
+      return _AdminAccess(
+        isMountainHead: true,
+        managedMountainName: mountainName.trim(),
+      );
+    }
+    if (claims['adminRole'] != 'tourism_admin') {
+      throw StateError('This account has an unsupported admin role.');
+    }
+    return const _AdminAccess(isMountainHead: false);
+  }
+
+  void _navigateToPage(int index, _AdminAccess access) {
+    if (access.isMountainHead && (index == 5 || index == 7)) return;
+    setState(() => _selected = index);
+  }
 
   @override
   Widget build(BuildContext context) {
+    return FutureBuilder<_AdminAccess>(
+      future: _accessFuture,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Could not verify admin access: ${snapshot.error}',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton(
+                    onPressed: widget.onSignOut,
+                    child: const Text('Sign out'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return _buildDashboard(snapshot.data!);
+      },
+    );
+  }
+
+  Widget _buildDashboard(_AdminAccess access) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _Sidebar(
           selected: _selected,
-          onSelect: (i) => setState(() => _selected = i),
+          isMountainHead: access.isMountainHead,
+          onSelect: (i) => _navigateToPage(i, access),
         ),
         Expanded(
           child: ColoredBox(
@@ -95,30 +165,35 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                                 ),
                               ),
                             ),
-                          Expanded(
-                            child: LayoutBuilder(
-                              builder: (context, searchConstraints) {
-                                final searchWidth = searchConstraints.maxWidth
-                                    .clamp(80.0, 320.0)
-                                    .toDouble();
-                                return Center(
-                                  child: SizedBox(
-                                    width: searchWidth,
-                                    height: 42,
-                                    child: _AdminGlobalSearch(
-                                      onNavigate: (index) =>
-                                          setState(() => _selected = index),
+                          if (access.isTourismAdmin)
+                            Expanded(
+                              child: LayoutBuilder(
+                                builder: (context, searchConstraints) {
+                                  final searchWidth = searchConstraints.maxWidth
+                                      .clamp(80.0, 320.0)
+                                      .toDouble();
+                                  return Center(
+                                    child: SizedBox(
+                                      width: searchWidth,
+                                      height: 42,
+                                      child: _AdminGlobalSearch(
+                                        onNavigate: (index) =>
+                                            _navigateToPage(index, access),
+                                      ),
                                     ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
+                                  );
+                                },
+                              ),
+                            )
+                          else
+                            const Spacer(),
                           _NotificationBell(
+                            access: access,
                             onOpenSosMonitoring: () =>
-                                setState(() => _selected = 4),
-                            onOpenAuditLogs: () =>
-                                setState(() => _selected = 7),
+                                _navigateToPage(4, access),
+                            onOpenTrailVerification: () =>
+                                _navigateToPage(2, access),
+                            onOpenAuditLogs: () => _navigateToPage(7, access),
                           ),
                           const SizedBox(width: 6),
                           Builder(
@@ -196,15 +271,22 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                   child: switch (_selected) {
                     0 => _DashboardOverviewPage(
                       user: widget.user,
-                      onNavigate: (index) => setState(() => _selected = index),
+                      access: access,
+                      onNavigate: (index) => _navigateToPage(index, access),
                     ),
-                    1 => const _TourGuideVerificationPage(),
-                    2 => const _TrailVerificationPage(),
-                    3 => const _HikeRoomMonitoringPage(),
-                    4 => const _SosMonitoringPage(),
-                    5 => const _BluetoothDevicesPage(),
-                    6 => const _UserManagementPage(),
-                    7 => const _AuditLogsPage(),
+                    1 => _TourGuideVerificationPage(access: access),
+                    2 => _TrailVerificationPage(access: access),
+                    3 => _HikeRoomMonitoringPage(access: access),
+                    4 => _SosMonitoringPage(access: access),
+                    5 =>
+                      access.isTourismAdmin
+                          ? const _BluetoothDevicesPage()
+                          : const _ComingSoonPage(title: 'Access restricted'),
+                    6 => _UserManagementPage(access: access),
+                    7 =>
+                      access.isTourismAdmin
+                          ? const _AuditLogsPage()
+                          : const _ComingSoonPage(title: 'Access restricted'),
                     _ => _ComingSoonPage(title: _navItems[_selected].label),
                   },
                 ),
@@ -561,13 +643,21 @@ Future<void> _openAdminProfileMenu(
 }
 
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.selected, required this.onSelect});
+  const _Sidebar({
+    required this.selected,
+    required this.isMountainHead,
+    required this.onSelect,
+  });
 
   final int selected;
+  final bool isMountainHead;
   final ValueChanged<int> onSelect;
 
   @override
   Widget build(BuildContext context) {
+    final visibleIndices = isMountainHead
+        ? [0, 1, 2, 3, 4, 6]
+        : List.generate(_navItems.length, (index) => index);
     final screenWidth = MediaQuery.sizeOf(context).width;
     final screenHeight = MediaQuery.sizeOf(context).height;
     final collapsed = screenWidth < 760;
@@ -672,27 +762,28 @@ class _Sidebar extends StatelessWidget {
           Expanded(
             child: ListView.builder(
               padding: EdgeInsets.zero,
-              itemCount: _navItems.length,
+              itemCount: visibleIndices.length,
               itemBuilder: (context, i) {
-                final item = _navItems[i];
-                final isSelected = i == selected;
-                final section = i == 0
+                final navIndex = visibleIndices[i];
+                final item = _navItems[navIndex];
+                final isSelected = navIndex == selected;
+                final section = navIndex == 0
                     ? 'OVERVIEW'
-                    : i == 1
+                    : navIndex == 1
                     ? 'VERIFICATION'
-                    : i == 3
+                    : navIndex == 3
                     ? 'OPERATIONS'
-                    : i == 6
+                    : navIndex == 6
                     ? 'MANAGEMENT'
                     : null;
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    if (section != null && !collapsed && !shortScreen)
+                    if (section != null && !collapsed)
                       Padding(
                         padding: EdgeInsets.fromLTRB(
                           compact ? 16 : 22,
-                          i == 0 ? 0 : 18,
+                          navIndex == 0 ? 0 : 18,
                           12,
                           8,
                         ),
@@ -720,7 +811,7 @@ class _Sidebar extends StatelessWidget {
                           borderRadius: BorderRadius.circular(11),
                           child: InkWell(
                             borderRadius: BorderRadius.circular(11),
-                            onTap: () => onSelect(i),
+                            onTap: () => onSelect(navIndex),
                             child: Padding(
                               padding: EdgeInsets.symmetric(
                                 horizontal: collapsed ? 0 : 12,
@@ -883,11 +974,15 @@ class _Sidebar extends StatelessWidget {
 
 class _NotificationBell extends StatefulWidget {
   const _NotificationBell({
+    required this.access,
     required this.onOpenSosMonitoring,
+    required this.onOpenTrailVerification,
     required this.onOpenAuditLogs,
   });
 
+  final _AdminAccess access;
   final VoidCallback onOpenSosMonitoring;
+  final VoidCallback onOpenTrailVerification;
   final VoidCallback onOpenAuditLogs;
 
   @override
@@ -896,11 +991,15 @@ class _NotificationBell extends StatefulWidget {
 
 class _NotificationBellState extends State<_NotificationBell> {
   Stream<QuerySnapshot<Map<String, dynamic>>> _recentNotifications() {
-    return FirebaseFirestore.instance
-        .collection('notifications')
-        .orderBy('createdAt', descending: true)
-        .limit(50)
-        .snapshots();
+    Query<Map<String, dynamic>> query = FirebaseFirestore.instance.collection(
+      'notifications',
+    );
+    if (widget.access.isMountainHead) {
+      query = query
+          .where('type', whereIn: const ['sos', 'trail_submission'])
+          .where('mountainName', isEqualTo: widget.access.managedMountainName);
+    }
+    return query.orderBy('createdAt', descending: true).limit(50).snapshots();
   }
 
   Future<void> _openNotifications(
@@ -953,7 +1052,9 @@ class _NotificationBellState extends State<_NotificationBell> {
           child: _NotificationPopupContent(
             notifications: notifications,
             onOpenSosMonitoring: widget.onOpenSosMonitoring,
+            onOpenTrailVerification: widget.onOpenTrailVerification,
             onOpenAuditLogs: widget.onOpenAuditLogs,
+            isMountainHead: widget.access.isMountainHead,
             width: popupWidth,
             listHeight: notificationListHeight,
           ),
@@ -1010,14 +1111,18 @@ class _NotificationPopupContent extends StatefulWidget {
   const _NotificationPopupContent({
     required this.notifications,
     required this.onOpenSosMonitoring,
+    required this.onOpenTrailVerification,
     required this.onOpenAuditLogs,
+    required this.isMountainHead,
     required this.width,
     required this.listHeight,
   });
 
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> notifications;
   final VoidCallback onOpenSosMonitoring;
+  final VoidCallback onOpenTrailVerification;
   final VoidCallback onOpenAuditLogs;
+  final bool isMountainHead;
   final double width;
   final double listHeight;
 
@@ -1223,7 +1328,13 @@ class _NotificationPopupContentState extends State<_NotificationPopupContent> {
                       if (data['type']?.toString() == 'sos') {
                         widget.onOpenSosMonitoring();
                       } else if (data['type']?.toString() ==
-                              'trail_submission' ||
+                          'trail_submission') {
+                        if (widget.isMountainHead) {
+                          widget.onOpenTrailVerification();
+                        } else {
+                          widget.onOpenAuditLogs();
+                        }
+                      } else if (!widget.isMountainHead &&
                           data['type']?.toString() == 'admin_action') {
                         widget.onOpenAuditLogs();
                       }
@@ -1345,25 +1456,49 @@ String _relativeNotificationTime(Object? value) {
 }
 
 class _DashboardOverviewPage extends StatelessWidget {
-  const _DashboardOverviewPage({required this.user, required this.onNavigate});
+  const _DashboardOverviewPage({
+    required this.user,
+    required this.access,
+    required this.onNavigate,
+  });
 
   final User user;
+  final _AdminAccess access;
   final ValueChanged<int> onNavigate;
 
   @override
   Widget build(BuildContext context) {
-    final pendingGuidesQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> pendingGuidesQuery = FirebaseFirestore.instance
         .collection('tour_guide_applications')
         .where('status', isEqualTo: 'pending');
-    final pendingTrailsQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> pendingTrailsQuery = FirebaseFirestore.instance
         .collection('trail_submissions')
         .where('status', isEqualTo: 'pending');
-    final activeRoomsQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> activeRoomsQuery = FirebaseFirestore.instance
         .collection('hike_rooms')
         .where('status', isEqualTo: 'active');
-    final activeSosQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> activeSosQuery = FirebaseFirestore.instance
         .collectionGroup('sos_events')
         .where('status', isEqualTo: 'sent');
+    if (access.isMountainHead) {
+      final mountainName = access.managedMountainName!;
+      pendingGuidesQuery = pendingGuidesQuery.where(
+        'mountainNames',
+        arrayContains: mountainName,
+      );
+      pendingTrailsQuery = pendingTrailsQuery.where(
+        'mountainName',
+        isEqualTo: mountainName,
+      );
+      activeRoomsQuery = activeRoomsQuery.where(
+        'mountainName',
+        isEqualTo: mountainName,
+      );
+      activeSosQuery = activeSosQuery.where(
+        'mountainName',
+        isEqualTo: mountainName,
+      );
+    }
     return SingleChildScrollView(
       padding: EdgeInsets.all(MediaQuery.sizeOf(context).width < 700 ? 16 : 24),
       child: Column(
@@ -1414,51 +1549,53 @@ class _DashboardOverviewPage extends StatelessWidget {
             },
           ),
           const SizedBox(height: 28),
-          _OverviewQuickPanels(onNavigate: onNavigate),
+          _OverviewQuickPanels(access: access, onNavigate: onNavigate),
           const SizedBox(height: 20),
-          _SectionCard(
-            title: 'Pending Tour Guide Applications',
-            child: StreamBuilder<QuerySnapshot>(
-              stream: pendingGuidesQuery.snapshots(),
-              builder: (context, snap) {
-                if (snap.hasError) {
-                  return _StreamErrorRow(snap.error);
-                }
-                if (!snap.hasData) {
-                  return const _LoadingRow();
-                }
-                final docs = snap.data!.docs;
-                if (docs.isEmpty) {
-                  return const _EmptyRow('No pending guide applications.');
-                }
-                return Column(
-                  children: docs.map((d) {
-                    final data = d.data() as Map<String, dynamic>;
-                    return _ListRow(
-                      title:
-                          (data['fullName'] as String?) ??
-                          (data['applicantEmail'] as String?) ??
-                          (data['email'] as String?) ??
-                          d.id,
-                      subtitle:
-                          (data['applicantEmail'] as String?) ??
-                          (data['email'] as String?) ??
-                          '',
-                      onReview: () => _showGuideReviewDialog(
-                        context,
-                        applicationId: d.id,
-                        data: data,
-                      ),
-                    );
-                  }).toList(),
-                );
-              },
+          if (access.isTourismAdmin || access.isMountainHead)
+            _SectionCard(
+              title: 'Pending Tour Guide Applications',
+              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: pendingGuidesQuery.snapshots(),
+                builder: (context, snap) {
+                  if (snap.hasError) {
+                    return _StreamErrorRow(snap.error);
+                  }
+                  if (!snap.hasData) {
+                    return const _LoadingRow();
+                  }
+                  final docs = snap.data!.docs;
+                  if (docs.isEmpty) {
+                    return const _EmptyRow('No pending guide applications.');
+                  }
+                  return Column(
+                    children: docs.map((d) {
+                      final data = d.data();
+                      return _ListRow(
+                        title:
+                            (data['fullName'] as String?) ??
+                            (data['applicantEmail'] as String?) ??
+                            (data['email'] as String?) ??
+                            d.id,
+                        subtitle:
+                            (data['applicantEmail'] as String?) ??
+                            (data['email'] as String?) ??
+                            '',
+                        onReview: () => _showGuideReviewDialog(
+                          context,
+                          applicationId: d.id,
+                          data: data,
+                          access: access,
+                        ),
+                      );
+                    }).toList(),
+                  );
+                },
+              ),
             ),
-          ),
           const SizedBox(height: 20),
           _SectionCard(
             title: 'Pending Trail Route Submissions',
-            child: StreamBuilder<QuerySnapshot>(
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
               stream: pendingTrailsQuery.snapshots(),
               builder: (context, snap) {
                 if (snap.hasError) {
@@ -1473,7 +1610,7 @@ class _DashboardOverviewPage extends StatelessWidget {
                 }
                 return Column(
                   children: docs.map((d) {
-                    final data = d.data() as Map<String, dynamic>;
+                    final data = d.data();
                     final distance = (data['distanceKm'] as num?)
                         ?.toStringAsFixed(1);
                     final elevation = (data['elevationGainMasl'] as num?)
@@ -1496,7 +1633,7 @@ class _DashboardOverviewPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          const _RecentActivityPanel(),
+          if (access.isTourismAdmin) const _RecentActivityPanel(),
         ],
       ),
     );
@@ -1717,27 +1854,35 @@ class _RecentActivityPanel extends StatelessWidget {
 }
 
 class _OverviewQuickPanels extends StatelessWidget {
-  const _OverviewQuickPanels({required this.onNavigate});
+  const _OverviewQuickPanels({required this.access, required this.onNavigate});
 
+  final _AdminAccess access;
   final ValueChanged<int> onNavigate;
 
   @override
   Widget build(BuildContext context) {
-    final rooms = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> rooms = FirebaseFirestore.instance
         .collection('hike_rooms')
-        .where('status', isEqualTo: 'active')
-        .snapshots();
-    final sos = FirebaseFirestore.instance
+        .where('status', isEqualTo: 'active');
+    Query<Map<String, dynamic>> sos = FirebaseFirestore.instance
         .collectionGroup('sos_events')
-        .where('status', isEqualTo: 'sent')
-        .snapshots();
+        .where('status', isEqualTo: 'sent');
+    if (access.isMountainHead) {
+      rooms = rooms.where(
+        'mountainName',
+        isEqualTo: access.managedMountainName,
+      );
+      sos = sos.where('mountainName', isEqualTo: access.managedMountainName);
+    }
+    final roomsStream = rooms.snapshots();
+    final sosStream = sos.snapshots();
     final width = MediaQuery.sizeOf(context).width;
     final roomCard = GestureDetector(
       onTap: () => onNavigate(3),
       child: _SectionCard(
         title: 'Active Hike Rooms',
         child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: rooms,
+          stream: roomsStream,
           builder: (context, snapshot) {
             if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
             if (!snapshot.hasData) return const _LoadingRow();
@@ -1820,7 +1965,7 @@ class _OverviewQuickPanels extends StatelessWidget {
       child: _SectionCard(
         title: 'SOS Monitoring',
         child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: sos,
+          stream: sosStream,
           builder: (context, snapshot) {
             if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
             if (!snapshot.hasData) return const _LoadingRow();
@@ -2013,6 +2158,8 @@ String _actionVerb(String action) {
       return 'Removed SOS from Deleted Users';
     case 'create_admin':
       return 'Created Admin Account';
+    case 'mountain_head_recommendation':
+      return 'Submitted Mountain Head Recommendation';
     case 'approve_tour_guide':
       return 'Approved Tour Guide';
     case 'reject_tour_guide':
@@ -2100,6 +2247,7 @@ void _showGuideReviewDialog(
   BuildContext context, {
   required String applicationId,
   required Map<String, dynamic> data,
+  required _AdminAccess access,
 }) {
   showDialog<void>(
     context: context,
@@ -2111,6 +2259,7 @@ void _showGuideReviewDialog(
           child: _GuideApplicationCard(
             applicationId: applicationId,
             data: data,
+            isMountainHead: access.isMountainHead,
             onReviewed: () => Navigator.of(dialogContext).pop(),
           ),
         ),
@@ -2126,13 +2275,25 @@ void _showGuideReviewDialog(
 }
 
 class _TourGuideVerificationPage extends StatelessWidget {
-  const _TourGuideVerificationPage();
+  const _TourGuideVerificationPage({required this.access});
+
+  final _AdminAccess access;
 
   @override
   Widget build(BuildContext context) {
-    final pendingGuidesQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> pendingGuidesQuery = FirebaseFirestore.instance
         .collection('tour_guide_applications')
         .where('status', isEqualTo: 'pending');
+    if (access.isMountainHead) {
+      pendingGuidesQuery = pendingGuidesQuery.where(
+        'mountainNames',
+        arrayContains: access.managedMountainName,
+      );
+    }
+    final legacyGuidesQuery = FirebaseFirestore.instance
+        .collection('tour_guide_applications')
+        .where('status', isEqualTo: 'pending')
+        .where('mountainsHandled', isEqualTo: access.managedMountainName);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -2149,7 +2310,7 @@ class _TourGuideVerificationPage extends StatelessWidget {
             style: TextStyle(color: Colors.black54),
           ),
           const SizedBox(height: 20),
-          StreamBuilder<QuerySnapshot>(
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
             stream: pendingGuidesQuery.snapshots(),
             builder: (context, snap) {
               if (snap.hasError) {
@@ -2188,7 +2349,8 @@ class _TourGuideVerificationPage extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 16),
                         child: _GuideApplicationCard(
                           applicationId: d.id,
-                          data: d.data() as Map<String, dynamic>,
+                          data: d.data(),
+                          isMountainHead: access.isMountainHead,
                         ),
                       ),
                     )
@@ -2196,6 +2358,75 @@ class _TourGuideVerificationPage extends StatelessWidget {
               );
             },
           ),
+          if (access.isMountainHead)
+            StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: legacyGuidesQuery.snapshots(),
+              builder: (context, snap) {
+                if (snap.hasError) return _StreamErrorRow(snap.error);
+                if (!snap.hasData) return const _LoadingRow();
+                final docs = snap.data!.docs
+                    .where((doc) => doc.data()['mountainNames'] is! List)
+                    .toList();
+                if (docs.isEmpty) return const SizedBox.shrink();
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 16),
+                    Text(
+                      'Existing applications for ${access.managedMountainName}',
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 10),
+                    ...docs.map(
+                      (doc) => Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: _GuideApplicationCard(
+                          applicationId: doc.id,
+                          data: doc.data(),
+                          isMountainHead: true,
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RecommendationNotice extends StatelessWidget {
+  const _RecommendationNotice({required this.recommendation});
+
+  final Map<String, dynamic> recommendation;
+
+  @override
+  Widget build(BuildContext context) {
+    final decision = recommendation['decision']?.toString() ?? 'review';
+    final mountainName =
+        recommendation['mountainName']?.toString() ?? 'managed mountain';
+    final reason = recommendation['reason']?.toString();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEAF2FF),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Mountain Head recommendation for $mountainName: '
+            '${decision == 'approve' ? 'Approve' : 'Reject'}',
+            style: const TextStyle(fontWeight: FontWeight.w700),
+          ),
+          if (reason != null && reason.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(reason),
+          ],
         ],
       ),
     );
@@ -2215,11 +2446,13 @@ class _GuideApplicationCard extends StatefulWidget {
   const _GuideApplicationCard({
     required this.applicationId,
     required this.data,
+    required this.isMountainHead,
     this.onReviewed,
   });
 
   final String applicationId;
   final Map<String, dynamic> data;
+  final bool isMountainHead;
   final VoidCallback? onReviewed;
 
   @override
@@ -2232,13 +2465,32 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
   Future<void> _review(String decision) async {
     setState(() => _submitting = true);
     try {
-      await FirebaseFunctions.instance
-          .httpsCallable('reviewTourGuideApplication')
-          .call({'applicationId': widget.applicationId, 'decision': decision});
+      if (widget.isMountainHead) {
+        await FirebaseFunctions.instance
+            .httpsCallable('recommendAdminReview')
+            .call({
+              'targetType': 'tour_guide_application',
+              'targetId': widget.applicationId,
+              'decision': decision,
+            });
+      } else {
+        await FirebaseFunctions.instance
+            .httpsCallable('reviewTourGuideApplication')
+            .call({
+              'applicationId': widget.applicationId,
+              'decision': decision,
+            });
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(decision == 'approve' ? 'Approved.' : 'Rejected.'),
+            content: Text(
+              widget.isMountainHead
+                  ? 'Recommendation sent to the Tourism Admin.'
+                  : decision == 'approve'
+                  ? 'Approved.'
+                  : 'Rejected.',
+            ),
           ),
         );
         widget.onReviewed?.call();
@@ -2312,6 +2564,7 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
     final experience = (data['experienceYears'] as String?) ?? '—';
     final mountains = (data['mountainsHandled'] as String?) ?? '—';
     final submitted = _formatTimestamp(data['submittedAt']);
+    final recommendation = data['mountainHeadRecommendation'];
 
     return Container(
       width: double.infinity,
@@ -2384,6 +2637,10 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
           const SizedBox(height: 12),
           const _FieldLabel('Mountains Handled'),
           Text(mountains, style: const TextStyle(fontWeight: FontWeight.w600)),
+          if (recommendation is Map<String, dynamic>) ...[
+            const SizedBox(height: 12),
+            _RecommendationNotice(recommendation: recommendation),
+          ],
           const SizedBox(height: 12),
           const _FieldLabel('Submitted'),
           Text(
@@ -2414,7 +2671,11 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
                             color: Colors.white,
                           ),
                         )
-                      : const Text('Approve'),
+                      : Text(
+                          widget.isMountainHead
+                              ? 'Recommend Approve'
+                              : 'Approve',
+                        ),
                 ),
               ),
               const SizedBox(width: 12),
@@ -2422,7 +2683,9 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
                 child: FilledButton(
                   onPressed: _submitting ? null : () => _review('reject'),
                   style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                  child: const Text('Reject'),
+                  child: Text(
+                    widget.isMountainHead ? 'Recommend Reject' : 'Reject',
+                  ),
                 ),
               ),
               const SizedBox(width: 12),
@@ -2463,7 +2726,10 @@ class _DocumentImage extends StatelessWidget {
   Widget build(BuildContext context) {
     final url = this.url;
     if (url == null || url.isEmpty) {
-      return const Text('Not provided.', style: TextStyle(color: Colors.black45));
+      return const Text(
+        'Not provided.',
+        style: TextStyle(color: Colors.black45),
+      );
     }
     final thumbnail = ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: 320),
@@ -2548,7 +2814,11 @@ void _showFullImageView(BuildContext context, String url) {
               child: IconButton(
                 tooltip: 'Close',
                 onPressed: () => Navigator.of(dialogContext).pop(),
-                icon: const Icon(Icons.close_rounded, color: Colors.white, size: 32),
+                icon: const Icon(
+                  Icons.close_rounded,
+                  color: Colors.white,
+                  size: 32,
+                ),
               ),
             ),
           ],
@@ -2596,13 +2866,21 @@ CameraPosition _routeCameraPosition(List<LatLng> points) {
 }
 
 class _TrailVerificationPage extends StatelessWidget {
-  const _TrailVerificationPage();
+  const _TrailVerificationPage({required this.access});
+
+  final _AdminAccess access;
 
   @override
   Widget build(BuildContext context) {
-    final pendingTrailsQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> pendingTrailsQuery = FirebaseFirestore.instance
         .collection('trail_submissions')
         .where('status', isEqualTo: 'pending');
+    if (access.isMountainHead) {
+      pendingTrailsQuery = pendingTrailsQuery.where(
+        'mountainName',
+        isEqualTo: access.managedMountainName,
+      );
+    }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -2619,7 +2897,7 @@ class _TrailVerificationPage extends StatelessWidget {
             style: TextStyle(color: Colors.black54),
           ),
           const SizedBox(height: 20),
-          StreamBuilder<QuerySnapshot>(
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
             stream: pendingTrailsQuery.snapshots(),
             builder: (context, snap) {
               if (snap.hasError) {
@@ -2658,7 +2936,8 @@ class _TrailVerificationPage extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 16),
                         child: _TrailSubmissionCard(
                           submissionId: d.id,
-                          data: d.data() as Map<String, dynamic>,
+                          data: d.data(),
+                          isMountainHead: access.isMountainHead,
                         ),
                       ),
                     )
@@ -2757,10 +3036,15 @@ class _TrailMapPreview extends StatelessWidget {
 }
 
 class _TrailSubmissionCard extends StatefulWidget {
-  const _TrailSubmissionCard({required this.submissionId, required this.data});
+  const _TrailSubmissionCard({
+    required this.submissionId,
+    required this.data,
+    required this.isMountainHead,
+  });
 
   final String submissionId;
   final Map<String, dynamic> data;
+  final bool isMountainHead;
 
   @override
   State<_TrailSubmissionCard> createState() => _TrailSubmissionCardState();
@@ -2774,10 +3058,18 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
-          decision == 'approve' ? 'Approve this trail?' : 'Reject this trail?',
+          widget.isMountainHead
+              ? decision == 'approve'
+                    ? 'Recommend approval?'
+                    : 'Recommend rejection?'
+              : decision == 'approve'
+              ? 'Approve this trail?'
+              : 'Reject this trail?',
         ),
         content: Text(
-          decision == 'approve'
+          widget.isMountainHead
+              ? 'This sends your recommendation to the Tourism Admin. The trail will not be published until the Tourism Admin makes a final decision.'
+              : decision == 'approve'
               ? 'This publishes the route on this mountain and notifies the submitter and other hikers who\'ve done it before.'
               : 'The submitter will be notified their trail was not approved.',
         ),
@@ -2797,15 +3089,31 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
 
     setState(() => _reviewing = true);
     try {
-      await FirebaseFunctions.instance
-          .httpsCallable('reviewTrailSubmission')
-          .call({'submissionId': widget.submissionId, 'decision': decision});
+      if (widget.isMountainHead) {
+        await FirebaseFunctions.instance
+            .httpsCallable('recommendAdminReview')
+            .call({
+              'targetType': 'trail_submission',
+              'targetId': widget.submissionId,
+              'decision': decision,
+            });
+      } else {
+        await FirebaseFunctions.instance
+            .httpsCallable('reviewTrailSubmission')
+            .call({'submissionId': widget.submissionId, 'decision': decision});
+      }
       if (!mounted) return;
       await _showAccountActionResultDialog(
         context,
         success: true,
-        title: decision == 'approve' ? 'Trail Approved' : 'Trail Rejected',
-        message: decision == 'approve'
+        title: widget.isMountainHead
+            ? 'Recommendation Sent'
+            : decision == 'approve'
+            ? 'Trail Approved'
+            : 'Trail Rejected',
+        message: widget.isMountainHead
+            ? 'The Tourism Admin will make the final decision.'
+            : decision == 'approve'
             ? 'The route is now published and the submitter and other hikers have been notified.'
             : 'The submitter has been notified.',
       );
@@ -2835,6 +3143,7 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
     final elevation = (data['elevationGainMasl'] as num?)?.round();
     final points = _decodeRoutePoints(data['routePoints']);
     final submitted = _formatTimestamp(data['createdAt']);
+    final recommendation = data['mountainHeadRecommendation'];
 
     return Container(
       width: double.infinity,
@@ -2846,6 +3155,10 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (recommendation is Map<String, dynamic>) ...[
+            _RecommendationNotice(recommendation: recommendation),
+            const SizedBox(height: 14),
+          ],
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2968,7 +3281,11 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
                             color: Colors.white,
                           ),
                         )
-                      : const Text('Approve'),
+                      : Text(
+                          widget.isMountainHead
+                              ? 'Recommend Approve'
+                              : 'Approve',
+                        ),
                 ),
               ),
               const SizedBox(width: 12),
@@ -2976,7 +3293,9 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
                 child: FilledButton(
                   onPressed: _reviewing ? null : () => _review('reject'),
                   style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                  child: const Text('Reject'),
+                  child: Text(
+                    widget.isMountainHead ? 'Recommend Reject' : 'Reject',
+                  ),
                 ),
               ),
               const SizedBox(width: 12),
@@ -3277,13 +3596,21 @@ class _StreamErrorRow extends StatelessWidget {
 }
 
 class _HikeRoomMonitoringPage extends StatelessWidget {
-  const _HikeRoomMonitoringPage();
+  const _HikeRoomMonitoringPage({required this.access});
+
+  final _AdminAccess access;
 
   @override
   Widget build(BuildContext context) {
-    final currentRoomsQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> currentRoomsQuery = FirebaseFirestore.instance
         .collection('hike_rooms')
         .where('status', whereIn: ['waiting', 'active']);
+    if (access.isMountainHead) {
+      currentRoomsQuery = currentRoomsQuery.where(
+        'mountainName',
+        isEqualTo: access.managedMountainName,
+      );
+    }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -3785,7 +4112,9 @@ class _ParticipantLocationMap extends StatelessWidget {
 }
 
 class _SosMonitoringPage extends StatefulWidget {
-  const _SosMonitoringPage();
+  const _SosMonitoringPage({required this.access});
+
+  final _AdminAccess access;
 
   @override
   State<_SosMonitoringPage> createState() => _SosMonitoringPageState();
@@ -3799,7 +4128,7 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
   @override
   void initState() {
     super.initState();
-    _loadDeletedSenderIds();
+    if (widget.access.isTourismAdmin) _loadDeletedSenderIds();
   }
 
   Future<void> _loadDeletedSenderIds() async {
@@ -3841,10 +4170,16 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
   }
 
   Stream<QuerySnapshot<Map<String, dynamic>>> _sosEventsStream() {
-    return FirebaseFirestore.instance
+    Query<Map<String, dynamic>> query = FirebaseFirestore.instance
         .collectionGroup('sos_events')
-        .orderBy('createdAt', descending: true)
-        .snapshots();
+        .orderBy('createdAt', descending: true);
+    if (widget.access.isMountainHead) {
+      query = query.where(
+        'mountainName',
+        isEqualTo: widget.access.managedMountainName,
+      );
+    }
+    return query.snapshots();
   }
 
   Future<void> _removeOrphanedAlerts() async {
@@ -3941,7 +4276,8 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
               'Live SOS events from Firebase.',
               style: TextStyle(color: Colors.black54),
             ),
-            if (_deletedSenderLookupError != null) ...[
+            if (widget.access.isTourismAdmin &&
+                _deletedSenderLookupError != null) ...[
               const SizedBox(height: 8),
               Text(
                 'Could not verify deleted SOS users: '
@@ -3950,22 +4286,23 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
               ),
             ],
             const SizedBox(height: 10),
-            Align(
-              alignment: Alignment.centerRight,
-              child: OutlinedButton.icon(
-                onPressed: _cleaningOrphanedAlerts
-                    ? null
-                    : _removeOrphanedAlerts,
-                icon: _cleaningOrphanedAlerts
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.delete_sweep_outlined),
-                label: const Text('Remove SOS from deleted users'),
+            if (widget.access.isTourismAdmin)
+              Align(
+                alignment: Alignment.centerRight,
+                child: OutlinedButton.icon(
+                  onPressed: _cleaningOrphanedAlerts
+                      ? null
+                      : _removeOrphanedAlerts,
+                  icon: _cleaningOrphanedAlerts
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.delete_sweep_outlined),
+                  label: const Text('Remove SOS from deleted users'),
+                ),
               ),
-            ),
             const SizedBox(height: 14),
 
             Container(
@@ -4916,7 +5253,9 @@ class _BluetoothParticipantTile extends StatelessWidget {
 }
 
 class _UserManagementPage extends StatefulWidget {
-  const _UserManagementPage();
+  const _UserManagementPage({required this.access});
+
+  final _AdminAccess access;
 
   @override
   State<_UserManagementPage> createState() => _UserManagementPageState();
@@ -4930,7 +5269,9 @@ class _UserManagementPageState extends State<_UserManagementPage> {
     if (data['adminAccess'] == true ||
         data['role'] == 'admin' ||
         data['accountType'] == 'admin') {
-      return 'admin';
+      return data['adminRole'] == 'mountain_head'
+          ? 'mountain_head'
+          : 'tourism_admin';
     }
     final accountType = data['accountType']?.toString();
     return accountType == 'tour_guide' ? 'tour_guide' : 'hiker';
@@ -4959,9 +5300,16 @@ class _UserManagementPageState extends State<_UserManagementPage> {
 
   @override
   Widget build(BuildContext context) {
-    final usersQuery = FirebaseFirestore.instance
-        .collection('users')
-        .orderBy('email');
+    final usersCollection = FirebaseFirestore.instance.collection('users');
+    final usersQuery = widget.access.isMountainHead
+        ? usersCollection
+              .where('accountType', isEqualTo: 'tour_guide')
+              .where(
+                'mountainNames',
+                arrayContains: widget.access.managedMountainName,
+              )
+              .orderBy('email')
+        : usersCollection.orderBy('email');
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -4973,21 +5321,25 @@ class _UserManagementPageState extends State<_UserManagementPage> {
             style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 4),
-          const Text(
-            'View and manage AGAKBAY user and admin accounts.',
-            style: TextStyle(color: Colors.black54),
+          Text(
+            widget.access.isMountainHead
+                ? 'Tour guides assigned to ${widget.access.managedMountainName}.'
+                : 'View and manage AGAKBAY user and admin accounts.',
+            style: const TextStyle(color: Colors.black54),
           ),
           const SizedBox(height: 20),
 
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton.icon(
-              onPressed: _showCreateAdminDialog,
-              icon: const Icon(Icons.person_add_alt_1),
-              label: const Text('Create Admin Account'),
+          if (widget.access.isTourismAdmin) ...[
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: _showCreateAdminDialog,
+                icon: const Icon(Icons.person_add_alt_1),
+                label: const Text('Create Admin Account'),
+              ),
             ),
-          ),
-          const SizedBox(height: 12),
+            const SizedBox(height: 12),
+          ],
 
           TextField(
             controller: _searchController,
@@ -5008,35 +5360,43 @@ class _UserManagementPageState extends State<_UserManagementPage> {
 
           const SizedBox(height: 16),
 
-          SizedBox(
-            width: 240,
-            child: DropdownButtonFormField<String>(
-              initialValue: _accountTypeFilter,
-              decoration: const InputDecoration(
-                labelText: 'Filter by account type',
-                filled: true,
-                fillColor: Colors.white,
-                border: OutlineInputBorder(),
+          if (widget.access.isTourismAdmin)
+            SizedBox(
+              width: 240,
+              child: DropdownButtonFormField<String>(
+                initialValue: _accountTypeFilter,
+                decoration: const InputDecoration(
+                  labelText: 'Filter by account type',
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(),
+                ),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'all',
+                    child: Text('All account types'),
+                  ),
+                  DropdownMenuItem(value: 'hiker', child: Text('Hiker')),
+                  DropdownMenuItem(
+                    value: 'tour_guide',
+                    child: Text('Tour Guide'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'tourism_admin',
+                    child: Text('Tourism Admin'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'mountain_head',
+                    child: Text('Mountain Head'),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => _accountTypeFilter = value);
+                  }
+                },
               ),
-              items: const [
-                DropdownMenuItem(
-                  value: 'all',
-                  child: Text('All account types'),
-                ),
-                DropdownMenuItem(value: 'hiker', child: Text('Hiker')),
-                DropdownMenuItem(
-                  value: 'tour_guide',
-                  child: Text('Tour Guide'),
-                ),
-                DropdownMenuItem(value: 'admin', child: Text('Admin')),
-              ],
-              onChanged: (value) {
-                if (value != null) {
-                  setState(() => _accountTypeFilter = value);
-                }
-              },
             ),
-          ),
 
           const SizedBox(height: 16),
 
@@ -5152,13 +5512,12 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                             ),
                           ),
                           DataCell(
-                            Text(
-                              accountType == 'tour_guide'
-                                  ? 'Tour Guide'
-                                  : accountType == 'admin'
-                                  ? 'Admin'
-                                  : 'Hiker',
-                            ),
+                            Text(switch (accountType) {
+                              'tour_guide' => 'Tour Guide',
+                              'tourism_admin' => 'Tourism Admin',
+                              'mountain_head' => 'Mountain Head',
+                              _ => 'Hiker',
+                            }),
                           ),
                           DataCell(
                             Text(
@@ -5236,13 +5595,15 @@ class _UserManagementPageState extends State<_UserManagementPage> {
     String userId,
     String action,
   ) async {
+    if (!widget.access.isTourismAdmin) return;
+
     final descriptions = <String, String>{
       'revoke_admin': 'Remove this user\'s admin access?',
       'suspend':
           'Suspend this account? They will be signed out and unable to sign in.',
       'restore': 'Restore this account\'s access?',
       'delete':
-          'Permanently delete this sign-in account and its user profile? Authored activity records may remain.',
+          'Permanently delete this sign-in account, private profile data, guide applications and files, and hike/SOS data? Public community posts, comments, and trail submissions will remain.',
     };
     final successTitles = <String, String>{
       'revoke_admin': 'Admin Access Revoked',
@@ -5255,13 +5616,18 @@ class _UserManagementPageState extends State<_UserManagementPage> {
       'suspend': 'This account has been signed out and can no longer sign in.',
       'restore': 'This account can sign in again.',
       'delete':
-          'The sign-in account and profile data have been permanently deleted.',
+          'The sign-in account and private profile data have been deleted. Public community posts, comments, and trail submissions remain.',
     };
+    final isDelete = action == 'delete';
     final confirmed = await showDialog<bool>(
       context: dialogContext,
       builder: (context) => AlertDialog(
-        title: const Text('Confirm account change'),
-        content: Text(descriptions[action]!),
+        title: Text(isDelete ? 'Confirm deletion' : 'Confirm account change'),
+        content: Text(
+          isDelete
+              ? 'Are you sure you want to delete this account?'
+              : descriptions[action]!,
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -5296,7 +5662,11 @@ class _UserManagementPageState extends State<_UserManagementPage> {
         context,
         success: false,
         title: 'Could Not Update Account',
-        message: error.message ?? 'Something went wrong. Please try again.',
+        message: [
+          'Code: ${error.code}',
+          if (error.message?.isNotEmpty == true) error.message!,
+          if (error.details != null) 'Details: ${error.details}',
+        ].join('\n'),
       );
     }
   }
@@ -5355,6 +5725,23 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                     label: 'Admin Access',
                     value: hasAdminAccess ? 'Granted' : 'Not granted',
                   ),
+                  if (hasAdminAccess) ...[
+                    _UserDetailRow(
+                      label: 'Admin Role',
+                      value: data['adminRole'] == 'mountain_head'
+                          ? 'Mountain Head'
+                          : data['adminRole'] == 'tourism_admin'
+                          ? 'Tourism Admin'
+                          : 'Unassigned (legacy Tourism Admin)',
+                    ),
+                    if (data['adminRole'] == 'mountain_head')
+                      _UserDetailRow(
+                        label: 'Managed Mountain',
+                        value:
+                            data['managedMountainName']?.toString() ??
+                            'Not assigned',
+                      ),
+                  ],
                   _UserDetailRow(
                     label: 'Account Status',
                     value: isSuspended ? 'Suspended' : 'Active',
@@ -5400,31 +5787,37 @@ class _UserManagementPageState extends State<_UserManagementPage> {
             ),
           ),
           actions: [
-            if (hasAdminAccess)
+            if (widget.access.isTourismAdmin && hasAdminAccess)
               TextButton.icon(
                 onPressed: () =>
                     _manageUserAccount(dialogContext, userId, 'revoke_admin'),
                 icon: const Icon(Icons.admin_panel_settings_outlined),
                 label: const Text('Revoke Admin'),
               ),
-            TextButton.icon(
-              onPressed: () => _manageUserAccount(
-                dialogContext,
-                userId,
-                isSuspended ? 'restore' : 'suspend',
+            if (widget.access.isTourismAdmin) ...[
+              TextButton.icon(
+                onPressed: () => _manageUserAccount(
+                  dialogContext,
+                  userId,
+                  isSuspended ? 'restore' : 'suspend',
+                ),
+                icon: Icon(
+                  isSuspended ? Icons.lock_open_outlined : Icons.block,
+                ),
+                label: Text(
+                  isSuspended ? 'Restore Account' : 'Suspend Account',
+                ),
               ),
-              icon: Icon(isSuspended ? Icons.lock_open_outlined : Icons.block),
-              label: Text(isSuspended ? 'Restore Account' : 'Suspend Account'),
-            ),
-            TextButton.icon(
-              onPressed: () =>
-                  _manageUserAccount(dialogContext, userId, 'delete'),
-              icon: const Icon(Icons.delete_outline, color: Colors.red),
-              label: const Text(
-                'Delete Account',
-                style: TextStyle(color: Colors.red),
+              TextButton.icon(
+                onPressed: () =>
+                    _manageUserAccount(dialogContext, userId, 'delete'),
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+                label: const Text(
+                  'Delete Account',
+                  style: TextStyle(color: Colors.red),
+                ),
               ),
-            ),
+            ],
             TextButton(
               onPressed: () {
                 Navigator.of(dialogContext).pop();
@@ -5451,13 +5844,19 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   bool _creating = false;
+  String _adminRole = 'tourism_admin';
   String? _error;
   String? _resetLink;
+  String? _createdAdminRole;
+  String? _createdMountainName;
+
+  final _mountainController = TextEditingController();
 
   @override
   void dispose() {
     _nameController.dispose();
     _emailController.dispose();
+    _mountainController.dispose();
     super.dispose();
   }
 
@@ -5473,17 +5872,33 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
           .call<Map<String, dynamic>>({
             'fullName': _nameController.text.trim(),
             'email': _emailController.text.trim(),
+            'adminRole': _adminRole,
+            if (_adminRole == 'mountain_head')
+              'managedMountainName': _mountainController.text.trim(),
           });
+      final createdRole = result.data['adminRole'];
+      final createdMountain = result.data['managedMountainName'];
+      if (createdRole != _adminRole ||
+          (_adminRole == 'mountain_head' &&
+              createdMountain != _mountainController.text.trim())) {
+        throw StateError(
+          'Firebase did not confirm the selected admin role and mountain. '
+          'The account may have been created with different access. '
+          'Check the user profile before sharing the password setup link.',
+        );
+      }
       if (!mounted) return;
-      setState(() => _resetLink = result.data['resetLink'] as String?);
+      setState(() {
+        _resetLink = result.data['resetLink'] as String?;
+        _createdAdminRole = createdRole as String;
+        _createdMountainName = createdMountain as String?;
+      });
     } on FirebaseFunctionsException catch (error) {
       if (!mounted) return;
       setState(() => _error = error.message ?? 'Could not create the account.');
-    } catch (_) {
+    } catch (error) {
       if (!mounted) return;
-      setState(
-        () => _error = 'Could not create the account. Please try again.',
-      );
+      setState(() => _error = error.toString());
     } finally {
       if (mounted) setState(() => _creating = false);
     }
@@ -5504,6 +5919,13 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                   const Text(
                     'Send this password setup link to the new admin. It can be used to choose their sign-in password.',
                   ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Assigned role: ${_createdAdminRole == 'mountain_head' ? 'Mountain Head' : 'Tourism Admin'}',
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  if (_createdAdminRole == 'mountain_head')
+                    Text('Managed mountain: $_createdMountainName'),
                   const SizedBox(height: 12),
                   SelectableText(_resetLink!),
                 ],
@@ -5534,6 +5956,46 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                             : 'Enter a valid email address.';
                       },
                     ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: _adminRole,
+                      decoration: const InputDecoration(
+                        labelText: 'Admin role',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'tourism_admin',
+                          child: Text('Tourism Admin — full access'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'mountain_head',
+                          child: Text('Mountain Head — assigned mountain'),
+                        ),
+                      ],
+                      onChanged: _creating
+                          ? null
+                          : (value) {
+                              if (value != null) {
+                                setState(() => _adminRole = value);
+                              }
+                            },
+                    ),
+                    if (_adminRole == 'mountain_head')
+                      TextFormField(
+                        controller: _mountainController,
+                        decoration: const InputDecoration(
+                          labelText: 'Managed mountain',
+                          hintText:
+                              'Enter the mountain name exactly as used in submissions',
+                        ),
+                        validator: (value) {
+                          if (_adminRole == 'mountain_head' &&
+                              (value == null || value.trim().isEmpty)) {
+                            return 'Enter the managed mountain name.';
+                          }
+                          return null;
+                        },
+                      ),
                     if (_error != null) ...[
                       const SizedBox(height: 12),
                       Text(_error!, style: const TextStyle(color: Colors.red)),

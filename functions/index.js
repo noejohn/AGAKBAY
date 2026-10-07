@@ -8,10 +8,14 @@ const {
 const { getRedisClient, weatherCacheKey } = require("./redisCache");
 const { enforceRateLimit } = require("./rateLimit");
 const { exchangeAuth0Token } = require("./auth0Exchange");
-const { reviewTourGuideApplication } = require("./adminActions");
+const {
+  reviewTourGuideApplication,
+  recommendAdminReview,
+} = require("./adminActions");
 const {
   manageUserAccount,
   createAdminAccount,
+  refreshAdminClaims,
   cleanupOrphanedSosEvents,
   getDeletedSosSenderIds,
 } = require("./userAccountActions");
@@ -32,8 +36,10 @@ admin.initializeApp();
 
 exports.exchangeAuth0Token = exchangeAuth0Token;
 exports.reviewTourGuideApplication = reviewTourGuideApplication;
+exports.recommendAdminReview = recommendAdminReview;
 exports.manageUserAccount = manageUserAccount;
 exports.createAdminAccount = createAdminAccount;
+exports.refreshAdminClaims = refreshAdminClaims;
 exports.cleanupOrphanedSosEvents = cleanupOrphanedSosEvents;
 exports.getDeletedSosSenderIds = getDeletedSosSenderIds;
 exports.updateParticipantBluetoothStatus = updateParticipantBluetoothStatus;
@@ -310,6 +316,7 @@ exports.sendSosEvent = onCall(
     batch.set(eventRef, {
       roomId,
       roomCode: room?.roomCode ?? "",
+      mountainName: room?.mountainName ?? "",
       senderId: uid,
       senderName,
       latitude,
@@ -387,6 +394,7 @@ exports.onSosEventCreated = onDocumentCreated(
         isRead: false,
         roomId,
         eventId,
+        mountainName: String(currentEvent.mountainName || data.mountainName || ""),
         senderId: String(data.senderId || ""),
         senderName,
         latitude: Number(data.latitude),
@@ -843,6 +851,7 @@ exports.onTrailSubmissionCreated = onDocumentCreated(
           message: `${submitterName} submitted ${trailName} for ${mountainName || "a mountain"}.`,
           trailSubmissionId: submissionId,
           mountainKey,
+          mountainName,
           isRead: false,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
