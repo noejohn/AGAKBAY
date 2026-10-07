@@ -8,6 +8,7 @@ import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/services/heltec_ble_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
+import 'package:tunga/widgets/sos_reason_picker.dart';
 
 class HikeRoomScreen extends StatefulWidget {
   const HikeRoomScreen({super.key, this.onStartHiking});
@@ -32,6 +33,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
   String _displayName = 'Hiker';
   bool _loading = true;
   bool _submitting = false;
+  bool _openingHikingMode = false;
 
   Timer? _heartbeatTimer;
   String? _heartbeatRoomId;
@@ -195,83 +197,6 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
     });
   }
 
-  Future<void> _stopHiking(String roomId) async {
-    final reasonController = TextEditingController();
-    final deviceConnected = HeltecBleService.instance.isConnected;
-    final choice = await showDialog<(String, String)>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text("Can't continue?"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              "Let your Tour Guide know why you're stopping — they'll see "
-              'this right away and you can keep using SOS if you need help '
-              'heading back down.',
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: reasonController,
-              autofocus: true,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText: 'Reason',
-                hintText: 'e.g. too tired, twisted my ankle, weather',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
-          ),
-          if (deviceConnected)
-            OutlinedButton(
-              onPressed: () => Navigator.of(
-                dialogContext,
-              ).pop((reasonController.text.trim(), 'device')),
-              child: const Text('Send via Device'),
-            ),
-          FilledButton(
-            onPressed: () => Navigator.of(
-              dialogContext,
-            ).pop((reasonController.text.trim(), 'internet')),
-            child: const Text('Send via Internet'),
-          ),
-        ],
-      ),
-    );
-    reasonController.dispose();
-    if (choice == null || choice.$1.isEmpty || !mounted) {
-      return;
-    }
-    final (reason, transport) = choice;
-    if (transport == 'device') {
-      await _run(() async {
-        final sent = await HeltecBleService.instance.sendStop(
-          hikerName: _displayName,
-          reason: reason,
-        );
-        if (sent) {
-          _message('Sent over the device — no internet needed.');
-        } else {
-          throw StateError(
-            HeltecBleService.instance.lastError ??
-                'Failed to send to the device.',
-          );
-        }
-      });
-      return;
-    }
-    await _run(() async {
-      await _service.stopHiking(roomId, reason: reason);
-      _message('Your Tour Guide has been notified.');
-    });
-  }
-
   Future<void> _kickParticipant(
     HikeRoom room,
     HikeRoomParticipant participant,
@@ -311,17 +236,37 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
       return;
     }
 
+    // Guards the whole Hiking Mode session — a second tap while it's
+    // opening (or already open) must never push a second Hiking Mode.
+    if (_openingHikingMode) return;
+    setState(() => _openingHikingMode = true);
+
     try {
       _activeRoomId = room.id;
 
-      await _service.setCurrentParticipantHiking(room.id, isHiking: true);
-
-      await _startParticipantLocationTracking(room.id);
+      // Neither of these is awaited before opening Hiking Mode: the
+      // Firestore write only completes once the server acknowledges it
+      // (never, with no signal at the trailhead), and a high-accuracy GPS
+      // fix can take several seconds — both used to leave the button
+      // looking dead, so hikers tapped it again.
+      unawaited(
+        _service
+            .setCurrentParticipantHiking(room.id, isHiking: true)
+            .catchError((Object error) {
+              debugPrint('Could not mark participant as hiking: $error');
+            }),
+      );
+      unawaited(
+        _startParticipantLocationTracking(room.id).catchError((Object error) {
+          debugPrint('Could not start room location tracking: $error');
+        }),
+      );
 
       await callback(room);
     } catch (error) {
       _message(_errorText(error));
     } finally {
+      if (mounted) setState(() => _openingHikingMode = false);
       await _stopParticipantLocationTracking();
 
       try {
@@ -361,10 +306,23 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
     // wait for the first stream event.
     final initialPosition = await _getPhoneLocation();
 
-    await _service.updateCurrentParticipantLocation(
-      roomId,
-      latitude: initialPosition.latitude,
-      longitude: initialPosition.longitude,
+    // The hike may already have ended while that GPS fix was coming in —
+    // don't start a stream nobody will ever stop.
+    if (_activeRoomId != roomId) return;
+
+    // Not awaited: a Firestore write only completes on server
+    // acknowledgement, which with no signal would keep the live stream
+    // below from ever starting. Offline writes still queue and sync later.
+    unawaited(
+      _service
+          .updateCurrentParticipantLocation(
+            roomId,
+            latitude: initialPosition.latitude,
+            longitude: initialPosition.longitude,
+          )
+          .catchError((Object error) {
+            debugPrint('Could not record initial location: $error');
+          }),
     );
 
     const locationSettings = LocationSettings(
@@ -394,39 +352,87 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
     _locationSubscription = null;
   }
 
+  /// Sends the SOS through the internet AND the Heltec (when connected) at
+  /// the same time — never one after the other, since on a weak mountain
+  /// signal the internet attempt can hang for over a minute and the
+  /// offline LoRa SOS must never wait behind it.
   Future<void> _sendSos(String roomId) async {
-    await _run(() async {
-      final position = await _getPhoneLocation();
-      await _service.sendSos(
-        roomId: roomId,
-        latitude: position.latitude,
-        longitude: position.longitude,
-      );
-      _message('SOS sent to the Tour Guide through the internet.');
-    });
-  }
-
-  Future<void> _sendDeviceSos() async {
-    final ble = HeltecBleService.instance;
-    if (!ble.isConnected) {
-      _message('Connect a Heltec device first to send SOS with no signal.');
-      return;
-    }
+    final reason = await showSosReasonPicker(context);
+    if (reason == null || !mounted) return;
     await _run(() async {
       // The Heltec's own onboard GPS module is unreliable on the current
-      // hardware, so the phone's GPS supplies the coordinates instead —
-      // the device just relays them over LoRa rather than measuring its
-      // own location. Still works with zero signal either way.
+      // hardware, so the phone's GPS supplies the coordinates for both
+      // paths — the device just relays them over LoRa. Phone GPS works
+      // with zero signal too.
       final position = await _getPhoneLocation();
-      final sent = await ble.sendSos(
-        hikerName: _displayName,
-        latitude: position.latitude,
-        longitude: position.longitude,
-      );
-      if (sent) {
-        _message('SOS sent over the device — no internet needed.');
+      final ble = HeltecBleService.instance;
+
+      var internetTimedOut = false;
+      Object? internetError;
+
+      Future<bool> sendByInternet() async {
+        try {
+          await _service.sendSos(
+            roomId: roomId,
+            latitude: position.latitude,
+            longitude: position.longitude,
+            reason: reason,
+          );
+          return true;
+        } catch (error) {
+          internetError = error;
+          return false;
+        }
+      }
+
+      Future<bool> sendByDevice() async {
+        if (!ble.isConnected) return false;
+        final sent = await ble.sendSos(
+          hikerName: _displayName,
+          latitude: position.latitude,
+          longitude: position.longitude,
+          reason: reason,
+        );
+        if (sent) {
+          _message('SOS ($reason) sent over the device. Still trying the internet...');
+        }
+        return sent;
+      }
+
+      final results = await Future.wait([
+        sendByInternet().timeout(
+          const Duration(seconds: 20),
+          onTimeout: () {
+            internetTimedOut = true;
+            return false;
+          },
+        ),
+        sendByDevice(),
+      ]);
+      final byInternet = results[0];
+      final byDevice = results[1];
+
+      if (byInternet && byDevice) {
+        _message('SOS ($reason) sent through the internet and your device.');
+      } else if (byInternet) {
+        _message(
+          ble.isConnected
+              ? 'SOS ($reason) sent through the internet. The device could not send it.'
+              : 'SOS ($reason) sent through the internet.',
+        );
+      } else if (byDevice) {
+        _message(
+          internetTimedOut
+              ? 'SOS ($reason) sent over the device. Weak signal — the internet could not confirm it yet.'
+              : 'SOS ($reason) sent over the device — no internet needed.',
+        );
+      } else if (internetTimedOut) {
+        throw StateError(
+          'Weak signal — SOS not confirmed. Connect your Heltec device so SOS also works with no signal.',
+        );
       } else {
-        throw StateError(ble.lastError ?? 'Failed to send SOS to the device.');
+        throw internetError ??
+            StateError(ble.lastError ?? 'Failed to send SOS.');
       }
     });
   }
@@ -758,7 +764,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
           if (_isGuide) ...[
             const SizedBox(height: 20),
             Text(
-              'Hikers Who Stopped',
+              'Hikers Who Ended Their Hike',
               style: Theme.of(
                 context,
               ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
@@ -769,7 +775,11 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
           ],
           const _OfflineSosRelayCard(),
           const SizedBox(height: 16),
-          const _HikeRoomPolicyCard(),
+          _HikeRoomPolicyCard(
+            roomId: room.id,
+            service: _service,
+            isGuide: _isGuide,
+          ),
           const SizedBox(height: 22),
           if (_isGuide && room.status == HikeRoomStatus.waiting)
             FilledButton.icon(
@@ -778,15 +788,44 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
               label: const Text('Start Hike Session'),
             ),
           if (room.status == HikeRoomStatus.active) ...[
-            FilledButton.icon(
-              onPressed: _submitting ? null : () => _openHikingMode(room),
-              icon: const Icon(Icons.hiking_rounded),
-              label: const Text('START HIKING'),
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF53D97A),
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(vertical: 18),
-              ),
+            // Hikers must agree to the Tour Guide Policy terms (checkbox in
+            // _HikeRoomPolicyCard above) before they can start; the guide
+            // isn't gated since the policy is written for hikers.
+            StreamBuilder<HikeRoomParticipant?>(
+              stream: _isGuide
+                  ? null
+                  : _service.watchCurrentParticipant(room.id),
+              builder: (context, snapshot) {
+                final accepted =
+                    _isGuide || snapshot.data?.policyAcceptedAt != null;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: (_submitting || _openingHikingMode || !accepted)
+                          ? null
+                          : () => _openHikingMode(room),
+                      icon: const Icon(Icons.hiking_rounded),
+                      label: const Text('START HIKING'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFF53D97A),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 18),
+                      ),
+                    ),
+                    if (!accepted)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Agree to the Terms and Conditions in the Tour Guide Policy to start hiking.',
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: Colors.orange),
+                        ),
+                      ),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 10),
           ],
@@ -800,36 +839,19 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
               ),
             ),
           if (room.status == HikeRoomStatus.active) ...[
-            OutlinedButton.icon(
+            // One SOS button for both paths — it uses whichever is
+            // available (internet, and the Heltec when connected) at the
+            // same time, the same way Hiking Mode's SOS does.
+            FilledButton.icon(
               onPressed: _submitting ? null : () => _sendSos(room.id),
               icon: const Icon(Icons.sos_rounded),
-              label: const Text('Send SOS from Room'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.redAccent,
+              label: const Text('Send SOS'),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
               ),
             ),
             const SizedBox(height: 10),
-            ListenableBuilder(
-              listenable: HeltecBleService.instance,
-              builder: (context, _) {
-                final connected = HeltecBleService.instance.isConnected;
-                return FilledButton.icon(
-                  onPressed: (_submitting || !connected)
-                      ? null
-                      : _sendDeviceSos,
-                  icon: const Icon(Icons.sos_rounded),
-                  label: Text(
-                    connected
-                        ? 'Send SOS via Device (No Signal)'
-                        : 'Connect Device to Enable Offline SOS',
-                  ),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.redAccent,
-                    foregroundColor: Colors.white,
-                  ),
-                );
-              },
-            ),
           ],
           if (!_isGuide && room.status == HikeRoomStatus.waiting)
             OutlinedButton.icon(
@@ -837,36 +859,42 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
               icon: const Icon(Icons.logout_rounded),
               label: const Text('Leave Room'),
             ),
+          // Ending a hike now happens from Hiking Mode's End Hike (with a
+          // reason) — this only shows the result: what was sent, and
+          // whether the guide has seen it, over the internet OR the device.
           if (!_isGuide && room.status == HikeRoomStatus.active)
             StreamBuilder<HikeRoomParticipant?>(
               stream: _service.watchCurrentParticipant(room.id),
               builder: (context, snapshot) {
                 final me = snapshot.data;
-                if (me?.stopReason != null) {
-                  return Card(
-                    color: Colors.orange.withValues(alpha: 0.12),
-                    child: ListTile(
-                      leading: const Icon(
-                        Icons.pan_tool_rounded,
-                        color: Colors.orange,
+                if (me?.stopReason == null) return const SizedBox.shrink();
+                return ListenableBuilder(
+                  listenable: HeltecBleService.instance,
+                  builder: (context, _) {
+                    final seen =
+                        me!.stopAcknowledged ||
+                        HeltecBleService.instance.stopAcknowledgedOverLoraFor(
+                          me.name,
+                          since: me.stoppedAt,
+                        );
+                    return Card(
+                      color: seen
+                          ? Colors.green.withValues(alpha: 0.12)
+                          : Colors.orange.withValues(alpha: 0.12),
+                      child: ListTile(
+                        leading: Icon(
+                          seen ? Icons.done_all_rounded : Icons.flag_rounded,
+                          color: seen ? Colors.greenAccent : Colors.orange,
+                        ),
+                        title: const Text('You ended your hike'),
+                        subtitle: Text(
+                          seen
+                              ? '${me.stopReason} — your guide has seen this'
+                              : '${me.stopReason} — waiting for your guide to see this',
+                        ),
                       ),
-                      title: const Text("You've stopped"),
-                      subtitle: Text(
-                        me!.stopAcknowledged
-                            ? '${me.stopReason} — your guide has seen this'
-                            : '${me.stopReason} — waiting for your guide to see this',
-                      ),
-                    ),
-                  );
-                }
-                return OutlinedButton.icon(
-                  onPressed: _submitting ? null : () => _stopHiking(room.id),
-                  icon: const Icon(Icons.pan_tool_rounded),
-                  label: const Text("I Can't Continue"),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.orange,
-                    side: const BorderSide(color: Colors.orange),
-                  ),
+                    );
+                  },
                 );
               },
             ),
@@ -1138,6 +1166,7 @@ class _OfflineSosRelayCard extends StatelessWidget {
             ? null
             : DateTime.now().difference(at).inMinutes;
         final hasFix = ble.lastRelayHasFix;
+        final reason = ble.lastRelayReason;
         return Padding(
           padding: const EdgeInsets.only(top: 10),
           child: Card(
@@ -1146,6 +1175,7 @@ class _OfflineSosRelayCard extends StatelessWidget {
               leading: const Icon(Icons.sos_rounded, color: Colors.redAccent),
               title: Text('$name sent SOS — Offline (LoRa relay)'),
               subtitle: Text(
+                '${reason == null ? '' : 'Reason: $reason\n'}'
                 '${hasFix ? '${lat.toStringAsFixed(6)}, ${lon.toStringAsFixed(6)}' : 'Location unavailable — sender device had no GPS fix yet'}\n'
                 '${minutesAgo == null ? 'Just now' : '$minutesAgo min ago'} • no internet used',
               ),
@@ -1176,18 +1206,38 @@ class _OfflineStopRelayCard extends StatelessWidget {
         final minutesAgo = at == null
             ? null
             : DateTime.now().difference(at).inMinutes;
+        final acknowledged = ble.stopAckSentFor(name);
         return Padding(
           padding: const EdgeInsets.only(top: 10),
           child: Card(
-            color: Colors.orange.withValues(alpha: 0.18),
+            color: acknowledged
+                ? Colors.green.withValues(alpha: 0.12)
+                : Colors.orange.withValues(alpha: 0.18),
             child: ListTile(
-              leading: const Icon(Icons.pan_tool_rounded, color: Colors.orange),
-              title: Text("$name can't continue — Offline (LoRa relay)"),
+              leading: Icon(
+                acknowledged ? Icons.done_all_rounded : Icons.flag_rounded,
+                color: acknowledged ? Colors.greenAccent : Colors.orange,
+              ),
+              title: Text('$name ended their hike — Offline (LoRa relay)'),
               subtitle: Text(
                 '$reason\n'
                 '${minutesAgo == null ? 'Just now' : '$minutesAgo min ago'} • no internet used',
               ),
               isThreeLine: true,
+              trailing: acknowledged
+                  ? const Text('ACKNOWLEDGED')
+                  : FilledButton(
+                      onPressed: () => _acknowledgeEndedHike(
+                        context,
+                        // Heard only over LoRa — the online list above
+                        // covers the internet side for this same hiker.
+                        service: null,
+                        roomId: null,
+                        participantId: null,
+                        hikerName: name,
+                      ),
+                      child: const Text('Acknowledge'),
+                    ),
             ),
           ),
         );
@@ -1202,12 +1252,23 @@ class _OfflineStopRelayCard extends StatelessWidget {
 /// status cards above it; a hiker opens it when they actually want to
 /// check something.
 class _HikeRoomPolicyCard extends StatelessWidget {
-  const _HikeRoomPolicyCard();
+  const _HikeRoomPolicyCard({
+    required this.roomId,
+    required this.service,
+    required this.isGuide,
+  });
+
+  final String roomId;
+  final HikeRoomService service;
+
+  /// The Terms & Conditions checkbox is only shown to hikers — the guide
+  /// still sees the policy itself but isn't asked to agree to it.
+  final bool isGuide;
 
   static const List<String> _dos = [
     "Follow the Tour Guide's instructions throughout the hike.",
     "Stay with the group — don't get far ahead or fall far behind.",
-    'Use "I Can\'t Continue" if you need to stop — never just disappear from the group.',
+    'Use End Hike in Hiking Mode (with a reason) if you need to stop — never just disappear from the group.',
     'Connect your Heltec device if you have one, especially where signal is weak.',
     "Respect the turnaround time the guide sets.",
     'Tell the guide right away if you feel unwell, before it gets worse.',
@@ -1228,7 +1289,7 @@ class _HikeRoomPolicyCard extends StatelessWidget {
     'See the list of hikers and the guide in this room.',
     'Connect a Heltec device to enable offline features.',
     'Send SOS — over the internet, or over the device if there is no signal.',
-    '"I Can\'t Continue" — over the internet or the device, with a reason.',
+    'End Hike with a reason — your guide is told over the internet and/or the device, and you stay in the room.',
     'Tap START HIKING once the guide starts the hike, for live GPS tracking.',
     'Leave the room — only before the hike has started.',
     'See your own stop status, and whether the guide has acknowledged it.',
@@ -1236,7 +1297,7 @@ class _HikeRoomPolicyCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
+    final policy = Card(
       clipBehavior: Clip.antiAlias,
       child: Theme(
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
@@ -1260,6 +1321,47 @@ class _HikeRoomPolicyCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+
+    if (isGuide) return policy;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        policy,
+        StreamBuilder<HikeRoomParticipant?>(
+          stream: service.watchCurrentParticipant(roomId),
+          builder: (context, snapshot) {
+            final accepted = snapshot.data?.policyAcceptedAt != null;
+            return CheckboxListTile(
+              value: accepted,
+              controlAffinity: ListTileControlAffinity.leading,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              title: const Text(
+                'I have read and agree to the Terms and Conditions of the '
+                'Tour Guide Policy above.',
+              ),
+              onChanged: snapshot.data == null
+                  ? null
+                  : (value) async {
+                      try {
+                        await service.setPolicyAccepted(
+                          roomId,
+                          accepted: value ?? false,
+                        );
+                      } catch (error) {
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Could not save your agreement: $error'),
+                          ),
+                        );
+                      }
+                    },
+            );
+          },
+        ),
+      ],
     );
   }
 
@@ -1380,8 +1482,10 @@ class _SosList extends StatelessWidget {
                     ),
                     title: Text('${event.senderName} sent SOS'),
                     subtitle: Text(
+                      '${event.reason == null ? '' : 'Reason: ${event.reason}\n'}'
                       '${event.latitude.toStringAsFixed(6)}, ${event.longitude.toStringAsFixed(6)}',
                     ),
+                    isThreeLine: event.reason != null,
                     trailing: acknowledged
                         ? const Text('ACKNOWLEDGED')
                         : !isGuide
@@ -1407,6 +1511,51 @@ class _SosList extends StatelessWidget {
       },
     );
   }
+}
+
+/// Guide acknowledges a hiker's ended hike over the internet AND the
+/// Heltec (whichever are available) at the same time, so the hiker learns
+/// it was seen even when neither side has signal.
+Future<void> _acknowledgeEndedHike(
+  BuildContext context, {
+  required HikeRoomService? service,
+  required String? roomId,
+  required String? participantId,
+  required String hikerName,
+}) async {
+  final messenger = ScaffoldMessenger.of(context);
+  final ble = HeltecBleService.instance;
+  final sentByDevice = ble.isConnected
+      ? await ble.sendStopAck(hikerName: hikerName)
+      : false;
+
+  var sentOnline = false;
+  if (service != null && roomId != null && participantId != null) {
+    try {
+      // Bounded: an offline Firestore write never completes on its own,
+      // and the device path above already covers no-signal.
+      await service
+          .acknowledgeStop(roomId, participantId)
+          .timeout(const Duration(seconds: 10));
+      sentOnline = true;
+    } catch (error) {
+      debugPrint('Could not acknowledge online: $error');
+    }
+  }
+
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        sentOnline && sentByDevice
+            ? '$hikerName was told you saw it — over the internet and your device.'
+            : sentOnline
+            ? '$hikerName was told you saw it.'
+            : sentByDevice
+            ? '$hikerName was told you saw it over your device (no internet).'
+            : 'Could not reach $hikerName — no internet and no device connected.',
+      ),
+    ),
+  );
 }
 
 class _StoppedHikersList extends StatelessWidget {
@@ -1444,24 +1593,18 @@ class _StoppedHikersList extends StatelessWidget {
                           : Icons.pan_tool_rounded,
                       color: acknowledged ? Colors.greenAccent : Colors.orange,
                     ),
-                    title: Text("${participant.name} can't continue"),
+                    title: Text('${participant.name} ended their hike'),
                     subtitle: Text(participant.stopReason ?? ''),
                     trailing: acknowledged
                         ? const Text('ACKNOWLEDGED')
                         : FilledButton(
-                            onPressed: () async {
-                              try {
-                                await service.acknowledgeStop(
-                                  roomId,
-                                  participant.userId,
-                                );
-                              } catch (error) {
-                                if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text(error.toString())),
-                                );
-                              }
-                            },
+                            onPressed: () => _acknowledgeEndedHike(
+                              context,
+                              service: service,
+                              roomId: roomId,
+                              participantId: participant.userId,
+                              hikerName: participant.name,
+                            ),
                             child: const Text('Acknowledge'),
                           ),
                   ),

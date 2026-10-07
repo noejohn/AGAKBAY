@@ -5,7 +5,6 @@ import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -48,9 +47,13 @@ import 'package:tunga/services/gemini_client.dart';
 import 'package:tunga/services/offline_activity_database.dart';
 import 'package:tunga/services/offline_map_service.dart';
 import 'package:tunga/widgets/agak_floating_companion.dart';
+import 'package:tunga/widgets/agak_dialogs.dart';
 import 'package:tunga/widgets/agak_theme.dart';
 import 'package:tunga/widgets/agak_tip_popup.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
+import 'package:tunga/widgets/sos_reason_picker.dart';
+import 'package:tunga/services/nearby_sos_service.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 
 
@@ -3653,6 +3656,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // assertion in framework.dart) because the keyboard/IME teardown hasn't
   // finished when the route's Element tree is torn down. Giving it one
   // extra frame before popping avoids it.
+  /// Disposes a closed dialog's / sheet's text controllers only after its
+  /// exit animation is done. A dialog dismissed by tapping outside it (or
+  /// the Back button) pops immediately — with the keyboard still attached —
+  /// and its TextField keeps rendering during the closing transition, so
+  /// disposing the controller right away crashed with
+  /// "'_dependents.isEmpty': is not true".
+  void _disposeAfterRouteClosed(List<TextEditingController> controllers) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    Future.delayed(const Duration(milliseconds: 500), () {
+      for (final controller in controllers) {
+        controller.dispose();
+      }
+    });
+  }
+
   void _unfocusThenPop<T>(BuildContext dialogContext, [T? result]) {
     FocusManager.instance.primaryFocus?.unfocus();
     Future.delayed(const Duration(milliseconds: 80), () {
@@ -3822,50 +3840,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final result = await showDialog<String>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF072117),
-          title: const Text('Edit Name', style: TextStyle(color: Colors.white)),
-          content: TextField(
-            controller: controller,
-            textCapitalization: TextCapitalization.words,
-            textInputAction: TextInputAction.done,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              labelText: 'Display name',
-              labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
-              prefixIcon: const Icon(Icons.person_outline_rounded),
-            ),
-            onSubmitted: (value) =>
-                _unfocusThenPop<String>(dialogContext, value),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => _unfocusThenPop<String>(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final value = controller.text;
-                _unfocusThenPop<String>(dialogContext, value);
-              },
-              child: const Text('Save'),
+        return AgakFormDialog(
+          icon: Icons.badge_rounded,
+          title: 'Edit Name',
+          subtitle: 'This is the name other hikers and your guide see.',
+          onCancel: () => _unfocusThenPop<String>(dialogContext),
+          onSave: () => _unfocusThenPop<String>(dialogContext, controller.text),
+          children: [
+            TextField(
+              controller: controller,
+              textCapitalization: TextCapitalization.words,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(color: AgakColors.ink),
+              decoration: agakInputDecoration(
+                label: 'Display name',
+                icon: Icons.person_outline_rounded,
+              ),
+              onSubmitted: (value) =>
+                  _unfocusThenPop<String>(dialogContext, value),
             ),
           ],
         );
       },
     );
-    controller.dispose();
+    _disposeAfterRouteClosed([controller]);
     if (result == null || !mounted) {
       return;
     }
     final name = result.trim();
     if (name.length < 2) {
-      _showDashboardSnackBar('Enter a valid display name.');
+      _showProfileResult(
+        'Name not saved',
+        'Enter a name with at least 2 characters.',
+        success: false,
+      );
       return;
     }
     final user = _firebaseAuth.currentUser;
     if (user == null) {
-      _showDashboardSnackBar('Sign in to update your profile.');
+      _showProfileResult(
+        'Not signed in',
+        'Sign in to update your profile.',
+        success: false,
+      );
       return;
     }
     setState(() => _updatingProfile = true);
@@ -3892,23 +3909,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
               .doc('profile')
               .set({'fullName': name}),
         );
-        _showDashboardSnackBar('Profile name updated.');
+        _showProfileResult('Name saved', 'You now appear as $name.');
       } on FirebaseException catch (error) {
-        _showDashboardSnackBar(
-          'Name updated, but database save failed: ${_firebaseErrorText(error)}',
+        _showProfileResult(
+          'Partly saved',
+          'Your name was updated, but saving it to your profile failed: '
+              '${_firebaseErrorText(error)}',
+          success: false,
         );
       }
     } on FirebaseException catch (error) {
-      _showDashboardSnackBar(
-        'Unable to update profile name: ${_firebaseErrorText(error)}',
+      _showProfileResult(
+        'Name not saved',
+        _firebaseErrorText(error),
+        success: false,
       );
     } catch (error) {
-      _showDashboardSnackBar('Unable to update profile name: $error');
+      _showProfileResult('Name not saved', '$error', success: false);
     } finally {
       if (mounted) {
         setState(() => _updatingProfile = false);
       }
     }
+  }
+
+  /// AGAK-styled popup for the result of a profile edit (name, photo,
+  /// contact number, emergency contact) instead of a plain snackbar.
+  void _showProfileResult(
+    String title,
+    String message, {
+    bool success = true,
+  }) {
+    if (!mounted) return;
+    unawaited(
+      showAgakResultPopup(
+        context,
+        title: title,
+        message: message,
+        success: success,
+      ),
+    );
   }
 
   Future<void> _pickAndUploadProfilePhoto() async {
@@ -3964,22 +4004,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
             .collection('public')
             .doc('profile')
             .set({'profilePhotoUrl': url}, SetOptions(merge: true));
-        _showDashboardSnackBar('Profile photo updated.');
+        _showProfileResult('Photo saved', 'Your new profile photo is set.');
       } on FirebaseException catch (error) {
-        _showDashboardSnackBar(
-          'Photo uploaded, but database save failed: ${_firebaseErrorText(error)}',
+        _showProfileResult(
+          'Partly saved',
+          'Your photo uploaded, but saving it to your profile failed: '
+              '${_firebaseErrorText(error)}',
+          success: false,
         );
       }
     } on FirebaseException catch (error) {
-      _showDashboardSnackBar(
-        'Photo upload failed: ${_firebaseErrorText(error)}',
+      _showProfileResult(
+        'Photo not saved',
+        _firebaseErrorText(error),
+        success: false,
       );
     } on PlatformException catch (error) {
-      _showDashboardSnackBar(
-        'Photo picker failed: ${error.message ?? error.code}',
+      _showProfileResult(
+        'Could not open photos',
+        error.message ?? error.code,
+        success: false,
       );
     } catch (error) {
-      _showDashboardSnackBar('Unable to upload profile photo: $error');
+      _showProfileResult('Photo not saved', '$error', success: false);
     } finally {
       if (mounted) {
         setState(() => _uploadingProfilePhoto = false);
@@ -4039,49 +4086,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final result = await showDialog<String>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF072117),
-          title: const Text(
-            'Contact Number',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: TextField(
-            controller: numberController,
-            keyboardType: TextInputType.phone,
-            textInputAction: TextInputAction.done,
-            autofocus: true,
-            style: const TextStyle(color: Colors.white),
-            decoration: InputDecoration(
-              labelText: 'Your phone number',
-              labelStyle: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
-              prefixIcon: const Icon(Icons.phone_iphone_rounded),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => _unfocusThenPop(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () =>
-                  _unfocusThenPop(dialogContext, numberController.text.trim()),
-              child: const Text('Save'),
+        return AgakFormDialog(
+          icon: Icons.phone_iphone_rounded,
+          title: 'Contact Number',
+          subtitle: 'So your Tour Guide can reach you during a hike.',
+          onCancel: () => _unfocusThenPop(dialogContext),
+          onSave: () =>
+              _unfocusThenPop(dialogContext, numberController.text.trim()),
+          children: [
+            TextField(
+              controller: numberController,
+              keyboardType: TextInputType.phone,
+              textInputAction: TextInputAction.done,
+              autofocus: true,
+              style: const TextStyle(color: AgakColors.ink),
+              decoration: agakInputDecoration(
+                label: 'Your phone number',
+                icon: Icons.phone_iphone_rounded,
+                hint: 'e.g. 0917 123 4567',
+              ),
             ),
           ],
         );
       },
     );
-    numberController.dispose();
+    _disposeAfterRouteClosed([numberController]);
     if (result == null || !mounted) {
       return;
     }
     if (result.isEmpty) {
-      _showDashboardSnackBar('Enter a phone number.');
+      _showProfileResult(
+        'Number not saved',
+        'Enter a phone number.',
+        success: false,
+      );
       return;
     }
     final user = _firebaseAuth.currentUser;
     if (user == null) {
-      _showDashboardSnackBar('Sign in to save your contact number.');
+      _showProfileResult(
+        'Not signed in',
+        'Sign in to save your contact number.',
+        success: false,
+      );
       return;
     }
     try {
@@ -4092,9 +4139,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       setState(() {
         _currentUserProfile = {..._currentUserProfile, 'contactNumber': result};
       });
-      _showDashboardSnackBar('Contact number saved.');
+      _showProfileResult('Contact number saved', result);
     } catch (_) {
-      _showDashboardSnackBar('Unable to save contact number.');
+      _showProfileResult(
+        'Number not saved',
+        'Unable to save your contact number. Please try again.',
+        success: false,
+      );
     }
   }
 
@@ -4115,33 +4166,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (_emergencyContactName().isEmpty || _emergencyContactPhone().isEmpty)
         'your emergency contact',
     ].join(' and ');
-    final goToProfile = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF072117),
-        icon: const Icon(Icons.health_and_safety_rounded, color: Color(0xFFFF7A7A)),
-        title: const Text(
-          'Complete Your Safety Details',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: Text(
+    final goToProfile = await _showAgakConfirmDialog(
+      context,
+      icon: Icons.health_and_safety_rounded,
+      title: 'Complete Your Safety Details',
+      message:
           'Please fill out $missing before starting a hike — this is how '
           'Agakbay and your Tour Guide can reach you in an emergency.',
-          style: TextStyle(color: Colors.white.withValues(alpha: 0.85)),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Go to Profile'),
-          ),
-        ],
-      ),
+      cancelLabel: 'Cancel',
+      confirmLabel: 'Go to Profile',
     );
-    if (goToProfile == true && mounted) {
+    if (goToProfile && mounted) {
       setState(() => _selectedNavIndex = 3);
     }
     return false;
@@ -4193,75 +4228,65 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final result = await showDialog<Map<String, String>>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF072117),
-          title: const Text(
-            'Emergency Contact',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                textInputAction: TextInputAction.next,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Name',
-                  labelStyle: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.7),
-                  ),
-                  prefixIcon: const Icon(Icons.person_outline_rounded),
-                ),
+        return AgakFormDialog(
+          icon: Icons.contact_emergency_rounded,
+          title: 'Emergency Contact',
+          subtitle:
+              'Who to text or call if something happens to you on a hike.',
+          onCancel: () => _unfocusThenPop(dialogContext),
+          onSave: () {
+            _unfocusThenPop(dialogContext, {
+              'name': nameController.text.trim(),
+              'phone': phoneController.text.trim(),
+            });
+          },
+          children: [
+            TextField(
+              controller: nameController,
+              textCapitalization: TextCapitalization.words,
+              textInputAction: TextInputAction.next,
+              style: const TextStyle(color: AgakColors.ink),
+              decoration: agakInputDecoration(
+                label: 'Name',
+                icon: Icons.person_outline_rounded,
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: phoneController,
-                keyboardType: TextInputType.phone,
-                textInputAction: TextInputAction.done,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Phone number',
-                  labelStyle: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.7),
-                  ),
-                  prefixIcon: const Icon(Icons.phone_rounded),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => _unfocusThenPop(dialogContext),
-              child: const Text('Cancel'),
             ),
-            ElevatedButton(
-              onPressed: () {
-                _unfocusThenPop(dialogContext, {
-                  'name': nameController.text.trim(),
-                  'phone': phoneController.text.trim(),
-                });
-              },
-              child: const Text('Save'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: phoneController,
+              keyboardType: TextInputType.phone,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(color: AgakColors.ink),
+              decoration: agakInputDecoration(
+                label: 'Phone number',
+                icon: Icons.phone_rounded,
+              ),
             ),
           ],
         );
       },
     );
-    nameController.dispose();
-    phoneController.dispose();
+    _disposeAfterRouteClosed([nameController, phoneController]);
     if (result == null || !mounted) {
       return;
     }
     final name = result['name'] ?? '';
     final phone = result['phone'] ?? '';
     if (name.isEmpty && phone.isEmpty) {
-      _showDashboardSnackBar('Enter a name or phone number.');
+      _showProfileResult(
+        'Contact not saved',
+        'Enter a name or phone number.',
+        success: false,
+      );
       return;
     }
     final user = _firebaseAuth.currentUser;
     if (user == null) {
-      _showDashboardSnackBar('Sign in to save an emergency contact.');
+      _showProfileResult(
+        'Not signed in',
+        'Sign in to save an emergency contact.',
+        success: false,
+      );
       return;
     }
     try {
@@ -4277,9 +4302,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
           'emergencyContactPhone': phone,
         };
       });
-      _showDashboardSnackBar('Emergency contact saved.');
+      _showProfileResult(
+        'Emergency contact saved',
+        [name, phone].where((part) => part.isNotEmpty).join(' · '),
+      );
     } catch (_) {
-      _showDashboardSnackBar('Unable to save emergency contact.');
+      _showProfileResult(
+        'Contact not saved',
+        'Unable to save your emergency contact. Please try again.',
+        success: false,
+      );
     }
   }
 
@@ -4618,7 +4650,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
       },
     );
-    controller.dispose();
+    _disposeAfterRouteClosed([controller]);
     if (result == null || !mounted) {
       return;
     }
@@ -4711,8 +4743,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             heightFactor: 0.9,
             child: Container(
               decoration: const BoxDecoration(
-                color: Color(0xFF02130E),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+                color: AgakColors.cream,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
               ),
               child: Column(
                 children: [
@@ -4721,7 +4753,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     width: 44,
                     height: 4,
                     decoration: BoxDecoration(
-                      color: Colors.white24,
+                      color: AgakColors.ink.withValues(alpha: 0.18),
                       borderRadius: BorderRadius.circular(10),
                     ),
                   ),
@@ -4733,17 +4765,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           child: Text(
                             'Post Details',
                             style: TextStyle(
-                              color: Colors.white,
+                              color: AgakColors.ink,
                               fontSize: 20,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: FontWeight.w900,
                             ),
                           ),
                         ),
                         IconButton(
                           onPressed: () => Navigator.of(sheetContext).pop(),
-                          icon: const Icon(
+                          icon: Icon(
                             Icons.close_rounded,
-                            color: Colors.white70,
+                            color: AgakColors.ink.withValues(alpha: 0.6),
                           ),
                         ),
                       ],
@@ -4758,8 +4790,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         const Text(
                           'Comments',
                           style: TextStyle(
-                            color: Color(0xFF7CF9A2),
-                            fontWeight: FontWeight.w700,
+                            color: AgakColors.maroon,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
                           ),
                         ),
                         const SizedBox(height: 8),
@@ -4779,7 +4812,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 child: Center(
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2,
-                                    color: Color(0xFF7CF9A2),
+                                    color: AgakColors.maroon,
                                   ),
                                 ),
                               );
@@ -4787,9 +4820,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             final docs = snapshot.data?.docs ?? const [];
                             if (docs.isEmpty) {
                               return Text(
-                                'No comments yet.',
+                                'No comments yet. Be the first!',
                                 style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.75),
+                                  color: AgakColors.ink.withValues(alpha: 0.6),
                                 ),
                               );
                             }
@@ -4818,10 +4851,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 return Container(
                                   width: double.infinity,
                                   margin: const EdgeInsets.only(bottom: 8),
-                                  padding: const EdgeInsets.all(10),
+                                  padding: const EdgeInsets.all(12),
                                   decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: 0.04),
-                                    borderRadius: BorderRadius.circular(10),
+                                    color: AgakColors.surface,
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: AgakColors.ink.withValues(
+                                        alpha: 0.08,
+                                      ),
+                                    ),
                                   ),
                                   child: Column(
                                     crossAxisAlignment:
@@ -4833,8 +4871,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                             child: Text(
                                               author,
                                               style: const TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.w700,
+                                                color: AgakColors.ink,
+                                                fontWeight: FontWeight.w800,
                                               ),
                                             ),
                                           ),
@@ -4881,10 +4919,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                                               .favorite_border_rounded,
                                                     size: 16,
                                                     color: isLiked
-                                                        ? const Color(
-                                                            0xFFFF7A7A,
-                                                          )
-                                                        : Colors.white54,
+                                                        ? AgakColors.maroon
+                                                        : AgakColors.ink
+                                                              .withValues(
+                                                                alpha: 0.45,
+                                                              ),
                                                   ),
                                                 );
                                               },
@@ -4892,8 +4931,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                           Text(
                                             '$commentLikeCount',
                                             style: TextStyle(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.65,
+                                              color: AgakColors.ink.withValues(
+                                                alpha: 0.6,
                                               ),
                                               fontSize: 12,
                                             ),
@@ -4906,11 +4945,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                                   doc.id,
                                                 ),
                                               ),
-                                              child: Icon(
-                                                Icons.delete_outline_rounded,
-                                                size: 16,
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.5,
+                                              child: Padding(
+                                                padding: const EdgeInsets.only(
+                                                  left: 8,
+                                                ),
+                                                child: Icon(
+                                                  Icons.delete_outline_rounded,
+                                                  size: 18,
+                                                  color: AgakColors.maroon
+                                                      .withValues(alpha: 0.7),
                                                 ),
                                               ),
                                             ),
@@ -4920,16 +4963,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                       Text(
                                         content,
                                         style: const TextStyle(
-                                          color: Colors.white,
+                                          color: AgakColors.ink,
+                                          height: 1.35,
                                         ),
                                       ),
                                       if (createdAt != null) ...[
-                                        const SizedBox(height: 4),
+                                        const SizedBox(height: 6),
                                         Text(
                                           _formatDate(createdAt),
                                           style: TextStyle(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.6,
+                                            color: AgakColors.ink.withValues(
+                                              alpha: 0.5,
                                             ),
                                             fontSize: 11,
                                           ),
@@ -4955,24 +4999,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             controller: commentController,
                             maxLines: 2,
                             minLines: 1,
-                            style: const TextStyle(color: Colors.white),
+                            style: const TextStyle(color: AgakColors.ink),
                             decoration: InputDecoration(
                               hintText: 'Add a comment...',
                               hintStyle: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.6),
+                                color: AgakColors.ink.withValues(alpha: 0.4),
                               ),
                               filled: true,
-                              fillColor: Colors.white.withValues(alpha: 0.07),
+                              fillColor: AgakColors.surface,
                               border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(12),
-                                borderSide: BorderSide.none,
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: BorderSide(
+                                  color: AgakColors.ink.withValues(alpha: 0.14),
+                                ),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: BorderSide(
+                                  color: AgakColors.ink.withValues(alpha: 0.14),
+                                ),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                borderSide: const BorderSide(
+                                  color: AgakColors.maroon,
+                                  width: 1.6,
+                                ),
                               ),
                             ),
                           ),
                         ),
                         const SizedBox(width: 8),
                         SizedBox(
-                          height: 46,
+                          height: 48,
                           child: ElevatedButton(
                             onPressed: () async {
                               final text = commentController.text.trim();
@@ -4984,13 +5043,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               await _addCommunityComment(post.id, text);
                             },
                             style: ElevatedButton.styleFrom(
-                              foregroundColor: Colors.black,
-                              backgroundColor: const Color(0xFF53D97A),
+                              foregroundColor: AgakColors.cream,
+                              backgroundColor: AgakColors.maroon,
+                              elevation: 0,
                               shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(14),
                               ),
                             ),
-                            child: const Text('Post'),
+                            child: const Text(
+                              'Post',
+                              style: TextStyle(fontWeight: FontWeight.w800),
+                            ),
                           ),
                         ),
                       ],
@@ -5003,7 +5066,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
       },
     );
-    commentController.dispose();
+    _disposeAfterRouteClosed([commentController]);
   }
 
   String _normalizeTokenString(String value) {
@@ -5639,10 +5702,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       },
     );
 
-    nameController.dispose();
-    for (final controller in stationControllers) {
-      controller.dispose();
-    }
+    _disposeAfterRouteClosed([nameController, ...stationControllers]);
     return result;
   }
 
@@ -13410,6 +13470,16 @@ class _HikingModeScreen extends StatefulWidget {
 
 class _HikingModeScreenState extends State<_HikingModeScreen> {
   final HikeRoomService _hikeRoomService = HikeRoomService();
+  final NearbySosService _nearbySosService = NearbySosService();
+  StreamSubscription<List<NearbySosAlert>>? _nearbySosSubscription;
+  // Unread SOS alerts from nearby solo hikers — pinned on the map.
+  List<NearbySosAlert> _nearbySosAlerts = const <NearbySosAlert>[];
+  // Alerts already popped up this session, so a stream re-emit never shows
+  // the same SOS dialog twice.
+  final Set<String> _shownNearbySosIds = <String>{};
+  DateTime? _lastPresenceAt;
+  DateTime? _lastSeenLoraRelayAt;
+  static const _presenceInterval = Duration(minutes: 1);
   StreamSubscription<List<RoomSosEvent>>? _roomSosSubscription;
   List<RoomSosEvent> _roomSosEvents = const <RoomSosEvent>[];
   Object? _roomSosStreamError;
@@ -13516,6 +13586,15 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         },
       );
     }
+    _nearbySosSubscription = _nearbySosService.watchNearbySosAlerts().listen(
+      _onNearbySosAlerts,
+      onError: (Object error) =>
+          debugPrint('Could not watch nearby SOS alerts: $error'),
+    );
+    // Any LoRa SOS that already arrived before this screen opened isn't
+    // "new" — only pop up for ones received from here on.
+    _lastSeenLoraRelayAt = HeltecBleService.instance.lastRelayAt;
+    HeltecBleService.instance.addListener(_onHeltecChanged);
     _checkpoints = const <_HikeCheckpoint>[];
     unawaited(_startConnectivityMonitor());
     _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -13542,12 +13621,143 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
 
   @override
   void dispose() {
+    _nearbySosSubscription?.cancel();
+    HeltecBleService.instance.removeListener(_onHeltecChanged);
+    // Stop sharing location the moment the hike screen closes.
+    unawaited(
+      _nearbySosService.clearPresence().catchError((Object error) {
+        debugPrint('Could not clear hiker presence: $error');
+      }),
+    );
     _roomSosSubscription?.cancel();
     _elapsedTimer?.cancel();
     _positionSubscription?.cancel();
     _connectivitySubscription?.cancel();
     _googleMapController?.dispose();
     super.dispose();
+  }
+
+  // Keeps hiker_presence fresh (at most once a minute) so a solo hiker's
+  // SOS can find this hiker if they're among the closest. Best-effort —
+  // a failed write offline just retries on the next position update.
+  void _maybePublishPresence(LatLng point) {
+    final last = _lastPresenceAt;
+    if (last != null && DateTime.now().difference(last) < _presenceInterval) {
+      return;
+    }
+    _lastPresenceAt = DateTime.now();
+    unawaited(
+      _nearbySosService
+          .publishPresence(latitude: point.latitude, longitude: point.longitude)
+          .catchError((Object error) {
+            debugPrint('Could not publish hiker presence: $error');
+          }),
+    );
+  }
+
+  void _onNearbySosAlerts(List<NearbySosAlert> alerts) {
+    if (!mounted) return;
+    // Pins stay for recent alerts even after being read — reading the
+    // popup and then tapping "View on Map" must not make the pin vanish.
+    final pinCutoff = DateTime.now().subtract(const Duration(hours: 2));
+    setState(() {
+      _nearbySosAlerts = alerts
+          .where((alert) => alert.createdAt?.isAfter(pinCutoff) ?? true)
+          .toList(growable: false);
+    });
+    final unread = alerts.where((alert) => !alert.read);
+    // Only pop up for fresh alerts — an old unread one from yesterday
+    // shouldn't interrupt today's hike.
+    final cutoff = DateTime.now().subtract(const Duration(minutes: 30));
+    for (final alert in unread) {
+      if (_shownNearbySosIds.contains(alert.id)) continue;
+      _shownNearbySosIds.add(alert.id);
+      final createdAt = alert.createdAt;
+      if (createdAt != null && createdAt.isBefore(cutoff)) continue;
+      unawaited(
+        _showIncomingSosDialog(
+          senderName: alert.senderName,
+          reason: alert.reason,
+          detail: alert.distanceLabel,
+          location: LatLng(alert.latitude, alert.longitude),
+          viaLora: false,
+          onDismissed: () => unawaited(
+            _nearbySosService.markAlertRead(alert.id).catchError((
+              Object error,
+            ) {
+              debugPrint('Could not mark nearby SOS read: $error');
+            }),
+          ),
+        ),
+      );
+    }
+  }
+
+  // An SOS heard over LoRa by THIS hiker's own Heltec — the offline
+  // "nearest hikers" path: any board within radio range receives it.
+  void _onHeltecChanged() {
+    final ble = HeltecBleService.instance;
+    final at = ble.lastRelayAt;
+    if (at == null || at == _lastSeenLoraRelayAt || !mounted) return;
+    _lastSeenLoraRelayAt = at;
+    final lat = ble.lastRelayLatitude;
+    final lon = ble.lastRelayLongitude;
+    unawaited(
+      _showIncomingSosDialog(
+        senderName: ble.lastRelaySenderName ?? 'A hiker',
+        reason: ble.lastRelayReason,
+        detail: 'Received over LoRa — no internet',
+        location: ble.lastRelayHasFix && lat != null && lon != null
+            ? LatLng(lat, lon)
+            : null,
+        viaLora: true,
+      ),
+    );
+  }
+
+  Future<void> _showIncomingSosDialog({
+    required String senderName,
+    required String? reason,
+    required String detail,
+    required LatLng? location,
+    required bool viaLora,
+    VoidCallback? onDismissed,
+  }) async {
+    await HapticFeedback.heavyImpact();
+    if (!mounted) return;
+    final current = _currentLocation;
+    var distanceText = detail;
+    if (viaLora && location != null && current != null) {
+      final meters = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        location.latitude,
+        location.longitude,
+      );
+      distanceText =
+          '${meters < 1000 ? '${meters.round()} m' : '${(meters / 1000).toStringAsFixed(1)} km'} away · $detail';
+    }
+    final viewOnMap = await _showAgakConfirmDialog(
+      context,
+      icon: Icons.sos_rounded,
+      title: 'SOS nearby: $senderName',
+      message:
+          '${reason == null ? 'Needs help' : 'Reason: $reason'}\n'
+          '$distanceText\n\n'
+          '${location == null ? 'Location unavailable.' : 'Lat ${location.latitude.toStringAsFixed(6)}, '
+                    'Lng ${location.longitude.toStringAsFixed(6)}'}\n\n'
+          "You're one of the hikers closest to them. Help only if it's "
+          'safe for you, and contact rescue if you can.',
+      cancelLabel: 'Dismiss',
+      confirmLabel: location == null ? 'OK' : 'View on Map',
+      confirmIcon: location == null ? null : Icons.map_rounded,
+    );
+    onDismissed?.call();
+    if (viewOnMap && location != null && mounted) {
+      await _googleMapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(location, 16),
+      );
+    }
   }
 
   Future<void> _startConnectivityMonitor() async {
@@ -14868,6 +15078,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     }
 
     final currentPoint = LatLng(position.latitude, position.longitude);
+    _maybePublishPresence(currentPoint);
     var segmentMeters = 0.0;
     var shouldPersistPoint = false;
     int? kmJustReached;
@@ -15102,9 +15313,10 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     return 'Hiker';
   }
 
-  String _buildSosPayload(LatLng location) {
+  String _buildSosPayload(LatLng location, String reason) {
     return jsonEncode({
       'type': 'SOS',
+      'reason': reason,
       'sender': _sosSenderName(),
       'trail': widget.trail.name,
       'lat': double.parse(location.latitude.toStringAsFixed(6)),
@@ -15126,6 +15338,10 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     await HapticFeedback.heavyImpact();
     if (!mounted) return;
 
+    // Reason first, so the guide knows what kind of emergency this is.
+    final reason = await showSosReasonPicker(context);
+    if (reason == null || !mounted) return;
+
     final confirmed = await _showAgakConfirmDialog(
       context,
       icon: Icons.sos_rounded,
@@ -15133,57 +15349,148 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       message:
           'This will prepare an emergency SOS with your identity and GPS '
           'coordinates.\n\n'
+          'Reason: $reason\n'
           'Hiker: ${_sosSenderName()}\n'
           'Trail: ${widget.trail.name}\n'
           'Latitude: ${location.latitude.toStringAsFixed(6)}\n'
           'Longitude: ${location.longitude.toStringAsFixed(6)}\n\n'
-          'The alert will be sent through the hike room and, when a Heltec '
-          'device is connected, broadcast over LoRa as well.',
+          'The alert will go to your Tour Guide through the hike room — or, '
+          'on a solo hike, to the hikers nearest you — and, when a Heltec '
+          'device is connected, be broadcast over LoRa as well.',
       cancelLabel: 'Cancel',
       confirmLabel: 'Send SOS',
       confirmIcon: Icons.sos_rounded,
     );
 
     if (confirmed) {
-      await _prepareSosPayload(location);
+      await _prepareSosPayload(location, reason);
     }
   }
 
-  Future<void> _prepareSosPayload(LatLng location) async {
+  Future<void> _prepareSosPayload(LatLng location, String reason) async {
     final messenger = ScaffoldMessenger.of(context);
     setState(() => _sendingSos = true);
     await HapticFeedback.vibrate();
 
-    final payload = _buildSosPayload(location);
+    final payload = _buildSosPayload(location, reason);
     debugPrint('Prepared LoRa SOS payload: $payload');
 
-    var sentToRoom = false;
-    var sentByDevice = false;
-    try {
+    // Internet and Heltec are attempted at the same time, never one after
+    // the other — on a weak mountain signal the Cloud Function call can
+    // hang for over a minute before failing, and the offline LoRa SOS must
+    // never be stuck waiting behind it.
+    //
+    // Online, the SOS goes to the Tour Guide when the hiker is in an active
+    // Hike Room — otherwise (a solo hike) to the hikers closest to them.
+    var soloHike = widget.hikeRoom == null;
+    int? nearbyNotified;
+    // A server-side failure (e.g. an error from the Cloud Function) is not
+    // the same as having no connection — reported differently below.
+    var onlineFailed = false;
+    Future<bool> sendToRoom() async {
       try {
         final room = widget.hikeRoom ?? await _hikeRoomService.getActiveRoom();
-        if (room != null && room.status == HikeRoomStatus.active) {
-          await _hikeRoomService.sendSos(
-            roomId: room.id,
+        if (room == null || room.status != HikeRoomStatus.active) {
+          soloHike = true;
+          nearbyNotified = await _nearbySosService.sendNearbySos(
             latitude: location.latitude,
             longitude: location.longitude,
+            reason: reason,
+            trailName: widget.trail.name,
           );
-          sentToRoom = true;
+          return false;
         }
-      } catch (error) {
-        debugPrint('Unable to send SOS to hike room: $error');
-      }
-
-      final ble = HeltecBleService.instance;
-      if (ble.isConnected) {
-        sentByDevice = await ble.sendSos(
-          hikerName: _sosSenderName(),
+        soloHike = false;
+        await _hikeRoomService.sendSos(
+          roomId: room.id,
           latitude: location.latitude,
           longitude: location.longitude,
+          reason: reason,
+        );
+        return true;
+      } catch (error) {
+        debugPrint('Unable to send SOS online: $error');
+        onlineFailed = true;
+        return false;
+      }
+    }
+
+    Future<bool> sendByDevice() async {
+      final ble = HeltecBleService.instance;
+      if (!ble.isConnected) return false;
+      final sent = await ble.sendSos(
+        hikerName: _sosSenderName(),
+        latitude: location.latitude,
+        longitude: location.longitude,
+        reason: reason,
+      );
+      // Tell the hiker right away — the internet attempt may still be
+      // stuck on a weak signal, and they shouldn't have to wait on it to
+      // know help has been signalled.
+      if (sent && mounted) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'SOS sent over Heltec LoRa. Still trying the internet...',
+            ),
+            backgroundColor: AgakColors.maroon,
+          ),
         );
       }
+      return sent;
+    }
+
+    // A timed-out request may still reach the server later, so that case
+    // is reported as "not confirmed" rather than "not received".
+    var roomTimedOut = false;
+
+    try {
+      final results = await Future.wait([
+        // Capped so the SOS button doesn't stay on "Sending..." for the
+        // Cloud Functions client's full ~70s default on a dead signal.
+        sendToRoom().timeout(
+          const Duration(seconds: 20),
+          onTimeout: () {
+            debugPrint('SOS to hike room timed out on a weak signal.');
+            roomTimedOut = true;
+            return false;
+          },
+        ),
+        sendByDevice(),
+      ]);
+      final sentToRoom = results[0];
+      final sentByDevice = results[1];
 
       if (!mounted) return;
+      messenger.hideCurrentSnackBar();
+
+      if (soloHike) {
+        // No Tour Guide is listening — tell the hiker exactly who (if
+        // anyone) got it, then hand them the direct lines to a person.
+        final notified = nearbyNotified;
+        final parts = <String>[
+          if (notified != null && notified > 0)
+            'SOS sent to the $notified nearest hiker${notified == 1 ? '' : 's'}.',
+          if (notified == 0) 'No other hikers are nearby in the app right now.',
+          if (notified == null && roomTimedOut)
+            'Weak signal — nearby hikers could not be reached yet.',
+          if (notified == null && !roomTimedOut && !_hasNetworkConnection)
+            'No internet — nearby hikers could not be reached.',
+          if (notified == null &&
+              !roomTimedOut &&
+              _hasNetworkConnection &&
+              onlineFailed)
+            'Could not reach nearby hikers right now — the server did not respond.',
+          if (sentByDevice) 'Also broadcast over Heltec LoRa.',
+        ];
+        await _showSoloSosHelpSheet(
+          location: location,
+          reason: reason,
+          status: parts.join(' '),
+        );
+        return;
+      }
+
       messenger.showSnackBar(
         SnackBar(
           content: Text(
@@ -15191,8 +15498,12 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                 ? 'SOS sent through the hike room and Heltec LoRa.'
                 : sentToRoom
                 ? 'SOS sent to your Tour Guide through the hike room.'
+                : sentByDevice && roomTimedOut
+                ? 'SOS sent over Heltec LoRa. Weak signal — the hike room could not confirm it yet.'
                 : sentByDevice
                 ? 'SOS sent over Heltec LoRa. No active internet room received it.'
+                : roomTimedOut
+                ? 'Weak signal — SOS not confirmed by the hike room. Connect a Heltec device for offline SOS.'
                 : 'No active internet room received the SOS. Connect a Heltec device for offline SOS.',
           ),
           backgroundColor: AgakColors.maroon,
@@ -15201,6 +15512,207 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     } finally {
       if (mounted) setState(() => _sendingSos = false);
     }
+  }
+
+  /// Reads the hiker's emergency contact (required before any hike can
+  /// start — see _ensureReadyToHike). Firestore's offline cache serves
+  /// this even with no signal.
+  Future<({String name, String phone})> _loadEmergencyContact() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return (name: '', phone: '');
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get()
+          .timeout(const Duration(seconds: 5));
+      final data = snapshot.data() ?? const <String, dynamic>{};
+      return (
+        name: data['emergencyContactName']?.toString().trim() ?? '',
+        phone: data['emergencyContactPhone']?.toString().trim() ?? '',
+      );
+    } catch (error) {
+      debugPrint('Could not load emergency contact: $error');
+      return (name: '', phone: '');
+    }
+  }
+
+  String _soloSosSmsBody(LatLng location, String reason) {
+    final lat = location.latitude.toStringAsFixed(6);
+    final lng = location.longitude.toStringAsFixed(6);
+    return 'SOS from ${_sosSenderName()} (Agakbay): $reason. '
+        'Hiking ${widget.trail.name}. '
+        'My location: https://maps.google.com/?q=$lat,$lng';
+  }
+
+  Future<void> _launchOrWarn(Uri uri, String failureMessage) async {
+    var launched = false;
+    try {
+      launched = await launchUrl(uri);
+    } catch (error) {
+      debugPrint('Could not launch $uri: $error');
+    }
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(failureMessage)));
+    }
+  }
+
+  /// Solo SOS follow-up: no Tour Guide is listening, so this gives the
+  /// hiker direct lines to a real person. SMS and calls need only cell
+  /// signal/load, not mobile data — often still available on a mountain
+  /// when the internet isn't.
+  Future<void> _showSoloSosHelpSheet({
+    required LatLng location,
+    required String reason,
+    required String status,
+  }) async {
+    final contact = await _loadEmergencyContact();
+    if (!mounted) return;
+    final hasContact = contact.phone.isNotEmpty;
+    final contactLabel = contact.name.isEmpty
+        ? 'Emergency Contact'
+        : 'Emergency Contact (${contact.name})';
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AgakColors.cream,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) {
+        Widget action({
+          required IconData icon,
+          required String label,
+          required VoidCallback? onPressed,
+          bool primary = false,
+        }) {
+          return Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: primary
+                ? ElevatedButton.icon(
+                    onPressed: onPressed,
+                    icon: Icon(icon),
+                    label: Text(
+                      label,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      foregroundColor: AgakColors.cream,
+                      backgroundColor: AgakColors.maroon,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  )
+                : OutlinedButton.icon(
+                    onPressed: onPressed,
+                    icon: Icon(icon),
+                    label: Text(
+                      label,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AgakColors.maroon,
+                      side: const BorderSide(color: AgakColors.maroon),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+          );
+        }
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(
+                  Icons.sos_rounded,
+                  color: AgakColors.maroon,
+                  size: 36,
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Get help now',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: AgakColors.ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '$status\n\nYou are hiking solo, so no Tour Guide received '
+                  'this. Contact someone directly — text and calls work with '
+                  'just cell signal, no internet needed.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: AgakColors.ink.withValues(alpha: 0.7),
+                    fontSize: 13.5,
+                    height: 1.45,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                action(
+                  icon: Icons.sms_rounded,
+                  label: hasContact
+                      ? 'Text $contactLabel'
+                      : 'No emergency contact saved',
+                  primary: true,
+                  onPressed: !hasContact
+                      ? null
+                      : () => _launchOrWarn(
+                          Uri(
+                            scheme: 'sms',
+                            path: contact.phone,
+                            queryParameters: {
+                              'body': _soloSosSmsBody(location, reason),
+                            },
+                          ),
+                          'Could not open your messaging app.',
+                        ),
+                ),
+                if (hasContact)
+                  action(
+                    icon: Icons.call_rounded,
+                    label: 'Call $contactLabel',
+                    onPressed: () => _launchOrWarn(
+                      Uri(scheme: 'tel', path: contact.phone),
+                      'Could not open the phone dialer.',
+                    ),
+                  ),
+                action(
+                  icon: Icons.local_hospital_rounded,
+                  label: 'Call 911',
+                  onPressed: () => _launchOrWarn(
+                    Uri(scheme: 'tel', path: '911'),
+                    'Could not open the phone dialer.',
+                  ),
+                ),
+                const SizedBox(height: 6),
+                TextButton(
+                  onPressed: () => Navigator.of(sheetContext).pop(),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AgakColors.ink.withValues(alpha: 0.68),
+                  ),
+                  child: const Text('Close'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   int _findNearestRouteIndex(LatLng point) {
@@ -15433,13 +15945,31 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         ),
       );
     }
+    for (final alert in _nearbySosAlerts) {
+      markers.add(
+        Marker(
+          markerId: MarkerId('nearby_sos_${alert.id}'),
+          position: LatLng(alert.latitude, alert.longitude),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueViolet,
+          ),
+          infoWindow: InfoWindow(
+            title: 'SOS nearby: ${alert.senderName}',
+            snippet: alert.reason,
+          ),
+        ),
+      );
+    }
     for (final event in _roomSosEvents) {
       markers.add(
         Marker(
           markerId: MarkerId('sos_${event.id}'),
           position: LatLng(event.latitude, event.longitude),
           icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-          infoWindow: InfoWindow(title: 'SOS: ${event.senderName}'),
+          infoWindow: InfoWindow(
+            title: 'SOS: ${event.senderName}',
+            snippet: event.reason,
+          ),
         ),
       );
     }
@@ -15454,6 +15984,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
           ),
           infoWindow: InfoWindow(
             title: 'Offline SOS: ${relay.lastRelaySenderName ?? 'Hiker'}',
+            snippet: relay.lastRelayReason,
           ),
         ),
       );
@@ -15532,6 +16063,58 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     return distanceToTarget <= 160;
   }
 
+  /// Tells the Tour Guide this hiker ended their hike, over the internet
+  /// AND the Heltec (whichever are available) at the same time — the hiker
+  /// never picks. The hiker stays in the Hike Room either way
+  /// (HikeRoomService.stopHiking only marks them "stopped").
+  Future<void> _notifyGuideOfHikeEnd(HikeRoom room, String reason) async {
+    final messenger = ScaffoldMessenger.of(context);
+
+    // The guide matches an offline acknowledgment back by name, so the
+    // device message must carry the same name the room shows for this
+    // hiker. Firestore's cache answers this even with no signal.
+    var hikerName = _sosSenderName();
+    try {
+      final me = await _hikeRoomService
+          .watchCurrentParticipant(room.id)
+          .first
+          .timeout(const Duration(seconds: 3));
+      if (me != null && me.name.trim().isNotEmpty) hikerName = me.name;
+    } catch (_) {
+      // Fall back to the account name.
+    }
+
+    // Not awaited: a Firestore write only completes once the server
+    // acknowledges it — with no signal it stays queued (and still shows
+    // locally right away), syncing once the phone is back online.
+    unawaited(
+      _hikeRoomService.stopHiking(room.id, reason: reason).catchError((
+        Object error,
+      ) {
+        debugPrint('Could not record end of hike online: $error');
+      }),
+    );
+
+    final ble = HeltecBleService.instance;
+    var sentByDevice = false;
+    if (ble.isConnected) {
+      sentByDevice = await ble.sendStop(hikerName: hikerName, reason: reason);
+    }
+
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          sentByDevice
+              ? 'Your Tour Guide was told ($reason) — over the internet and your device.'
+              : _hasNetworkConnection
+              ? 'Your Tour Guide was told ($reason).'
+              : 'No signal — your Tour Guide will be told ($reason) once you are back online.',
+        ),
+        backgroundColor: AgakColors.maroon,
+      ),
+    );
+  }
+
   Future<bool> _confirmEarlyEndHike() async {
     if (widget.recordingNewTrail || _hasReachedFinish) {
       return true;
@@ -15559,12 +16142,32 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     }
     setState(() => _ending = true);
 
+    // A hiker in a Hike Room says why they're ending, and their Tour Guide
+    // is told. A solo hike (or the guide's own Hiking Mode) has no one to
+    // tell, so it keeps the plain end-hike flow.
+    final room = widget.hikeRoom;
+    final isRoomHiker =
+        room != null &&
+        room.guideId != FirebaseAuth.instance.currentUser?.uid;
+    String? endReason;
+    if (isRoomHiker) {
+      endReason = await showEndHikeReasonPicker(context);
+      if (endReason == null || !mounted) {
+        if (mounted) setState(() => _ending = false);
+        return;
+      }
+    }
+
     final shouldEnd = await _confirmEarlyEndHike();
     if (!shouldEnd) {
       if (mounted) {
         setState(() => _ending = false);
       }
       return;
+    }
+
+    if (isRoomHiker) {
+      await _notifyGuideOfHikeEnd(room, endReason!);
     }
 
     final endedAt = DateTime.now();
@@ -16025,7 +16628,11 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                                 ? Colors.green
                                 : Colors.redAccent,
                           ),
-                          title: Text('${event.senderName} sent SOS'),
+                          title: Text(
+                            event.reason == null
+                                ? '${event.senderName} sent SOS'
+                                : '${event.senderName} sent SOS — ${event.reason}',
+                          ),
                           subtitle: Text(
                             '${event.latitude.toStringAsFixed(5)}, ${event.longitude.toStringAsFixed(5)} · '
                             '${acknowledged ? 'Acknowledged' : 'Pending'}',

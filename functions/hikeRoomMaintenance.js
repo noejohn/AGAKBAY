@@ -66,8 +66,14 @@ exports.closeAbandonedHikeRooms = onSchedule(
   },
 );
 
-// A hiker's own device writes "I Can't Continue" straight onto their own
-// participant doc (HikeRoomService.stopHiking) — firestore.rules lets them
+function sameTimestamp(a, b) {
+  if (!a || !b) return a === b;
+  if (typeof a.isEqual === "function") return a.isEqual(b);
+  return String(a) === String(b);
+}
+
+// A hiker ending their hike from Hiking Mode (with a reason) writes straight
+// onto their own participant doc (HikeRoomService.stopHiking) — firestore.rules lets them
 // update that doc, but never lets them write into the guide's own
 // notifications collection. This bridges the two with the Admin SDK, the
 // same shape as every other cross-user notification in this app.
@@ -81,11 +87,14 @@ exports.notifyGuideOfStoppedHiker = onDocumentUpdated(
     const before = event.data?.before?.data();
     const after = event.data?.after?.data();
     if (!before || !after) return;
-    // Only the transition INTO "stopped" should notify — not every
-    // subsequent edit to this participant doc (e.g. a later location update).
-    if (before.membershipStatus === "stopped" || after.membershipStatus !== "stopped") {
-      return;
-    }
+    // Notify on the transition INTO "stopped", or on a NEW end-hike message
+    // (stoppedAt changes — a hiker can start hiking again and end again) —
+    // not on every other edit to this participant doc (e.g. a location
+    // update).
+    if (after.membershipStatus !== "stopped") return;
+    const isNewStop = before.membershipStatus !== "stopped" ||
+      !sameTimestamp(before.stoppedAt, after.stoppedAt);
+    if (!isNewStop) return;
 
     const { roomId, participantId } = event.params;
     const db = admin.firestore();
@@ -106,8 +115,8 @@ exports.notifyGuideOfStoppedHiker = onDocumentUpdated(
       .set(
         {
           type: "hiker_stopped",
-          title: `${hikerName} can't continue`,
-          body: reason || `${hikerName} stopped their hike and may need help.`,
+          title: `${hikerName} ended their hike`,
+          body: reason || `${hikerName} ended their hike and may need help.`,
           roomId,
           participantId,
           read: false,

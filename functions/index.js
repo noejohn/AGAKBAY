@@ -31,6 +31,7 @@ const { endHikeRoom } = require("./endHikeRoom");
 const { backfillAuditLogNames } = require("./auditLogMaintenance");
 const { reviewTrailSubmission } = require("./trailReview");
 const { sanitizeRoutePoints } = require("./routePoints");
+const { sendNearbySos } = require("./nearbySos");
 
 admin.initializeApp();
 
@@ -50,6 +51,7 @@ exports.endHikeRoom = endHikeRoom;
 exports.backfillAuditLogNames = backfillAuditLogNames;
 exports.reviewTrailSubmission = reviewTrailSubmission;
 exports.sanitizeRoutePoints = sanitizeRoutePoints;
+exports.sendNearbySos = sendNearbySos;
 
 const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;
@@ -232,6 +234,8 @@ exports.verifyEmailCode = onCall(
 );
 
 const SOS_COOLDOWN_SECONDS = 30;
+// "Others: " plus the app's 40-character note limit, with some slack.
+const SOS_REASON_MAX_LENGTH = 60;
 
 function isFiniteNumberInRange(value, min, max) {
   const num = Number(value);
@@ -252,6 +256,11 @@ exports.sendSosEvent = onCall(
     const latitude = Number(request.data?.latitude);
     const longitude = Number(request.data?.longitude);
     const transport = String(request.data?.transport ?? "internet");
+    // "Lost", "Accident", "Others" or "Others: <note>" from the app's SOS
+    // reason picker. Optional so an older app build still gets through —
+    // an SOS must never be rejected just for missing context.
+    const reason = String(request.data?.reason ?? "").trim()
+      .slice(0, SOS_REASON_MAX_LENGTH);
 
     if (!roomId) {
       throw new HttpsError("invalid-argument", "roomId is required.");
@@ -321,6 +330,7 @@ exports.sendSosEvent = onCall(
       senderName,
       latitude,
       longitude,
+      reason: reason || null,
       transport,
       status: "sent",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -387,10 +397,14 @@ exports.onSosEventCreated = onDocumentCreated(
       const currentEvent = eventSnap.data() || {};
       const senderName = String(currentEvent.senderName || "Hiker");
       const roomCode = String(currentEvent.roomCode || roomId);
+      const reason = String(currentEvent.reason || "").trim();
       transaction.create(notificationRef, {
         type: "sos",
         title: "SOS Emergency Alert",
-        message: `${senderName} has triggered an SOS in hike room ${roomCode}.`,
+        message: reason ?
+          `${senderName} has triggered an SOS (${reason}) in hike room ${roomCode}.` :
+          `${senderName} has triggered an SOS in hike room ${roomCode}.`,
+        reason: reason || null,
         isRead: false,
         roomId,
         eventId,

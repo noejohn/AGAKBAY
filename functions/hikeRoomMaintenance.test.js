@@ -52,7 +52,7 @@ it("notifies the guide when a participant transitions into 'stopped'", async () 
   expect(mockNotificationSet).toHaveBeenCalledWith(
     expect.objectContaining({
       type: "hiker_stopped",
-      title: "Juan can't continue",
+      title: "Juan ended their hike",
       body: "Twisted my ankle",
       roomId: "room-1",
       participantId: "hiker-1",
@@ -64,11 +64,23 @@ it("notifies the guide when a participant transitions into 'stopped'", async () 
 
 it("does nothing when the participant was already 'stopped' before this update", async () => {
   await callTrigger(
-    { membershipStatus: "stopped" },
-    { membershipStatus: "stopped", name: "Juan", stopReason: "still stopped" },
+    { membershipStatus: "stopped", stoppedAt: "T1" },
+    { membershipStatus: "stopped", stoppedAt: "T1", name: "Juan", stopReason: "still stopped" },
   );
 
   expect(mockNotificationSet).not.toHaveBeenCalled();
+});
+
+it("notifies again when an already-stopped hiker ends a new hike (stoppedAt changes)", async () => {
+  await callTrigger(
+    { membershipStatus: "stopped", stoppedAt: "T1" },
+    { membershipStatus: "stopped", stoppedAt: "T2", name: "Juan", stopReason: "Too tired" },
+  );
+
+  expect(mockNotificationSet).toHaveBeenCalledWith(
+    expect.objectContaining({ title: "Juan ended their hike", body: "Too tired" }),
+    { merge: true },
+  );
 });
 
 it("does nothing when the update isn't a transition into 'stopped'", async () => {

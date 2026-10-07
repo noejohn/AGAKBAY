@@ -48,17 +48,27 @@ class HeltecBleService extends ChangeNotifier {
   static final Guid _stopRelayCharUuid = Guid(
     'd64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0007',
   );
+  // The guide's acknowledgment of an ended hike, travelling back over LoRa
+  // to the hiker: the guide's phone writes it, the hiker's board notifies.
+  static final Guid _stopAckCharUuid = Guid(
+    'd64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0008',
+  );
+  static final Guid _stopAckRelayCharUuid = Guid(
+    'd64d4a5c-8ad6-4b71-9f1a-3e6c9f2b0009',
+  );
 
   BluetoothDevice? _device;
   String? _lastDeviceId;
   String? _lastDeviceName;
   BluetoothCharacteristic? _sosChar;
   BluetoothCharacteristic? _stopChar;
+  BluetoothCharacteristic? _stopAckChar;
   BluetoothCharacteristic? _hikeInfoChar;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
   StreamSubscription<List<int>>? _locationSub;
   StreamSubscription<List<int>>? _sosRelaySub;
   StreamSubscription<List<int>>? _stopRelaySub;
+  StreamSubscription<List<int>>? _stopAckRelaySub;
   StreamSubscription<List<ScanResult>>? _scanSub;
 
   BluetoothConnectionState _connectionState =
@@ -72,6 +82,7 @@ class HeltecBleService extends ChangeNotifier {
   // The most recent SOS relayed to this board over LoRa from another
   // Heltec — set with zero internet/cellular signal involved.
   String? _lastRelaySenderName;
+  String? _lastRelayReason;
   bool _lastRelayHasFix = false;
   double? _lastRelayLatitude;
   double? _lastRelayLongitude;
@@ -87,6 +98,8 @@ class HeltecBleService extends ChangeNotifier {
   DateTime? get lastFixAt => _lastFixAt;
   String? get lastError => _lastError;
   String? get lastRelaySenderName => _lastRelaySenderName;
+  // Null when the sender's firmware/app predates SOS reasons.
+  String? get lastRelayReason => _lastRelayReason;
   // False means the sender's device had no GPS fix yet when it sent this
   // SOS — treat lastRelayLatitude/Longitude as meaningless (0,0) in that
   // case, never as a real location.
@@ -103,6 +116,29 @@ class HeltecBleService extends ChangeNotifier {
   String? get lastStopRelaySenderName => _lastStopRelaySenderName;
   String? get lastStopRelayReason => _lastStopRelayReason;
   DateTime? get lastStopRelayAt => _lastStopRelayAt;
+
+  // Hiker side: the guide's acknowledgment heard over LoRa.
+  String? _lastStopAckName;
+  DateTime? _lastStopAckAt;
+
+  // Guide side: hikers this phone already acknowledged over the device, so
+  // the offline card can show it as done without any internet round trip.
+  final Set<String> _stopAcksSent = <String>{};
+
+  static String _nameKey(String name) => name.trim().toLowerCase();
+
+  /// True if the guide's acknowledgment for [hikerName] arrived over LoRa
+  /// after [since] (when this hiker ended their hike).
+  bool stopAcknowledgedOverLoraFor(String hikerName, {DateTime? since}) {
+    final name = _lastStopAckName;
+    final at = _lastStopAckAt;
+    if (name == null || at == null) return false;
+    if (_nameKey(name) != _nameKey(hikerName)) return false;
+    return since == null || at.isAfter(since);
+  }
+
+  bool stopAckSentFor(String hikerName) =>
+      _stopAcksSent.contains(_nameKey(hikerName));
 
   /// [isGuide] picks which physical unit's name to scan for — a tour
   /// guide's phone must never pair with a hiker's device, or vice versa.
@@ -197,6 +233,13 @@ class HeltecBleService extends ChangeNotifier {
       } else if (characteristic.uuid == _stopRelayCharUuid) {
         await characteristic.setNotifyValue(true);
         _stopRelaySub = characteristic.lastValueStream.listen(_onStopRelayData);
+      } else if (characteristic.uuid == _stopAckCharUuid) {
+        _stopAckChar = characteristic;
+      } else if (characteristic.uuid == _stopAckRelayCharUuid) {
+        await characteristic.setNotifyValue(true);
+        _stopAckRelaySub = characteristic.lastValueStream.listen(
+          _onStopAckRelayData,
+        );
       }
     }
   }
@@ -206,10 +249,12 @@ class HeltecBleService extends ChangeNotifier {
     if (state == BluetoothConnectionState.disconnected) {
       _sosChar = null;
       _stopChar = null;
+      _stopAckChar = null;
       _hikeInfoChar = null;
       unawaited(_locationSub?.cancel());
       unawaited(_sosRelaySub?.cancel());
       unawaited(_stopRelaySub?.cancel());
+      unawaited(_stopAckRelaySub?.cancel());
     }
     notifyListeners();
   }
@@ -229,20 +274,23 @@ class HeltecBleService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Firmware sends "hikerName|hasFix|lat|lon" the moment this board
+  /// Firmware sends "hikerName|hasFix|lat|lon|reason" the moment this board
   /// receives an SOS relayed over LoRa from another Heltec — this is the
   /// entire offline hiker-to-guide path arriving with zero internet
   /// involved. hasFix is "0" or "1": the sender's device may not have had
   /// a GPS lock yet, in which case lat/lon are meaningless placeholders
-  /// (0,0) that must not be shown or plotted as a real location.
+  /// (0,0) that must not be shown or plotted as a real location. reason is
+  /// missing entirely when relayed from older firmware.
   void _onSosRelayData(List<int> bytes) {
     if (bytes.isEmpty) return;
     final text = utf8.decode(bytes, allowMalformed: true);
     final parts = text.split('|');
-    if (parts.length != 4) return;
+    if (parts.length < 4) return;
     final lat = double.tryParse(parts[2]);
     final lon = double.tryParse(parts[3]);
     if (lat == null || lon == null) return;
+    final reason = parts.length > 4 ? parts.sublist(4).join('|').trim() : '';
+    _lastRelayReason = reason.isEmpty ? null : reason;
     _lastRelaySenderName = parts[0];
     _lastRelayHasFix = parts[1] == '1';
     _lastRelayLatitude = lat;
@@ -266,6 +314,39 @@ class HeltecBleService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Firmware sends just "hikerName" when this board hears the guide's
+  /// "ACK|hikerName" over LoRa. Every board in range hears it — the hiker
+  /// screen decides whether the name is its own (see
+  /// [stopAcknowledgedOverLoraFor]).
+  void _onStopAckRelayData(List<int> bytes) {
+    if (bytes.isEmpty) return;
+    final name = utf8.decode(bytes, allowMalformed: true).trim();
+    if (name.isEmpty) return;
+    _lastStopAckName = name;
+    _lastStopAckAt = DateTime.now();
+    notifyListeners();
+  }
+
+  /// Guide side: tells [hikerName]'s device over LoRa that the guide saw
+  /// their ended-hike message, for when neither side has signal.
+  Future<bool> sendStopAck({required String hikerName}) async {
+    final characteristic = _stopAckChar;
+    if (characteristic == null) return false;
+    try {
+      await characteristic.write(
+        utf8.encode('ACK|$hikerName'),
+        withoutResponse: false,
+      );
+      _stopAcksSent.add(_nameKey(hikerName));
+      notifyListeners();
+      return true;
+    } catch (error) {
+      _lastError = 'Failed to send acknowledgment over BLE: $error';
+      notifyListeners();
+      return false;
+    }
+  }
+
   /// Writes an SOS trigger to the Heltec so it broadcasts the alert over
   /// LoRa even though this phone has no internet connection. Coordinates
   /// come from THIS phone's own GPS, not the device's — the Heltec's
@@ -273,10 +354,14 @@ class HeltecBleService extends ChangeNotifier {
   /// device just relays these numbers over LoRa rather than measuring
   /// its own location. The phone's GPS works with zero signal too, so
   /// this doesn't compromise the "no internet needed" requirement.
+  ///
+  /// [reason] goes last in the payload so the firmware's fixed-size LoRa
+  /// buffer can only ever truncate it, never the coordinates before it.
   Future<bool> sendSos({
     String hikerName = 'Hiker',
     required double latitude,
     required double longitude,
+    required String reason,
   }) async {
     final characteristic = _sosChar;
     if (characteristic == null) {
@@ -287,7 +372,7 @@ class HeltecBleService extends ChangeNotifier {
     try {
       await characteristic.write(
         utf8.encode(
-          'SOS|$hikerName|${latitude.toStringAsFixed(6)}|${longitude.toStringAsFixed(6)}',
+          'SOS|$hikerName|${latitude.toStringAsFixed(6)}|${longitude.toStringAsFixed(6)}|$reason',
         ),
         withoutResponse: false,
       );
@@ -362,11 +447,13 @@ class HeltecBleService extends ChangeNotifier {
     await _locationSub?.cancel();
     await _sosRelaySub?.cancel();
     await _stopRelaySub?.cancel();
+    await _stopAckRelaySub?.cancel();
     await _connectionSub?.cancel();
     await _device?.disconnect();
     _device = null;
     _sosChar = null;
     _stopChar = null;
+    _stopAckChar = null;
     _hikeInfoChar = null;
     _connectionState = BluetoothConnectionState.disconnected;
     notifyListeners();

@@ -352,6 +352,27 @@ service cloud.firestore {
       );
   }
 
+    // A hiker's own live location while they're in Hiking Mode, kept only
+    // so sendNearbySos (functions/nearbySos.js) can find the hikers
+    // closest to a solo SOS. Write-only for the owner — no client, not
+    // even another hiker, can read anyone's location; only the Cloud
+    // Function (Admin SDK) does. Deleted again when the hike ends.
+    match /hiker_presence/{userId} {
+      allow read: if false;
+      allow create, update: if isOwner(userId)
+        && request.resource.data.keys().hasOnly(['latitude', 'longitude', 'updatedAt'])
+        && request.resource.data.latitude is number
+        && request.resource.data.longitude is number
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isOwner(userId);
+    }
+
+    // Written only by sendNearbySos via the Admin SDK.
+    match /solo_sos_events/{eventId} {
+      allow read: if isTourismAdmin();
+      allow write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

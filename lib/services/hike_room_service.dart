@@ -106,6 +106,7 @@ class HikeRoomParticipant {
     this.stoppedAt,
     this.stopAcknowledgedBy,
     this.stopAcknowledgedAt,
+    this.policyAcceptedAt,
   });
 
   final String userId;
@@ -128,6 +129,10 @@ class HikeRoomParticipant {
   final DateTime? stoppedAt;
   final String? stopAcknowledgedBy;
   final DateTime? stopAcknowledgedAt;
+
+  // Set when the hiker ticked the Terms & Conditions checkbox under the
+  // room's Tour Guide Policy — required before START HIKING is enabled.
+  final DateTime? policyAcceptedAt;
 
   bool get hasLocation =>
       latitude != null && longitude != null;
@@ -155,6 +160,7 @@ class HikeRoomParticipant {
       stoppedAt: asDate(data['stoppedAt']),
       stopAcknowledgedBy: data['stopAcknowledgedBy']?.toString(),
       stopAcknowledgedAt: asDate(data['stopAcknowledgedAt']),
+      policyAcceptedAt: asDate(data['policyAcceptedAt']),
     );
   }
 }
@@ -168,6 +174,7 @@ class RoomSosEvent {
     required this.longitude,
     required this.status,
     required this.createdAt,
+    this.reason,
   });
 
   final String id;
@@ -177,6 +184,11 @@ class RoomSosEvent {
   final double longitude;
   final String status;
   final DateTime? createdAt;
+
+  // Why the hiker sent this SOS — "Lost", "Accident", "Others" or
+  // "Others: <note>" (see showSosReasonPicker). Null on SOS events sent
+  // before reasons existed.
+  final String? reason;
 
   factory RoomSosEvent.fromSnapshot(
     DocumentSnapshot<Map<String, dynamic>> snapshot,
@@ -191,6 +203,7 @@ class RoomSosEvent {
       longitude: (data['longitude'] as num?)?.toDouble() ?? 0,
       status: data['status']?.toString() ?? 'sent',
       createdAt: timestamp is Timestamp ? timestamp.toDate() : null,
+      reason: data['reason']?.toString(),
     );
   }
 }
@@ -608,6 +621,19 @@ class HikeRoomService {
     });
   }
 
+  /// Records (or withdraws) the hiker's agreement to the room's Tour Guide
+  /// Policy terms. Kept on their own participant doc so it survives leaving
+  /// and reopening the Hike Room screen, and so there's a timestamped record
+  /// of when they agreed.
+  Future<void> setPolicyAccepted(String roomId, {required bool accepted}) {
+    return _roomRef(roomId).collection('participants').doc(_user.uid).update({
+      'policyAcceptedAt': accepted
+          ? FieldValue.serverTimestamp()
+          : FieldValue.delete(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
   Future<void> updateCurrentParticipantDeviceStatus(
     String roomId, {
     required String deviceStatus,
@@ -631,6 +657,7 @@ class HikeRoomService {
     required String roomId,
     required double latitude,
     required double longitude,
+    required String reason,
     String transport = 'internet',
   }) async {
     final now = DateTime.now();
@@ -646,6 +673,7 @@ class HikeRoomService {
         'roomId': roomId,
         'latitude': latitude,
         'longitude': longitude,
+        'reason': reason,
         'transport': transport,
       });
       _lastSosAt = now;
@@ -686,6 +714,10 @@ class HikeRoomService {
       'membershipStatus': 'stopped',
       'stopReason': trimmedReason,
       'stoppedAt': FieldValue.serverTimestamp(),
+      // A hiker can start hiking again and end again — the guide's earlier
+      // acknowledgment must not carry over onto this new message.
+      'stopAcknowledgedBy': FieldValue.delete(),
+      'stopAcknowledgedAt': FieldValue.delete(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
   }
