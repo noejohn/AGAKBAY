@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:tunga/services/offline_activity_database.dart';
 
@@ -14,6 +16,7 @@ class ActivitySyncService {
   }) : _database = database ?? OfflineActivityDatabase.instance,
        _auth = auth ?? FirebaseAuth.instance,
        _firestore = firestore ?? FirebaseFirestore.instance,
+       _functions = FirebaseFunctions.instance,
        _connectivity = connectivity ?? Connectivity();
 
   static final ActivitySyncService shared = ActivitySyncService();
@@ -21,9 +24,11 @@ class ActivitySyncService {
   final OfflineActivityDatabase _database;
   final FirebaseAuth _auth;
   final FirebaseFirestore _firestore;
+  final FirebaseFunctions _functions;
   final Connectivity _connectivity;
 
   bool _syncing = false;
+  bool _syncRequestedWhileSyncing = false;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
 
   void startAutoSync() {
@@ -38,16 +43,19 @@ class ActivitySyncService {
   }
 
   Future<int> syncPendingActivities() async {
-    if (_syncing) return 0;
-    final user = _auth.currentUser;
-    if (user == null) return 0;
-
-    final connectivity = await _connectivity.checkConnectivity();
-    if (connectivity.contains(ConnectivityResult.none)) return 0;
-
+    if (_syncing) {
+      _syncRequestedWhileSyncing = true;
+      return 0;
+    }
     _syncing = true;
     var syncedCount = 0;
     try {
+      final user = _auth.currentUser;
+      if (user == null) return 0;
+
+      final connectivity = await _connectivity.checkConnectivity();
+      if (connectivity.contains(ConnectivityResult.none)) return 0;
+
       final activities = await _database.getUnsyncedFinishedActivities();
       for (final activity in activities) {
         try {
@@ -78,8 +86,25 @@ class ActivitySyncService {
           // Keep the route pending until Firestore is reachable again.
         }
       }
+      final incidentReports = await _database.getPendingIncidentReports();
+      for (final report in incidentReports) {
+        try {
+          await _functions.httpsCallable('submitIncidentReport').call({
+            'reportId': report.id,
+            ...report.payload,
+          });
+          await _database.markIncidentReportSynced(report.id);
+          syncedCount++;
+        } catch (error) {
+          debugPrint('Could not sync incident report ${report.id}: $error');
+        }
+      }
     } finally {
       _syncing = false;
+      if (_syncRequestedWhileSyncing) {
+        _syncRequestedWhileSyncing = false;
+        unawaited(syncPendingActivities());
+      }
     }
     return syncedCount;
   }

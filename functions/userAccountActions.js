@@ -1,6 +1,7 @@
 const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { assertTourismAdmin } = require("./adminAuthorization");
+const { canonicalizeDavaoMountainName } = require("./mountainNames");
 
 exports.refreshAdminClaims = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
@@ -533,14 +534,14 @@ exports.createAdminAccount = onCall(
         "Choose either Tourism Admin or Mountain Head.",
       );
     }
-    const managedMountainName = typeof request.data?.managedMountainName === "string"
-      ? request.data.managedMountainName.trim()
-      : "";
-    if (adminRole === "mountain_head" &&
-        (!managedMountainName || managedMountainName.length > 120)) {
+    const requestedMountainName = request.data?.managedMountainName;
+    const managedMountainName = adminRole === "mountain_head"
+      ? canonicalizeDavaoMountainName(requestedMountainName)
+      : null;
+    if (adminRole === "mountain_head" && !managedMountainName) {
       throw new HttpsError(
         "invalid-argument",
-        "A managed mountain is required for a Mountain Head.",
+        "Choose a managed mountain from the Davao Region list.",
       );
     }
     const email = typeof request.data?.email === "string"

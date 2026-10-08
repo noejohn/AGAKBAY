@@ -1,4 +1,5 @@
 const { HttpsError } = require("firebase-functions/v2/https");
+const { normalizeMountainName } = require("./mountainNames");
 
 function isTourismAdmin(auth) {
   return auth?.token?.admin === true &&
@@ -32,13 +33,13 @@ function normalizeMountainNames(value) {
   if (Array.isArray(value)) {
     return value
       .filter((name) => typeof name === "string")
-      .map((name) => name.trim().toLocaleLowerCase())
+      .map(normalizeMountainName)
       .filter(Boolean);
   }
   if (typeof value !== "string") return [];
   return value
     .split(/[,;\n]/)
-    .map((name) => name.trim().toLocaleLowerCase())
+    .map(normalizeMountainName)
     .filter(Boolean);
 }
 

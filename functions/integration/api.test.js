@@ -139,6 +139,218 @@ describe("POST sendSosEvent", () => {
   });
 });
 
+describe("POST submitIncidentReport", () => {
+  test("the acknowledged room guide can report a qualifying SOS to the Mountain Head", async () => {
+    const guide = await createSignedInUser("guide@test.com", "Guide Gina");
+    const hiker = await createSignedInUser("hiker@test.com", "Hiker Juan");
+    await seedActiveRoom({ roomId: "room-1", guideUid: guide.uid, hikerUids: [hiker.uid] });
+    await db.collection("users").doc("mountain-head-1").set({
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await db.collection("hike_rooms").doc("room-1")
+      .collection("sos_events").doc("sos-1").set({
+        senderId: hiker.uid,
+        senderName: "Hiker Juan",
+        reason: "Accident",
+        latitude: 7.0,
+        longitude: 125.0,
+        status: "acknowledged",
+        acknowledgedBy: guide.uid,
+      });
+
+    const res = await callApi("submitIncidentReport", {
+      reportId: "incident_api_test_1",
+      roomId: "room-1",
+      eventId: "sos-1",
+      guideNotes: "Guide checked the location and contacted rescue.",
+    }, guide.idToken);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.sent).toBe(true);
+    const report = await db.collection("incident_reports")
+      .doc("incident_api_test_1").get();
+    expect(report.data()).toMatchObject({
+      guideId: guide.uid,
+      eventId: "sos-1",
+      mountainName: "Mount Apo",
+      category: "Accident",
+      hikerName: "Hiker Juan",
+      guideNotes: "Guide checked the location and contacted rescue.",
+      status: "submitted",
+    });
+    const notifications = await db.collection("notifications")
+      .where("reportId", "==", "incident_api_test_1").get();
+    expect(notifications.size).toBe(1);
+    expect(notifications.docs[0].data()).toMatchObject({
+      type: "incident_report",
+      mountainName: "Mount Apo",
+      guideNotes: "Guide checked the location and contacted rescue.",
+    });
+  });
+
+  test("the room guide can queue a received LoRa SOS report without an SOS document", async () => {
+    const guide = await createSignedInUser("guide@test.com", "Guide Gina");
+    await seedActiveRoom({ roomId: "room-1", guideUid: guide.uid, hikerUids: [] });
+    await db.collection("users").doc("mountain-head-1").set({
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+
+    const res = await callApi("submitIncidentReport", {
+      reportId: "incident_lora_123",
+      roomId: "room-1",
+      source: "lora",
+      hikerName: "Hiker Juan",
+      reason: "Accident",
+      latitude: 7.0,
+      longitude: 125.0,
+      guideNotes: "Received and acknowledged over LoRa.",
+    }, guide.idToken);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.mountainHeadsNotified).toBe(1);
+    const report = await db.collection("incident_reports")
+      .doc("incident_lora_123").get();
+    expect(report.data()).toMatchObject({
+      guideId: guide.uid,
+      source: "lora_relay_unverified",
+      eventId: null,
+      category: "Accident",
+      hikerName: "Hiker Juan",
+    });
+  });
+});
+
+describe("POST updateIncidentReportStatus", () => {
+  function seedIncidentReport(mountainName = "Mount Apo") {
+    return db.collection("incident_reports").doc("incident_status_test").set({
+      guideId: "guide-1",
+      mountainName,
+      status: "submitted",
+      guideNotes: "Initial report details.",
+    });
+  }
+
+  test("the assigned Mountain Head can acknowledge the report", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport();
+
+    const res = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test",
+      action: "acknowledge",
+    }, head.idToken);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.status).toBe("acknowledged");
+    const report = await db.collection("incident_reports")
+      .doc("incident_status_test").get();
+    expect(report.data()).toMatchObject({
+      status: "acknowledged",
+      acknowledgedBy: head.uid,
+      acknowledgedByName: "Head Helen",
+    });
+    const notification = await db.collection("users").doc("guide-1")
+      .collection("notifications")
+      .doc("incident_report_incident_status_test_acknowledged").get();
+    expect(notification.data()).toMatchObject({
+      type: "incident_report_status",
+      reportId: "incident_status_test",
+      status: "acknowledged",
+    });
+  });
+
+  test("the assigned Mountain Head can advance the report through all three statuses", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport();
+
+    const acknowledge = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test",
+      action: "acknowledge",
+    }, head.idToken);
+    expect(acknowledge.body.result.status).toBe("acknowledged");
+
+    const respondersSent = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test",
+      action: "send_responders",
+    }, head.idToken);
+    expect(respondersSent.body.result.status).toBe("responders_sent");
+
+    const responded = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test",
+      action: "resolve",
+    }, head.idToken);
+
+    expect(responded.status).toBe(200);
+    expect(responded.body.result.status).toBe("responded");
+    const report = await db.collection("incident_reports")
+      .doc("incident_status_test").get();
+    expect(report.data()).toMatchObject({
+      status: "responded",
+      respondedBy: head.uid,
+      respondersSentBy: head.uid,
+      acknowledgedBy: head.uid,
+    });
+    for (const status of [
+      "acknowledged",
+      "responders_sent",
+      "responded",
+    ]) {
+      const notification = await db.collection("users").doc("guide-1")
+        .collection("notifications")
+        .doc(`incident_report_incident_status_test_${status}`).get();
+      expect(notification.data()).toMatchObject({
+        type: "incident_report_status",
+        reportId: "incident_status_test",
+        status,
+      });
+    }
+  });
+
+  test("a Mountain Head cannot skip the responders-sent status", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport();
+
+    const res = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test",
+      action: "resolve",
+    }, head.idToken);
+
+    expect(res.status).toBe(400);
+    const report = await db.collection("incident_reports")
+      .doc("incident_status_test").get();
+    expect(report.data().status).toBe("submitted");
+  });
+
+  test("a Mountain Head cannot update a report for another mountain", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport("Mount Talomo");
+
+    const res = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test",
+      action: "acknowledge",
+    }, head.idToken);
+
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("POST sendNearbySos (solo hike)", () => {
   test("401 UNAUTHENTICATED when not signed in", async () => {
     const res = await callApi("sendNearbySos", { latitude: 7.0, longitude: 125.0 });

@@ -18,6 +18,8 @@ import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../admin_main.dart' show AdminColors;
+import '../data/davao_mountains.dart';
+import 'incident_report_dialog.dart';
 
 class _NavItem {
   const _NavItem(this.label, this.icon);
@@ -34,6 +36,7 @@ const _navItems = [
   _NavItem('Bluetooth Devices', Icons.bluetooth),
   _NavItem('User Management', Icons.people_outline_rounded),
   _NavItem('Audit Logs', Icons.description_outlined),
+  _NavItem('Incident Reports', Icons.assignment_late_outlined),
 ];
 
 EdgeInsets _adminPagePadding(BuildContext context) {
@@ -298,6 +301,7 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                       access.isTourismAdmin
                           ? const _AuditLogsPage()
                           : const _ComingSoonPage(title: 'Access restricted'),
+                    8 => _IncidentReportsPage(access: access),
                     _ => _ComingSoonPage(title: _navItems[_selected].label),
                   },
                 ),
@@ -667,7 +671,7 @@ class _Sidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final visibleIndices = isMountainHead
-        ? [0, 1, 2, 3, 4, 6]
+        ? [0, 1, 2, 3, 4, 6, 8]
         : List.generate(_navItems.length, (index) => index);
     final screenWidth = MediaQuery.sizeOf(context).width;
     final screenHeight = MediaQuery.sizeOf(context).height;
@@ -1007,7 +1011,10 @@ class _NotificationBellState extends State<_NotificationBell> {
     );
     if (widget.access.isMountainHead) {
       query = query
-          .where('type', whereIn: const ['sos', 'trail_submission'])
+          .where(
+            'type',
+            whereIn: const ['sos', 'trail_submission', 'incident_report'],
+          )
           .where('mountainName', isEqualTo: widget.access.managedMountainName);
     }
     return query.orderBy('createdAt', descending: true).limit(50).snapshots();
@@ -1322,6 +1329,7 @@ class _NotificationPopupContentState extends State<_NotificationPopupContent> {
                   return InkWell(
                     borderRadius: BorderRadius.circular(10),
                     onTap: () async {
+                      final navigator = Navigator.of(context);
                       final notificationRef = FirebaseFirestore.instance
                           .collection('notifications')
                           .doc(notification.id);
@@ -1333,7 +1341,8 @@ class _NotificationPopupContentState extends State<_NotificationPopupContent> {
 
                       if (!context.mounted) return;
 
-                      Navigator.of(context).pop();
+                      navigator.pop();
+                      if (!navigator.mounted) return;
 
                       // SOS notifications open the SOS Monitoring page.
                       if (data['type']?.toString() == 'sos') {
@@ -1345,6 +1354,23 @@ class _NotificationPopupContentState extends State<_NotificationPopupContent> {
                         } else {
                           widget.onOpenAuditLogs();
                         }
+                      } else if (data['type']?.toString() ==
+                          'incident_report') {
+                        final reportId = data['reportId']?.toString();
+                        await showDialog<void>(
+                          context: navigator.context,
+                          builder: (dialogContext) => reportId == null
+                              ? const AlertDialog(
+                                  title: Text('Hike Incident Report'),
+                                  content: Text(
+                                    'This notification has no report ID.',
+                                  ),
+                                )
+                              : IncidentReportDialog(
+                                  reportId: reportId,
+                                  canRespond: widget.isMountainHead,
+                                ),
+                        );
                       } else if (!widget.isMountainHead &&
                           data['type']?.toString() == 'admin_action') {
                         widget.onOpenAuditLogs();
@@ -2519,12 +2545,6 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
     }
   }
 
-  void _notWiredUp(String feature) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('$feature isn\'t wired up yet.')));
-  }
-
   void _viewDocuments(BuildContext context) {
     final idUrl = widget.data['idImageUrl'] as String?;
     final certUrl = widget.data['certificateImageUrl'] as String?;
@@ -2648,10 +2668,6 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
           const SizedBox(height: 12),
           const _FieldLabel('Mountains Handled'),
           Text(mountains, style: const TextStyle(fontWeight: FontWeight.w600)),
-          if (recommendation is Map<String, dynamic>) ...[
-            const SizedBox(height: 12),
-            _RecommendationNotice(recommendation: recommendation),
-          ],
           const SizedBox(height: 12),
           const _FieldLabel('Submitted'),
           Text(
@@ -2665,55 +2681,50 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
             label: const Text('View Full Profile & ID/Certificates'),
           ),
           const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton(
-                  onPressed: _submitting ? null : () => _review('approve'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AdminColors.accent,
-                  ),
-                  child: _submitting
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
+          if (recommendation is Map<String, dynamic> &&
+              !widget.isMountainHead) ...[
+            _RecommendationNotice(recommendation: recommendation),
+            const SizedBox(height: 12),
+          ],
+          if (widget.isMountainHead && recommendation is Map<String, dynamic>)
+            _RecommendationNotice(recommendation: recommendation)
+          else
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _submitting ? null : () => _review('approve'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AdminColors.accent,
+                    ),
+                    child: _submitting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Text(
+                            widget.isMountainHead
+                                ? 'Recommend Approve'
+                                : 'Approve',
                           ),
-                        )
-                      : Text(
-                          widget.isMountainHead
-                              ? 'Recommend Approve'
-                              : 'Approve',
-                        ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: FilledButton(
-                  onPressed: _submitting ? null : () => _review('reject'),
-                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                  child: Text(
-                    widget.isMountainHead ? 'Recommend Reject' : 'Reject',
                   ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _submitting
-                      ? null
-                      : () => _notWiredUp('"Request changes"'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.orange,
-                    side: const BorderSide(color: Colors.orange),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _submitting ? null : () => _review('reject'),
+                    style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                    child: Text(
+                      widget.isMountainHead ? 'Recommend Reject' : 'Reject',
+                    ),
                   ),
-                  child: const Text('Request Changes'),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
         ],
       ),
     );
@@ -3166,10 +3177,6 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (recommendation is Map<String, dynamic>) ...[
-            _RecommendationNotice(recommendation: recommendation),
-            const SizedBox(height: 14),
-          ],
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -3275,57 +3282,50 @@ class _TrailSubmissionCardState extends State<_TrailSubmissionCard> {
             ),
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton(
-                  onPressed: _reviewing ? null : () => _review('approve'),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AdminColors.accent,
-                  ),
-                  child: _reviewing
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
+          if (recommendation is Map<String, dynamic> &&
+              !widget.isMountainHead) ...[
+            _RecommendationNotice(recommendation: recommendation),
+            const SizedBox(height: 12),
+          ],
+          if (widget.isMountainHead && recommendation is Map<String, dynamic>)
+            _RecommendationNotice(recommendation: recommendation)
+          else
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _reviewing ? null : () => _review('approve'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AdminColors.accent,
+                    ),
+                    child: _reviewing
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Text(
+                            widget.isMountainHead
+                                ? 'Recommend Approve'
+                                : 'Approve',
                           ),
-                        )
-                      : Text(
-                          widget.isMountainHead
-                              ? 'Recommend Approve'
-                              : 'Approve',
-                        ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: FilledButton(
-                  onPressed: _reviewing ? null : () => _review('reject'),
-                  style: FilledButton.styleFrom(backgroundColor: Colors.red),
-                  child: Text(
-                    widget.isMountainHead ? 'Recommend Reject' : 'Reject',
                   ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('"Request changes" isn\'t wired up yet.'),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _reviewing ? null : () => _review('reject'),
+                    style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                    child: Text(
+                      widget.isMountainHead ? 'Recommend Reject' : 'Reject',
                     ),
                   ),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.orange,
-                    side: const BorderSide(color: Colors.orange),
-                  ),
-                  child: const Text('Request Changes'),
                 ),
-              ),
-            ],
-          ),
+              ],
+            ),
         ],
       ),
     );
@@ -3606,6 +3606,380 @@ class _StreamErrorRow extends StatelessWidget {
   );
 }
 
+class _IncidentReportsPage extends StatelessWidget {
+  const _IncidentReportsPage({required this.access});
+
+  final _AdminAccess access;
+
+  @override
+  Widget build(BuildContext context) {
+    Query<Map<String, dynamic>> reports = FirebaseFirestore.instance.collection(
+      'incident_reports',
+    );
+    if (access.isMountainHead) {
+      reports = reports.where(
+        'mountainName',
+        isEqualTo: access.managedMountainName,
+      );
+    }
+    reports = reports.orderBy('createdAt', descending: true).limit(100);
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: reports.snapshots(),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Padding(
+            padding: _adminPagePadding(context),
+            child: _StreamErrorRow(snapshot.error),
+          );
+        }
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final reportDocs = snapshot.data!.docs;
+        final submittedCount = reportDocs
+            .where((doc) => _reportStatus(doc.data()) == 'submitted')
+            .length;
+        final acknowledgedCount = reportDocs
+            .where((doc) => _reportStatus(doc.data()) == 'acknowledged')
+            .length;
+        final respondersSentCount = reportDocs
+            .where((doc) => _reportStatus(doc.data()) == 'responders_sent')
+            .length;
+        final respondedCount = reportDocs
+            .where((doc) => _reportStatus(doc.data()) == 'responded')
+            .length;
+
+        return ListView(
+          padding: _adminPagePadding(context),
+          children: [
+            Text(
+              'Incident Reports',
+              style: Theme.of(
+                context,
+              ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              access.isMountainHead
+                  ? 'Acknowledge each report, mark when responders are sent, then mark it responded once resolved.'
+                  : 'Monitor hike incident reports across all mountains.',
+              style: const TextStyle(color: Colors.black54),
+            ),
+            const SizedBox(height: 18),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                _IncidentReportCount(label: 'Total', count: reportDocs.length),
+                _IncidentReportCount(
+                  label: 'Filed',
+                  count: submittedCount,
+                  color: Colors.orange,
+                ),
+                _IncidentReportCount(
+                  label: 'Acknowledged',
+                  count: acknowledgedCount,
+                  color: Colors.blue,
+                ),
+                _IncidentReportCount(
+                  label: 'Responders sent',
+                  count: respondersSentCount,
+                  color: Colors.deepPurple,
+                ),
+                _IncidentReportCount(
+                  label: 'Responded',
+                  count: respondedCount,
+                  color: Colors.green,
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (reportDocs.isEmpty)
+              const _EmptyRow('No incident reports have been filed.')
+            else
+              for (final reportDoc in reportDocs)
+                _IncidentReportListCard(
+                  reportId: reportDoc.id,
+                  data: reportDoc.data(),
+                  canRespond: access.isMountainHead,
+                ),
+            if (reportDocs.length == 100)
+              const Padding(
+                padding: EdgeInsets.only(top: 8, bottom: 20),
+                child: Text(
+                  'Showing the 100 most recent reports.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.black54, fontSize: 12),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+String _reportStatus(Map<String, dynamic> report) {
+  final status = report['status']?.toString();
+  if (status == 'acknowledged' ||
+      status == 'responders_sent' ||
+      status == 'responded') {
+    return status!;
+  }
+  return 'submitted';
+}
+
+String _incidentStatusLabel(String status) => switch (status) {
+  'acknowledged' => 'Acknowledged',
+  'responders_sent' => 'Responders sent',
+  'responded' => 'Responded',
+  _ => 'Filed',
+};
+
+String? _nextIncidentAction(String status) => switch (status) {
+  'submitted' => 'acknowledge',
+  'acknowledged' => 'send_responders',
+  'responders_sent' => 'resolve',
+  _ => null,
+};
+
+String _nextIncidentActionLabel(String status) => switch (status) {
+  'submitted' => 'Acknowledge',
+  'acknowledged' => 'Mark responders sent',
+  'responders_sent' => 'Mark responded',
+  _ => 'Responded',
+};
+
+class _IncidentReportCount extends StatelessWidget {
+  const _IncidentReportCount({
+    required this.label,
+    required this.count,
+    this.color = AdminColors.accent,
+  });
+
+  final String label;
+  final int count;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Chip(
+      avatar: Icon(Icons.circle, size: 12, color: color),
+      label: Text('$label: $count'),
+      backgroundColor: color.withValues(alpha: 0.08),
+      side: BorderSide(color: color.withValues(alpha: 0.22)),
+    );
+  }
+}
+
+class _IncidentReportListCard extends StatelessWidget {
+  const _IncidentReportListCard({
+    required this.reportId,
+    required this.data,
+    required this.canRespond,
+  });
+
+  final String reportId;
+  final Map<String, dynamic> data;
+  final bool canRespond;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = _reportStatus(data);
+    final statusColor = switch (status) {
+      'responded' => Colors.green,
+      'acknowledged' => Colors.blue,
+      'responders_sent' => Colors.deepPurple,
+      _ => Colors.orange,
+    };
+    final action = _nextIncidentAction(status);
+    final created = _formatTimestamp(data['createdAt']);
+    final subject =
+        '${data['mountainName'] ?? 'Unknown mountain'} · '
+        '${data['category'] ?? 'Incident'}';
+    final details =
+        'Hiker: ${data['hikerName'] ?? 'Hiker'} · '
+        'Guide: ${data['guideName'] ?? 'Tour Guide'}'
+        '${created.isEmpty ? '' : ' · $created'}';
+    final reportButton = OutlinedButton.icon(
+      onPressed: () => _openReport(context),
+      icon: Icon(
+        canRespond ? Icons.edit_note_rounded : Icons.visibility_outlined,
+      ),
+      label: const Text('Review report'),
+    );
+    final statusButton = canRespond
+        ? _IncidentStatusActionButton(
+            reportId: reportId,
+            action: action,
+            label: _nextIncidentActionLabel(status),
+          )
+        : null;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      color: Colors.white,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final reportDetails = Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                backgroundColor: statusColor.withValues(alpha: 0.12),
+                child: Icon(Icons.report_problem_outlined, color: statusColor),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: statusColor.withValues(alpha: 0.35),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        child: Text(
+                          _incidentStatusLabel(status),
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      subject,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      details,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.black54),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+
+          final reportActions = Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              reportButton,
+              if (statusButton != null) ...[
+                const SizedBox(height: 6),
+                statusButton,
+              ],
+            ],
+          );
+
+          return Padding(
+            padding: const EdgeInsets.all(12),
+            child: constraints.maxWidth < 560
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      reportDetails,
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: reportActions,
+                      ),
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(child: reportDetails),
+                      const SizedBox(width: 12),
+                      reportActions,
+                    ],
+                  ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _openReport(BuildContext context) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogContext) =>
+          IncidentReportDialog(reportId: reportId, canRespond: canRespond),
+    );
+  }
+}
+
+class _IncidentStatusActionButton extends StatefulWidget {
+  const _IncidentStatusActionButton({
+    required this.reportId,
+    required this.action,
+    required this.label,
+  });
+
+  final String reportId;
+  final String? action;
+  final String label;
+
+  @override
+  State<_IncidentStatusActionButton> createState() =>
+      _IncidentStatusActionButtonState();
+}
+
+class _IncidentStatusActionButtonState
+    extends State<_IncidentStatusActionButton> {
+  bool _updating = false;
+
+  Future<void> _advanceStatus() async {
+    final action = widget.action;
+    if (action == null) return;
+    setState(() => _updating = true);
+    try {
+      await FirebaseFunctions.instance
+          .httpsCallable('updateIncidentReportStatus')
+          .call({'reportId': widget.reportId, 'action': action});
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not update report status: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _updating = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.icon(
+      onPressed: widget.action == null || _updating ? null : _advanceStatus,
+      icon: _updating
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.arrow_forward_rounded),
+      label: Text(_updating ? 'Updating...' : widget.label),
+    );
+  }
+}
+
 class _HikeRoomMonitoringPage extends StatelessWidget {
   const _HikeRoomMonitoringPage({required this.access});
 
@@ -3616,11 +3990,20 @@ class _HikeRoomMonitoringPage extends StatelessWidget {
     Query<Map<String, dynamic>> currentRoomsQuery = FirebaseFirestore.instance
         .collection('hike_rooms')
         .where('status', whereIn: ['waiting', 'active']);
+    Query<Map<String, dynamic>> historyQuery = FirebaseFirestore.instance
+        .collection('hike_room_history')
+        .orderBy('endedAt', descending: true)
+        .limit(50);
     if (access.isMountainHead) {
       currentRoomsQuery = currentRoomsQuery.where(
         'mountainName',
         isEqualTo: access.managedMountainName,
       );
+      historyQuery = FirebaseFirestore.instance
+          .collection('hike_room_history')
+          .where('mountainName', isEqualTo: access.managedMountainName)
+          .orderBy('endedAt', descending: true)
+          .limit(50);
     }
 
     return SingleChildScrollView(
@@ -3638,7 +4021,15 @@ class _HikeRoomMonitoringPage extends StatelessWidget {
             style: TextStyle(color: Colors.black54),
           ),
           const SizedBox(height: 20),
-
+          Align(
+            alignment: Alignment.centerRight,
+            child: OutlinedButton.icon(
+              onPressed: () => _showHikeHistoryDialog(context, historyQuery),
+              icon: const Icon(Icons.history_rounded, size: 18),
+              label: const Text('Hike History'),
+            ),
+          ),
+          const SizedBox(height: 8),
           StreamBuilder<QuerySnapshot>(
             stream: currentRoomsQuery.snapshots(),
             builder: (context, snap) {
@@ -3685,6 +4076,196 @@ class _HikeRoomMonitoringPage extends StatelessWidget {
       ),
     );
   }
+}
+
+Future<void> _showHikeHistoryDialog(
+  BuildContext context,
+  Query<Map<String, dynamic>> historyQuery,
+) {
+  final size = MediaQuery.sizeOf(context);
+  return showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Hike History'),
+      content: SizedBox(
+        width: size.width < 700 ? size.width * 0.9 : 720,
+        height: size.height * 0.68,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(bottom: 12),
+                child: Text(
+                  'Completed hikes with the guide, participants, and hike times.',
+                  style: TextStyle(color: Colors.black54),
+                ),
+              ),
+              _HikeRoomHistoryList(query: historyQuery),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
+}
+
+class _HikeRoomHistoryList extends StatefulWidget {
+  const _HikeRoomHistoryList({required this.query});
+
+  final Query<Map<String, dynamic>> query;
+
+  @override
+  State<_HikeRoomHistoryList> createState() => _HikeRoomHistoryListState();
+}
+
+class _HikeRoomHistoryListState extends State<_HikeRoomHistoryList> {
+  static const _pageSize = 10;
+  int _page = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: widget.query.snapshots(),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
+        if (!snapshot.hasData) {
+          return const Padding(
+            padding: EdgeInsets.all(24),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
+        final records = snapshot.data!.docs;
+        if (records.isEmpty) {
+          return const _EmptyRow('No completed hike history yet.');
+        }
+        final pageCount = (records.length / _pageSize).ceil();
+        final currentPage = _page.clamp(0, pageCount - 1);
+        final pageRecords = records
+            .skip(currentPage * _pageSize)
+            .take(_pageSize);
+        return Column(
+          children: [
+            for (final record in pageRecords)
+              _HikeRoomHistoryCard(data: record.data()),
+            if (records.length > _pageSize)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    OutlinedButton(
+                      onPressed: currentPage > 0
+                          ? () => setState(() => _page = currentPage - 1)
+                          : null,
+                      child: const Text('Previous'),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      child: Text('Page ${currentPage + 1} of $pageCount'),
+                    ),
+                    OutlinedButton(
+                      onPressed: currentPage + 1 < pageCount
+                          ? () => setState(() => _page = currentPage + 1)
+                          : null,
+                      child: const Text('Next'),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _HikeRoomHistoryCard extends StatelessWidget {
+  const _HikeRoomHistoryCard({required this.data});
+
+  final Map<String, dynamic> data;
+
+  @override
+  Widget build(BuildContext context) {
+    final participants = (data['participants'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((participant) => Map<String, dynamic>.from(participant))
+        .toList(growable: false);
+    final started = _formatHikeHistoryTimestamp(data['startedAt']);
+    final ended = _formatHikeHistoryTimestamp(data['endedAt']);
+    final duration = data['durationSeconds'] as int?;
+    final durationLabel = duration == null
+        ? 'Duration unavailable'
+        : '${duration ~/ 3600}h ${(duration % 3600) ~/ 60}m';
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      color: Colors.white,
+      child: ExpansionTile(
+        leading: const Icon(Icons.history_rounded, color: AdminColors.accent),
+        title: Text(
+          '${data['mountainName'] ?? 'Hike'} · Room ${data['roomCode'] ?? '—'}',
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        subtitle: Text(
+          'Guide: ${data['guideName'] ?? '—'} · $ended · '
+          '${participants.length} participants',
+        ),
+        childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text('Route: ${data['routeName'] ?? '—'}'),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text('Started: ${started.isEmpty ? '—' : started}'),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Ended: ${ended.isEmpty ? '—' : ended} · $durationLabel',
+            ),
+          ),
+          const Divider(height: 22),
+          for (final participant in participants)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                participant['role'] == 'tour_guide'
+                    ? Icons.badge_outlined
+                    : Icons.person_outline_rounded,
+              ),
+              title: Text(participant['name']?.toString() ?? 'Hiker'),
+              subtitle: Text(
+                '${participant['role'] ?? 'hiker'} · '
+                '${participant['activityStatus'] ?? 'in_room'} · '
+                '${participant['membershipStatus'] ?? 'active'}\n'
+                'Joined ${_formatHikeHistoryTimestamp(participant['joinedAt'])}'
+                '${participant['hikingStartedAt'] == null ? '' : ' · Hike started ${_formatHikeHistoryTimestamp(participant['hikingStartedAt'])}'}'
+                '${participant['returnedToRoomAt'] == null ? '' : ' · Returned ${_formatHikeHistoryTimestamp(participant['returnedToRoomAt'])}'}'
+                '${(participant['stopReason']?.toString().trim().isNotEmpty ?? false) ? '\nEnd-hike reason: ${participant['stopReason']}' : ''}',
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatHikeHistoryTimestamp(Object? value) {
+  if (value is! Timestamp) return '—';
+  final date = value.toDate().toLocal();
+  final hour = date.hour % 12 == 0 ? 12 : date.hour % 12;
+  final minute = date.minute.toString().padLeft(2, '0');
+  final period = date.hour >= 12 ? 'PM' : 'AM';
+  return '${_formatTimestamp(value)} at $hour:$minute $period';
 }
 
 class _HikeRoomCard extends StatelessWidget {
@@ -4132,43 +4713,26 @@ class _SosMonitoringPage extends StatefulWidget {
 }
 
 class _SosMonitoringPageState extends State<_SosMonitoringPage> {
-  final _scrollController = ScrollController();
   bool _cleaningOrphanedAlerts = false;
-  double _scrollProgress = 0;
   _SosAlertFilter _filter = _SosAlertFilter.all;
+  int _page = 0;
   Set<String> _deletedSenderIds = {};
   String? _deletedSenderLookupError;
+
+  static const _pageSize = 10;
+  static const _maxLoadedAlerts = 100;
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_updateScrollProgress);
     if (widget.access.isTourismAdmin) _loadDeletedSenderIds();
   }
 
-  @override
-  void dispose() {
-    _scrollController
-      ..removeListener(_updateScrollProgress)
-      ..dispose();
-    super.dispose();
-  }
-
-  void _updateScrollProgress() {
-    if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    final progress = position.maxScrollExtent == 0
-        ? 0.0
-        : (position.pixels / position.maxScrollExtent).clamp(0.0, 1.0);
-    if ((progress - _scrollProgress).abs() < 0.01) return;
-    setState(() => _scrollProgress = progress);
-  }
-
   void _selectFilter(_SosAlertFilter filter) {
-    setState(() => _filter = filter);
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => _updateScrollProgress(),
-    );
+    setState(() {
+      _filter = filter;
+      _page = 0;
+    });
   }
 
   Future<void> _loadDeletedSenderIds() async {
@@ -4212,7 +4776,8 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
   Stream<QuerySnapshot<Map<String, dynamic>>> _sosEventsStream() {
     Query<Map<String, dynamic>> query = FirebaseFirestore.instance
         .collectionGroup('sos_events')
-        .orderBy('createdAt', descending: true);
+        .orderBy('createdAt', descending: true)
+        .limit(_maxLoadedAlerts);
     if (widget.access.isMountainHead) {
       query = query.where(
         'mountainName',
@@ -4291,6 +4856,12 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
           _SosAlertFilter.acknowledged => acknowledgedEvents,
           _SosAlertFilter.unacknowledged => unacknowledgedEvents,
         };
+        final pageCount = (displayedEvents.length / _pageSize).ceil();
+        final currentPage = pageCount == 0 ? 0 : _page.clamp(0, pageCount - 1);
+        final pageEvents = displayedEvents
+            .skip(currentPage * _pageSize)
+            .take(_pageSize)
+            .toList(growable: false);
         final mapEvents = _filter == _SosAlertFilter.acknowledged
             ? acknowledgedEvents
             : unacknowledgedEvents;
@@ -4314,10 +4885,8 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
           children: [
             Expanded(
               child: Scrollbar(
-                controller: _scrollController,
                 thumbVisibility: true,
                 child: ListView(
-                  controller: _scrollController,
                   padding: _adminPagePadding(context),
                   children: [
                     Text(
@@ -4395,7 +4964,9 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
                                 ? double.infinity
                                 : 260,
                             child: Text(
-                              '${events.length} total SOS alert${events.length == 1 ? '' : 's'}',
+                              events.length == _maxLoadedAlerts
+                                  ? 'Showing latest $_maxLoadedAlerts SOS alerts'
+                                  : '${events.length} total SOS alert${events.length == 1 ? '' : 's'}',
                               style: TextStyle(
                                 fontWeight: FontWeight.w800,
                                 color: unacknowledgedEvents.isEmpty
@@ -4481,7 +5052,7 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
                         ],
                       ),
                       const SizedBox(height: 14),
-                      ...displayedEvents.map((event) {
+                      ...pageEvents.map((event) {
                         final data = event.data();
                         final roomId =
                             data['roomId']?.toString() ??
@@ -4493,32 +5064,43 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
                           senderName: _senderName(data),
                         );
                       }),
+                      if (displayedEvents.length > _pageSize) ...[
+                        const SizedBox(height: 18),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: currentPage > 0
+                                  ? () =>
+                                        setState(() => _page = currentPage - 1)
+                                  : null,
+                              icon: const Icon(Icons.chevron_left_rounded),
+                              label: const Text('Previous'),
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              'Page ${currentPage + 1} of $pageCount'
+                              '${events.length == _maxLoadedAlerts ? ' · latest $_maxLoadedAlerts alerts' : ''}',
+                              style: const TextStyle(
+                                color: Colors.black54,
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            OutlinedButton.icon(
+                              onPressed: currentPage + 1 < pageCount
+                                  ? () =>
+                                        setState(() => _page = currentPage + 1)
+                                  : null,
+                              icon: const Icon(Icons.chevron_right_rounded),
+                              label: const Text('Next'),
+                            ),
+                          ],
+                        ),
+                      ],
                     ],
                   ],
                 ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 12),
-              child: Row(
-                children: [
-                  Text(
-                    'Scroll ${(100 * _scrollProgress).round()}%',
-                    style: const TextStyle(
-                      color: Colors.black54,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: LinearProgressIndicator(
-                      value: _scrollProgress,
-                      minHeight: 5,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                ],
               ),
             ),
           ],
@@ -6044,13 +6626,12 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
   String? _createdAdminRole;
   String? _createdMountainName;
 
-  final _mountainController = TextEditingController();
+  String? _managedMountainName;
 
   @override
   void dispose() {
     _nameController.dispose();
     _emailController.dispose();
-    _mountainController.dispose();
     super.dispose();
   }
 
@@ -6068,13 +6649,13 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
             'email': _emailController.text.trim(),
             'adminRole': _adminRole,
             if (_adminRole == 'mountain_head')
-              'managedMountainName': _mountainController.text.trim(),
+              'managedMountainName': _managedMountainName,
           });
       final createdRole = result.data['adminRole'];
       final createdMountain = result.data['managedMountainName'];
       if (createdRole != _adminRole ||
           (_adminRole == 'mountain_head' &&
-              createdMountain != _mountainController.text.trim())) {
+              createdMountain != _managedMountainName)) {
         throw StateError(
           'Firebase did not confirm the selected admin role and mountain. '
           'The account may have been created with different access. '
@@ -6170,22 +6751,36 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                           ? null
                           : (value) {
                               if (value != null) {
-                                setState(() => _adminRole = value);
+                                setState(() {
+                                  _adminRole = value;
+                                  if (value != 'mountain_head') {
+                                    _managedMountainName = null;
+                                  }
+                                });
                               }
                             },
                     ),
                     if (_adminRole == 'mountain_head')
-                      TextFormField(
-                        controller: _mountainController,
+                      DropdownButtonFormField<String>(
+                        initialValue: _managedMountainName,
                         decoration: const InputDecoration(
                           labelText: 'Managed mountain',
-                          hintText:
-                              'Enter the mountain name exactly as used in submissions',
                         ),
+                        items: davaoMountains
+                            .map(
+                              (mountain) => DropdownMenuItem(
+                                value: mountain.name,
+                                child: Text(mountain.label),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: _creating
+                            ? null
+                            : (value) =>
+                                  setState(() => _managedMountainName = value),
                         validator: (value) {
-                          if (_adminRole == 'mountain_head' &&
-                              (value == null || value.trim().isEmpty)) {
-                            return 'Enter the managed mountain name.';
+                          if (_adminRole == 'mountain_head' && value == null) {
+                            return 'Choose the managed mountain.';
                           }
                           return null;
                         },

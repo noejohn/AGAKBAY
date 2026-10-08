@@ -34,9 +34,12 @@ async function resetEmulator() {
 }
 
 /** Creates an emulator account and returns { uid, idToken } for it. */
-async function createSignedInUser(email, displayName) {
+async function createSignedInUser(email, displayName, customClaims) {
   const password = "test-password-123";
   const user = await admin.auth().createUser({ email, password, displayName });
+  if (customClaims) {
+    await admin.auth().setCustomUserClaims(user.uid, customClaims);
+  }
   const response = await fetch(
     `http://${AUTH_HOST}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=fake-api-key`,
     {

@@ -6,6 +6,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../data/davao_mountains.dart';
 import '../services/gemini_client.dart';
 import '../widgets/agak_theme.dart';
 
@@ -24,8 +25,18 @@ DateTime? _reapplyCooldownEnd(Map<String, dynamic> data) {
 
 String _formatDate(DateTime date) {
   const months = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
   ];
   return '${months[date.month - 1]} ${date.day}, ${date.year}';
 }
@@ -37,7 +48,10 @@ String _formatDate(DateTime date) {
 /// reviewTourGuideApplication (functions/adminActions.js) does that, via
 /// the Admin SDK.
 class TourGuideApplicationStatusTile extends StatelessWidget {
-  const TourGuideApplicationStatusTile({super.key, required this.currentAccountType});
+  const TourGuideApplicationStatusTile({
+    super.key,
+    required this.currentAccountType,
+  });
 
   /// The signed-in user's own accountType field, if already loaded
   /// (avoids a second Firestore read just to know "am I already a guide").
@@ -71,7 +85,9 @@ class TourGuideApplicationStatusTile extends StatelessWidget {
           // Fails open to the tappable "apply" state rather than getting
           // stuck on "Checking status..." forever — most likely cause is
           // firestore.rules not deployed yet for this collection.
-          debugPrint('TourGuideApplicationStatusTile query failed: ${snapshot.error}');
+          debugPrint(
+            'TourGuideApplicationStatusTile query failed: ${snapshot.error}',
+          );
           return _applyTile(context);
         }
         if (!snapshot.hasData) {
@@ -105,11 +121,14 @@ class TourGuideApplicationStatusTile extends StatelessWidget {
         }
         if (status == 'rejected') {
           final canReapplyAt = _reapplyCooldownEnd(data);
-          final canReapplyNow = canReapplyAt == null || DateTime.now().isAfter(canReapplyAt);
+          final canReapplyNow =
+              canReapplyAt == null || DateTime.now().isAfter(canReapplyAt);
           return _tile(
             icon: Icons.badge_outlined,
             iconColor: AgakColors.maroon,
-            title: canReapplyNow ? 'Reapply as Tour Guide' : 'Application Not Approved',
+            title: canReapplyNow
+                ? 'Reapply as Tour Guide'
+                : 'Application Not Approved',
             subtitle: canReapplyNow
                 ? 'Your last application was not approved. Tap to reapply.'
                 : 'You can reapply on ${_formatDate(canReapplyAt)}.',
@@ -146,7 +165,9 @@ class TourGuideApplicationStatusTile extends StatelessWidget {
       subtitle: subtitle,
       trailing: Icons.chevron_right_rounded,
       onTap: () => Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => const TourGuideApplicationScreen()),
+        MaterialPageRoute<void>(
+          builder: (_) => const TourGuideApplicationScreen(),
+        ),
       ),
     );
   }
@@ -184,12 +205,18 @@ class TourGuideApplicationStatusTile extends StatelessWidget {
                   children: [
                     Text(
                       title,
-                      style: const TextStyle(fontWeight: FontWeight.w800, color: AgakColors.ink),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: AgakColors.ink,
+                      ),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       subtitle,
-                      style: TextStyle(fontSize: 12.5, color: AgakColors.ink.withValues(alpha: 0.6)),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: AgakColors.ink.withValues(alpha: 0.6),
+                      ),
                     ),
                   ],
                 ),
@@ -208,14 +235,16 @@ class TourGuideApplicationScreen extends StatefulWidget {
   const TourGuideApplicationScreen({super.key});
 
   @override
-  State<TourGuideApplicationScreen> createState() => _TourGuideApplicationScreenState();
+  State<TourGuideApplicationScreen> createState() =>
+      _TourGuideApplicationScreenState();
 }
 
-class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen> {
+class _TourGuideApplicationScreenState
+    extends State<TourGuideApplicationScreen> {
   final _fullNameController = TextEditingController();
   final _contactController = TextEditingController();
   final _experienceController = TextEditingController();
-  final _mountainsController = TextEditingController();
+  final List<String> _selectedMountains = [];
 
   Uint8List? _idImageBytes;
   String? _idImageMimeType;
@@ -228,7 +257,8 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
   @override
   void initState() {
     super.initState();
-    _fullNameController.text = FirebaseAuth.instance.currentUser?.displayName ?? '';
+    _fullNameController.text =
+        FirebaseAuth.instance.currentUser?.displayName ?? '';
   }
 
   @override
@@ -236,7 +266,6 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
     _fullNameController.dispose();
     _contactController.dispose();
     _experienceController.dispose();
-    _mountainsController.dispose();
     super.dispose();
   }
 
@@ -292,7 +321,10 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
   /// Null means "couldn't check" (no/exhausted Gemini key, network error) —
   /// callers must treat that as "allow it" (admin still reviews manually
   /// before final approval), never as "definitely invalid".
-  Future<bool?> _looksLikeGovernmentId(Uint8List bytes, String? mimeType) async {
+  Future<bool?> _looksLikeGovernmentId(
+    Uint8List bytes,
+    String? mimeType,
+  ) async {
     final apiKey = await loadGeminiApiKey();
     if (apiKey.isEmpty) {
       return null;
@@ -312,13 +344,21 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
     return answer.toUpperCase().contains('YES');
   }
 
-  Future<String> _uploadImage(Uint8List bytes, String? mimeType, String uid, String fileName) async {
+  Future<String> _uploadImage(
+    Uint8List bytes,
+    String? mimeType,
+    String uid,
+    String fileName,
+  ) async {
     final ref = FirebaseStorage.instance
         .ref()
         .child('tour_guide_applications')
         .child(uid)
         .child(fileName);
-    await ref.putData(bytes, SettableMetadata(contentType: mimeType ?? 'image/jpeg'));
+    await ref.putData(
+      bytes,
+      SettableMetadata(contentType: mimeType ?? 'image/jpeg'),
+    );
     return ref.getDownloadURL();
   }
 
@@ -331,30 +371,35 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
     final fullName = _fullNameController.text.trim();
     final contact = _contactController.text.trim();
     final experience = _experienceController.text.trim();
-    final mountains = _mountainsController.text.trim();
-    final mountainNames = mountains
-        .split(RegExp(r'[,;\n]'))
-        .map((name) => name.trim())
-        .where((name) => name.isNotEmpty)
-        .toSet()
-        .toList();
+    final mountainNames = List<String>.of(_selectedMountains);
+    final mountains = mountainNames.join(', ');
 
-    if (fullName.isEmpty || contact.isEmpty || experience.isEmpty || mountains.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Please complete all fields.')));
+    if (fullName.isEmpty ||
+        contact.isEmpty ||
+        experience.isEmpty ||
+        mountainNames.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please complete all fields.')),
+      );
       return;
     }
     if (_idImageBytes == null || _certificateImageBytes == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please upload both your ID and certificate.')),
+        const SnackBar(
+          content: Text('Please upload both your ID and certificate.'),
+        ),
       );
       return;
     }
 
     setState(() => _submitting = true);
     try {
-      final idUrl = await _uploadImage(_idImageBytes!, _idImageMimeType, user.uid, 'id.jpg');
+      final idUrl = await _uploadImage(
+        _idImageBytes!,
+        _idImageMimeType,
+        user.uid,
+        'id.jpg',
+      );
       final certUrl = await _uploadImage(
         _certificateImageBytes!,
         _certificateImageMimeType,
@@ -362,28 +407,34 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
         'certificate.jpg',
       );
 
-      await FirebaseFirestore.instance.collection('tour_guide_applications').add({
-        'uid': user.uid,
-        'applicantEmail': user.email,
-        'fullName': fullName,
-        'contactNumber': contact,
-        'experienceYears': experience,
-        'mountainsHandled': mountains,
-        'mountainNames': mountainNames,
-        'idImageUrl': idUrl,
-        'certificateImageUrl': certUrl,
-        'status': 'pending',
-        'submittedAt': FieldValue.serverTimestamp(),
-        'reviewedAt': null,
-        'reviewedBy': null,
-        'reviewNote': null,
-      });
+      await FirebaseFirestore.instance
+          .collection('tour_guide_applications')
+          .add({
+            'uid': user.uid,
+            'applicantEmail': user.email,
+            'fullName': fullName,
+            'contactNumber': contact,
+            'experienceYears': experience,
+            'mountainsHandled': mountains,
+            'mountainNames': mountainNames,
+            'idImageUrl': idUrl,
+            'certificateImageUrl': certUrl,
+            'status': 'pending',
+            'submittedAt': FieldValue.serverTimestamp(),
+            'reviewedAt': null,
+            'reviewedBy': null,
+            'reviewNote': null,
+          });
 
       if (!mounted) {
         return;
       }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Application submitted! We'll notify you once it's reviewed.")),
+        const SnackBar(
+          content: Text(
+            "Application submitted! We'll notify you once it's reviewed.",
+          ),
+        ),
       );
       Navigator.of(context).pop();
     } catch (error) {
@@ -412,7 +463,10 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
               Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.arrow_back_rounded, color: AgakColors.ink),
+                    icon: const Icon(
+                      Icons.arrow_back_rounded,
+                      color: AgakColors.ink,
+                    ),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                   const SizedBox(width: 4),
@@ -435,7 +489,9 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
                   'Submit your details, ID, and a relevant certification. '
                   'An admin will review your application before your account '
                   'is upgraded.',
-                  style: TextStyle(color: AgakColors.ink.withValues(alpha: 0.65)),
+                  style: TextStyle(
+                    color: AgakColors.ink.withValues(alpha: 0.65),
+                  ),
                 ),
               ),
               const SizedBox(height: 20),
@@ -457,11 +513,53 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
               ),
               const SizedBox(height: 14),
               _label('Mountains Handled'),
-              _textField(
-                _mountainsController,
-                hint: 'e.g. Mt. Apo, Mt. Kitanglad',
-                maxLines: 2,
+              DropdownButtonFormField<String>(
+                initialValue: _selectedMountains.isEmpty
+                    ? null
+                    : _selectedMountains.last,
+                decoration: const InputDecoration(
+                  hintText: 'Choose a mountain',
+                  helperText: 'Choose all mountains you guide at.',
+                  border: OutlineInputBorder(),
+                ),
+                items: davaoMountains
+                    .map(
+                      (mountain) => DropdownMenuItem(
+                        value: mountain.name,
+                        child: Text(mountain.label),
+                      ),
+                    )
+                    .toList(),
+                onChanged: _submitting
+                    ? null
+                    : (name) {
+                        if (name != null &&
+                            !_selectedMountains.contains(name)) {
+                          setState(() => _selectedMountains.add(name));
+                        }
+                      },
+                validator: (_) => _selectedMountains.isEmpty
+                    ? 'Choose at least one mountain.'
+                    : null,
               ),
+              if (_selectedMountains.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final mountain in _selectedMountains)
+                      InputChip(
+                        label: Text(mountain),
+                        onDeleted: _submitting
+                            ? null
+                            : () => setState(
+                                () => _selectedMountains.remove(mountain),
+                              ),
+                      ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 20),
               _label('Government ID'),
               _imagePickerTile(
@@ -482,15 +580,23 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
                   onPressed: _submitting ? null : _submit,
                   style: FilledButton.styleFrom(
                     backgroundColor: AgakColors.maroon,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
                   ),
                   child: _submitting
                       ? const SizedBox(
                           width: 20,
                           height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
                         )
-                      : const Text('Submit Application', style: TextStyle(fontWeight: FontWeight.w800)),
+                      : const Text(
+                          'Submit Application',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
                 ),
               ),
             ],
@@ -557,18 +663,29 @@ class _TourGuideApplicationScreenState extends State<TourGuideApplicationScreen>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.add_a_photo_outlined, color: AgakColors.ink.withValues(alpha: 0.4)),
+                    Icon(
+                      Icons.add_a_photo_outlined,
+                      color: AgakColors.ink.withValues(alpha: 0.4),
+                    ),
                     const SizedBox(height: 6),
                     Text(
                       'Tap to upload',
-                      style: TextStyle(color: AgakColors.ink.withValues(alpha: 0.5), fontSize: 12),
+                      style: TextStyle(
+                        color: AgakColors.ink.withValues(alpha: 0.5),
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),
               )
             : ClipRRect(
                 borderRadius: BorderRadius.circular(14),
-                child: Image.memory(bytes, fit: BoxFit.cover, width: double.infinity, height: 120),
+                child: Image.memory(
+                  bytes,
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: 120,
+                ),
               ),
       ),
     );
@@ -605,7 +722,10 @@ class TourGuideApplicationStatusScreen extends StatelessWidget {
               Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.arrow_back_rounded, color: AgakColors.ink),
+                    icon: const Icon(
+                      Icons.arrow_back_rounded,
+                      color: AgakColors.ink,
+                    ),
                     onPressed: () => Navigator.of(context).pop(),
                   ),
                   const SizedBox(width: 4),
@@ -624,19 +744,29 @@ class TourGuideApplicationStatusScreen extends StatelessWidget {
               const SizedBox(height: 20),
               Container(
                 padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(18)),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                       decoration: BoxDecoration(
                         color: statusColor.withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: Text(
                         statusLabel,
-                        style: TextStyle(color: statusColor, fontWeight: FontWeight.w700, fontSize: 13),
+                        style: TextStyle(
+                          color: statusColor,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 13,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 18),
@@ -644,7 +774,8 @@ class TourGuideApplicationStatusScreen extends StatelessWidget {
                     _statusField('Contact Number', contact),
                     _statusField('Years of Experience', experience),
                     _statusField('Mountains Handled', mountains),
-                    if (reviewNote != null && reviewNote.isNotEmpty) _statusField('Admin Note', reviewNote),
+                    if (reviewNote != null && reviewNote.isNotEmpty)
+                      _statusField('Admin Note', reviewNote),
                   ],
                 ),
               ),
@@ -653,12 +784,16 @@ class TourGuideApplicationStatusScreen extends StatelessWidget {
                 Builder(
                   builder: (context) {
                     final canReapplyAt = _reapplyCooldownEnd(data);
-                    final canReapplyNow = canReapplyAt == null || DateTime.now().isAfter(canReapplyAt);
+                    final canReapplyNow =
+                        canReapplyAt == null ||
+                        DateTime.now().isAfter(canReapplyAt);
                     if (!canReapplyNow) {
                       return Text(
                         'You can reapply on ${_formatDate(canReapplyAt)}.',
                         textAlign: TextAlign.center,
-                        style: TextStyle(color: AgakColors.ink.withValues(alpha: 0.6)),
+                        style: TextStyle(
+                          color: AgakColors.ink.withValues(alpha: 0.6),
+                        ),
                       );
                     }
                     return SizedBox(
@@ -671,9 +806,14 @@ class TourGuideApplicationStatusScreen extends StatelessWidget {
                         ),
                         style: FilledButton.styleFrom(
                           backgroundColor: AgakColors.maroon,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
                         ),
-                        child: const Text('Reapply', style: TextStyle(fontWeight: FontWeight.w800)),
+                        child: const Text(
+                          'Reapply',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
                       ),
                     );
                   },
@@ -701,7 +841,13 @@ class TourGuideApplicationStatusScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 3),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w600, color: AgakColors.ink)),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              color: AgakColors.ink,
+            ),
+          ),
         ],
       ),
     );

@@ -20,8 +20,71 @@ const {
   isWetWeatherCode,
   hikeWeatherRisk,
   buildWeatherSnapshot,
+  buildHikeRoomHistoryRecord,
 } = require("./index");
 const { weatherCacheKey } = require("./redisCache");
+
+describe("buildHikeRoomHistoryRecord", () => {
+  const startedAt = { toMillis: () => 1000 };
+  const endedAt = { toMillis: () => 3_601_000 };
+
+  it("stores the hike session and participant activity history", () => {
+    const record = buildHikeRoomHistoryRecord({
+      roomId: "room-1",
+      before: { status: "active", startedAt },
+      after: {
+        status: "ended",
+        endedAt,
+        roomCode: "123456",
+        mountainName: "Mount Apo",
+        guideId: "guide-1",
+        guideName: "Guide Gina",
+        routeName: "Main trail",
+      },
+      participants: [{
+        userId: "hiker-1",
+        name: "Hiker Juan",
+        membershipStatus: "room_ended",
+        activityStatus: "in_room",
+        joinedAt: startedAt,
+        hikingStartedAt: endedAt,
+      }],
+    });
+
+    expect(record).toMatchObject({
+      roomId: "room-1",
+      roomCode: "123456",
+      mountainName: "Mount Apo",
+      guideId: "guide-1",
+      guideName: "Guide Gina",
+      durationSeconds: 3600,
+      participantCount: 1,
+      participants: [{
+        userId: "hiker-1",
+        name: "Hiker Juan",
+        membershipStatus: "room_ended",
+        activityStatus: "in_room",
+        joinedAt: startedAt,
+        hikingStartedAt: endedAt,
+      }],
+    });
+  });
+
+  it("only records a completed room that was active", () => {
+    const event = {
+      roomId: "room-1",
+      before: { status: "waiting" },
+      after: { status: "ended" },
+      participants: [],
+    };
+    expect(buildHikeRoomHistoryRecord(event)).toBeNull();
+    expect(buildHikeRoomHistoryRecord({
+      ...event,
+      before: { status: "active" },
+      after: { status: "active" },
+    })).toBeNull();
+  });
+});
 
 describe("randomSixDigitCode", () => {
   it("returns a 6-digit numeric string", () => {

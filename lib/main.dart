@@ -20,6 +20,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
+import 'package:tunga/admin/incident_report_dialog.dart';
 import 'package:tunga/screens/account_suspended_screen.dart';
 import 'package:tunga/services/kyrielle_rag_service.dart';
 import 'package:tunga/screens/kyrielle_companion_chat_screen.dart';
@@ -50,12 +51,11 @@ import 'package:tunga/widgets/agak_floating_companion.dart';
 import 'package:tunga/widgets/agak_dialogs.dart';
 import 'package:tunga/widgets/agak_theme.dart';
 import 'package:tunga/widgets/agak_tip_popup.dart';
+import 'package:tunga/widgets/incident_report_prompt.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
 import 'package:tunga/widgets/sos_reason_picker.dart';
 import 'package:tunga/services/nearby_sos_service.dart';
 import 'package:url_launcher/url_launcher.dart';
-
-
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -3935,11 +3935,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   /// AGAK-styled popup for the result of a profile edit (name, photo,
   /// contact number, emergency contact) instead of a plain snackbar.
-  void _showProfileResult(
-    String title,
-    String message, {
-    bool success = true,
-  }) {
+  void _showProfileResult(String title, String message, {bool success = true}) {
     if (!mounted) return;
     unawaited(
       showAgakResultPopup(
@@ -7835,12 +7831,40 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 return Column(
                   children: [
                     for (var index = 0; index < docs.length; index++) ...[
-                      _notificationRow(
-                        docs[index].data(),
-                        onTap: docs[index].data()['read'] == true
-                            ? null
-                            : () =>
-                                  _markNotificationRead(user.uid, docs[index].id),
+                      Builder(
+                        builder: (notificationContext) {
+                          final data = docs[index].data();
+                          final isIncidentStatus =
+                              data['type'] == 'incident_report_status';
+                          final unread = data['read'] != true;
+                          return _notificationRow(
+                            data,
+                            onTap: !unread && !isIncidentStatus
+                                ? null
+                                : () async {
+                                    if (unread) {
+                                      await _markNotificationRead(
+                                        user.uid,
+                                        docs[index].id,
+                                      );
+                                    }
+                                    final reportId = data['reportId']
+                                        ?.toString();
+                                    if (isIncidentStatus &&
+                                        reportId != null &&
+                                        notificationContext.mounted) {
+                                      await showDialog<void>(
+                                        context: notificationContext,
+                                        builder: (dialogContext) =>
+                                            IncidentReportDialog(
+                                              reportId: reportId,
+                                              canRespond: false,
+                                            ),
+                                      );
+                                    }
+                                  },
+                          );
+                        },
                       ),
                       if (index != docs.length - 1)
                         Divider(color: Colors.white.withValues(alpha: 0.08)),
@@ -7866,6 +7890,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'like' => const Color(0xFFFF7A7A),
       'guide_application' => AgakColors.olive,
       'hiker_stopped' => Colors.orange,
+      'incident_report_status' => const Color(0xFFFFD76A),
       _ => const Color(0xFF48D1FF),
     };
     final icon = switch (type) {
@@ -7876,6 +7901,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'safety' => Icons.health_and_safety_rounded,
       'guide_application' => Icons.badge_rounded,
       'hiker_stopped' => Icons.pan_tool_rounded,
+      'incident_report_status' => Icons.assignment_turned_in_rounded,
       _ => Icons.notifications_none_rounded,
     };
     DateTime? date;
@@ -16911,6 +16937,14 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                                         widget.hikeRoom!.id,
                                         event.id,
                                       );
+                                      if (context.mounted &&
+                                          widget.hikeRoom != null) {
+                                        await offerIncidentReportAfterSosAcknowledged(
+                                          context,
+                                          room: widget.hikeRoom!,
+                                          event: event,
+                                        );
+                                      }
                                     } catch (error) {
                                       if (context.mounted) {
                                         ScaffoldMessenger.of(

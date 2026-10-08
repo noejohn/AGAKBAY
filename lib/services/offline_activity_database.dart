@@ -158,6 +158,18 @@ class PendingTrailSubmission {
   final DateTime createdAt;
 }
 
+class PendingIncidentReport {
+  const PendingIncidentReport({
+    required this.id,
+    required this.payload,
+    required this.createdAt,
+  });
+
+  final String id;
+  final Map<String, dynamic> payload;
+  final DateTime createdAt;
+}
+
 class OfflineActivityDatabase {
   OfflineActivityDatabase._();
 
@@ -173,7 +185,7 @@ class OfflineActivityDatabase {
     final path = p.join(dbPath, 'offline_activities.db');
     final opened = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE activities (
@@ -213,10 +225,14 @@ class OfflineActivityDatabase {
           'CREATE INDEX idx_activities_sync ON activities(synced, status)',
         );
         await _createPendingTrailSubmissionsTable(db);
+        await _createPendingIncidentReportsTable(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await _createPendingTrailSubmissionsTable(db);
+        }
+        if (oldVersion < 3) {
+          await _createPendingIncidentReportsTable(db);
         }
       },
     );
@@ -401,6 +417,54 @@ class OfflineActivityDatabase {
     );
   }
 
+  Future<String> queueIncidentReport(
+    Map<String, dynamic> payload, {
+    String? id,
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toUtc();
+    final reportId = id ?? 'incident_${now.microsecondsSinceEpoch}';
+    await db.insert('pending_incident_reports', {
+      'id': reportId,
+      'payload_json': jsonEncode(payload),
+      'created_at': now.millisecondsSinceEpoch,
+      'synced': 0,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    return reportId;
+  }
+
+  Future<List<PendingIncidentReport>> getPendingIncidentReports() async {
+    final db = await database;
+    final rows = await db.query(
+      'pending_incident_reports',
+      where: 'synced = 0',
+      orderBy: 'created_at ASC',
+    );
+    return rows
+        .map((row) {
+          final decoded = jsonDecode(row['payload_json'] as String);
+          return PendingIncidentReport(
+            id: row['id'] as String,
+            payload: Map<String, dynamic>.from(decoded as Map),
+            createdAt: DateTime.fromMillisecondsSinceEpoch(
+              row['created_at'] as int,
+              isUtc: true,
+            ).toLocal(),
+          );
+        })
+        .toList(growable: false);
+  }
+
+  Future<void> markIncidentReportSynced(String id) async {
+    final db = await database;
+    await db.update(
+      'pending_incident_reports',
+      {'synced': 1, 'synced_at': DateTime.now().toUtc().millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
   static Future<void> _createPendingTrailSubmissionsTable(Database db) async {
     await db.execute('''
       CREATE TABLE IF NOT EXISTS pending_trail_submissions (
@@ -414,6 +478,22 @@ class OfflineActivityDatabase {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_trail_submissions_sync '
       'ON pending_trail_submissions(synced, created_at)',
+    );
+  }
+
+  static Future<void> _createPendingIncidentReportsTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS pending_incident_reports (
+        id TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        synced INTEGER NOT NULL DEFAULT 0,
+        synced_at INTEGER
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_incident_reports_sync '
+      'ON pending_incident_reports(synced, created_at)',
     );
   }
 }

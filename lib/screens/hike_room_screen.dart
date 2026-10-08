@@ -8,6 +8,7 @@ import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/services/heltec_ble_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
 import 'package:tunga/widgets/offline_map_widget.dart';
+import 'package:tunga/widgets/incident_report_prompt.dart';
 import 'package:tunga/widgets/sos_reason_picker.dart';
 
 class HikeRoomScreen extends StatefulWidget {
@@ -766,7 +767,11 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 8),
-          _SosList(roomId: room.id, service: _service, isGuide: _isGuide),
+          _SosList(
+            room: room,
+            service: _service,
+            isGuide: _isGuide,
+          ),
           if (_isGuide) ...[
             const SizedBox(height: 20),
             Text(
@@ -779,7 +784,7 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
             _StoppedHikersList(roomId: room.id, service: _service),
             const _OfflineStopRelayCard(),
           ],
-          const _OfflineSosRelayCard(),
+          _OfflineSosRelayCard(room: room, isGuide: _isGuide),
           const SizedBox(height: 16),
           _HikeRoomPolicyCard(
             roomId: room.id,
@@ -1155,7 +1160,10 @@ class _HeltecStatusCard extends StatelessWidget {
 /// internet/cellular signal. Sits alongside [_SosList] (the internet path)
 /// rather than replacing it.
 class _OfflineSosRelayCard extends StatelessWidget {
-  const _OfflineSosRelayCard();
+  const _OfflineSosRelayCard({required this.room, required this.isGuide});
+
+  final HikeRoom room;
+  final bool isGuide;
 
   @override
   Widget build(BuildContext context) {
@@ -1167,13 +1175,13 @@ class _OfflineSosRelayCard extends StatelessWidget {
         final lat = ble.lastRelayLatitude;
         final lon = ble.lastRelayLongitude;
         final at = ble.lastRelayAt;
-        if (name == null || lat == null || lon == null) {
+        if (name == null) {
           return const SizedBox.shrink();
         }
         final minutesAgo = at == null
             ? null
             : DateTime.now().difference(at).inMinutes;
-        final hasFix = ble.lastRelayHasFix;
+        final hasFix = ble.lastRelayHasFix && lat != null && lon != null;
         final reason = ble.lastRelayReason;
         return Padding(
           padding: const EdgeInsets.only(top: 10),
@@ -1188,6 +1196,20 @@ class _OfflineSosRelayCard extends StatelessWidget {
                 '${minutesAgo == null ? 'Just now' : '$minutesAgo min ago'} • no internet used',
               ),
               isThreeLine: true,
+              trailing: isGuide && isIncidentReportWorthySos(reason)
+                  ? FilledButton(
+                      onPressed: () => offerIncidentReportForOfflineSos(
+                        context,
+                        room: room,
+                        senderName: name,
+                        reason: reason,
+                        latitude: hasFix ? lat : null,
+                        longitude: hasFix ? lon : null,
+                        receivedAt: at,
+                      ),
+                      child: const Text('Acknowledge & report'),
+                    )
+                  : null,
             ),
           ),
         );
@@ -1460,12 +1482,12 @@ class _GuideParticipantCountSync extends StatelessWidget {
 
 class _SosList extends StatelessWidget {
   const _SosList({
-    required this.roomId,
+    required this.room,
     required this.service,
     required this.isGuide,
   });
 
-  final String roomId;
+  final HikeRoom room;
   final HikeRoomService service;
 
   /// Only the room's guide can actually acknowledge an SOS — enforced
@@ -1476,7 +1498,7 @@ class _SosList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<List<RoomSosEvent>>(
-      stream: service.watchSosEvents(roomId),
+      stream: service.watchSosEvents(room.id),
       builder: (context, snapshot) {
         final events = snapshot.data ?? const [];
         if (events.isEmpty) {
@@ -1515,7 +1537,14 @@ class _SosList extends StatelessWidget {
                         : FilledButton(
                             onPressed: () async {
                               try {
-                                await service.acknowledgeSos(roomId, event.id);
+                                await service.acknowledgeSos(room.id, event.id);
+                                if (context.mounted) {
+                                  await offerIncidentReportAfterSosAcknowledged(
+                                    context,
+                                    room: room,
+                                    event: event,
+                                  );
+                                }
                               } catch (error) {
                                 if (!context.mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(

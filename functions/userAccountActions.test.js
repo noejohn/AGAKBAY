@@ -71,7 +71,7 @@ it("persists and returns the selected Mountain Head role and mountain", async ()
         fullName: "Mountain Head",
         email: "head@example.com",
         adminRole: "mountain_head",
-        managedMountainName: "Mt. Apo",
+        managedMountainName: "mT apo",
       },
     }),
   ).resolves.toMatchObject({

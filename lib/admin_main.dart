@@ -275,7 +275,6 @@ class _SignInCard extends StatelessWidget {
                   keyboardType: TextInputType.emailAddress,
                   onSubmitted: (_) => loading ? null : onSignIn(),
                   decoration: const InputDecoration(
-                    hintText: 'admin@agakbay.ph',
                     prefixIcon: Icon(Icons.mail_outline),
                     border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(10))),
                   ),
@@ -288,7 +287,6 @@ class _SignInCard extends StatelessWidget {
                   obscureText: true,
                   onSubmitted: (_) => loading ? null : onSignIn(),
                   decoration: const InputDecoration(
-                    hintText: '••••••••',
                     prefixIcon: Icon(Icons.lock_outline),
                     border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(10))),
                   ),

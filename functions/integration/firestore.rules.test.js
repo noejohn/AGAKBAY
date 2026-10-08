@@ -12,9 +12,15 @@ const {
 } = require("@firebase/rules-unit-testing");
 const {
   doc,
+  collection,
+  getDocs,
   getDoc,
+  limit,
+  orderBy,
+  query,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
   deleteField,
   deleteDoc,
@@ -57,6 +63,13 @@ const asGuide = () => testEnv.authenticatedContext("guide-1").firestore();
 const asSignedOut = () => testEnv.unauthenticatedContext().firestore();
 const asTourismAdmin = () => testEnv
   .authenticatedContext("admin-1", { admin: true, adminRole: "tourism_admin" })
+  .firestore();
+const asMountainHead = (mountainName = "Mount Apo") => testEnv
+  .authenticatedContext("mountain-head-1", {
+    admin: true,
+    adminRole: "mountain_head",
+    managedMountainName: mountainName,
+  })
   .firestore();
 
 /** Writes starting data with the rules switched off (like the Admin SDK). */
@@ -333,6 +346,154 @@ describe("sos_events — emergency alerts", () => {
   test("nobody can read the SOS cooldown records", async () => {
     await seed({ "hike_rooms/room-1/sos_cooldowns/hiker-1": { nextAllowedAt: 1 } });
     await assertFails(getDoc(doc(asHiker(), "hike_rooms/room-1/sos_cooldowns/hiker-1")));
+  });
+});
+
+describe("incident_reports — guide reports", () => {
+  beforeEach(() => seed({
+    "users/guide-1": { accountType: "tour_guide" },
+    "incident_reports/report-1": {
+      guideId: "guide-1",
+      mountainName: "Mount Apo",
+      status: "submitted",
+      createdAt: new Date("2026-10-08T00:00:00Z"),
+    },
+    "incident_reports/report-2": {
+      guideId: "guide-1",
+      mountainName: "Mount Talomo",
+      status: "submitted",
+      createdAt: new Date("2026-10-07T00:00:00Z"),
+    },
+    "notifications/incident-1": {
+      type: "incident_report",
+      mountainName: "Mount Apo",
+      isRead: false,
+    },
+    "users/guide-1/notifications/incident-status": {
+      type: "incident_report_status",
+      reportId: "report-1",
+      status: "responded",
+      read: false,
+    },
+  }));
+
+  test("the guide who filed the report can read its updated filed status", async () => {
+    await assertSucceeds(
+      getDoc(doc(asGuide(), "incident_reports/report-1")),
+    );
+    await assertSucceeds(
+      getDoc(doc(asGuide(), "users/guide-1/notifications/incident-status")),
+    );
+    await assertFails(
+      getDoc(doc(asOtherHiker(), "incident_reports/report-1")),
+    );
+  });
+
+  test("the Mountain Head can read incident reports for their assigned mountain", async () => {
+    await assertSucceeds(
+      getDoc(doc(asMountainHead(), "incident_reports/report-1")),
+    );
+    await assertFails(
+      getDoc(doc(asMountainHead(), "incident_reports/report-2")),
+    );
+  });
+
+  test("the report dashboard query is scoped to the Mountain Head's mountain", async () => {
+    const reports = query(
+      collection(asMountainHead(), "incident_reports"),
+      where("mountainName", "==", "Mount Apo"),
+      orderBy("createdAt", "desc"),
+      limit(100),
+    );
+    const result = await assertSucceeds(getDocs(reports));
+    expect(result.docs.map((report) => report.id)).toEqual(["report-1"]);
+
+    await assertFails(
+      getDocs(
+        query(
+          collection(asMountainHead(), "incident_reports"),
+          orderBy("createdAt", "desc"),
+          limit(100),
+        ),
+      ),
+    );
+  });
+
+  test("Tourism Admin can query reports across mountains", async () => {
+    const result = await assertSucceeds(
+      getDocs(
+        query(
+          collection(asTourismAdmin(), "incident_reports"),
+          orderBy("createdAt", "desc"),
+          limit(100),
+        ),
+      ),
+    );
+    expect(result.size).toBe(2);
+  });
+
+  test("only the assigned Mountain Head can read its incident notification", async () => {
+    await assertSucceeds(
+      getDoc(doc(asMountainHead(), "notifications/incident-1")),
+    );
+    await assertFails(
+      getDoc(
+        doc(asMountainHead("Mount Talomo"), "notifications/incident-1"),
+      ),
+    );
+  });
+
+  test("clients CANNOT create or change incident reports", async () => {
+    await assertFails(setDoc(doc(asGuide(), "incident_reports/report-3"), {
+      guideId: "guide-1",
+      mountainName: "Mount Apo",
+      status: "submitted",
+    }));
+    await assertFails(
+      updateDoc(doc(asGuide(), "incident_reports/report-1"), {
+        status: "edited",
+      }),
+    );
+  });
+});
+
+describe("hike_room_history — admin-only records", () => {
+  beforeEach(() => seed({
+    "hike_room_history/room-1": {
+      mountainName: "Mount Apo",
+      guideId: "guide-1",
+      participants: [{ userId: "hiker-1", name: "Juan" }],
+    },
+    "hike_room_history/room-2": {
+      mountainName: "Mount Talomo",
+      guideId: "guide-1",
+      participants: [],
+    },
+  }));
+
+  test("admins can read history only for their permitted scope", async () => {
+    await assertSucceeds(
+      getDoc(doc(asTourismAdmin(), "hike_room_history/room-1")),
+    );
+    await assertSucceeds(
+      getDoc(doc(asMountainHead(), "hike_room_history/room-1")),
+    );
+    await assertFails(
+      getDoc(doc(asMountainHead("Mount Talomo"), "hike_room_history/room-1")),
+    );
+    await assertFails(getDoc(doc(asGuide(), "hike_room_history/room-1")));
+    await assertFails(getDoc(doc(asHiker(), "hike_room_history/room-1")));
+  });
+
+  test("clients CANNOT create or modify hike history", async () => {
+    await assertFails(setDoc(doc(asTourismAdmin(), "hike_room_history/room-3"), {
+      mountainName: "Mount Apo",
+    }));
+    await assertFails(
+      updateDoc(doc(asTourismAdmin(), "hike_room_history/room-1"), {
+        guideName: "Changed",
+      }),
+    );
   });
 });
 

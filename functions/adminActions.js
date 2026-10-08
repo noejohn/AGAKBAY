@@ -5,6 +5,7 @@ const {
   assertMountainHead,
   normalizeMountainNames,
 } = require("./adminAuthorization");
+const { normalizeMountainName } = require("./mountainNames");
 
 // Called from the Admin Web dashboard's Tour Guide Verification page.
 // Gated on the `admin` custom claim (mirrored by exchangeAuth0Token from
@@ -152,9 +153,9 @@ exports.recommendAdminReview = onCall(
       throw new HttpsError("failed-precondition", "This item has already been reviewed.");
     }
 
-    const assignedMountain = managedMountainName.toLocaleLowerCase();
+    const assignedMountain = normalizeMountainName(managedMountainName);
     const mountainMatches = targetType === "trail_submission"
-      ? String(target.mountainName || "").trim().toLocaleLowerCase() === assignedMountain
+      ? normalizeMountainName(String(target.mountainName || "")) === assignedMountain
       : normalizeMountainNames(target.mountainNames ?? target.mountainsHandled)
         .includes(assignedMountain);
     if (!mountainMatches) {

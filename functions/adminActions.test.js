@@ -122,6 +122,35 @@ it("accepts a mountain-matched recommendation without changing application statu
   );
 });
 
+it("matches guide applications regardless of mountain-name case and Mt/Mount spelling", async () => {
+  mockAppDocGet.mockResolvedValue({
+    exists: true,
+    data: () => ({
+      uid: "guide-1",
+      status: "pending",
+      mountainNames: ["mT apo"],
+    }),
+  });
+
+  await expect(
+    callRecommendation(
+      {
+        targetType: "tour_guide_application",
+        targetId: "app-1",
+        decision: "approve",
+      },
+      {
+        uid: "head-uid",
+        token: {
+          admin: true,
+          adminRole: "mountain_head",
+          managedMountainName: "Mount Apo",
+        },
+      },
+    ),
+  ).resolves.toMatchObject({ decision: "approve" });
+});
+
 it("rejects a Mountain Head recommendation outside its assigned mountain", async () => {
   mockAppDocGet.mockResolvedValue({
     exists: true,

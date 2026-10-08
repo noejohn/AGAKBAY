@@ -33,6 +33,7 @@ const { backfillAuditLogNames } = require("./auditLogMaintenance");
 const { reviewTrailSubmission } = require("./trailReview");
 const { sanitizeRoutePoints } = require("./routePoints");
 const { sendNearbySos } = require("./nearbySos");
+const { assertMountainHead } = require("./adminAuthorization");
 
 admin.initializeApp();
 
@@ -53,6 +54,175 @@ exports.backfillAuditLogNames = backfillAuditLogNames;
 exports.reviewTrailSubmission = reviewTrailSubmission;
 exports.sanitizeRoutePoints = sanitizeRoutePoints;
 exports.sendNearbySos = sendNearbySos;
+
+function buildHikeRoomHistoryRecord({ roomId, before, after, participants }) {
+  if (before?.status !== "active" || after?.status !== "ended") return null;
+  const startedAt = before.startedAt || after.startedAt || null;
+  const endedAt = after.endedAt || null;
+  const durationSeconds = startedAt && endedAt &&
+      typeof startedAt.toMillis === "function" &&
+      typeof endedAt.toMillis === "function"
+    ? Math.max(0, Math.floor((endedAt.toMillis() - startedAt.toMillis()) / 1000))
+    : null;
+  return {
+    roomId,
+    roomCode: String(after.roomCode || ""),
+    mountainName: String(after.mountainName || "Unnamed hike"),
+    mountainPlaceId: String(after.mountainPlaceId || ""),
+    routeName: String(after.routeName || ""),
+    guideId: String(after.guideId || ""),
+    guideName: String(after.guideName || "Tour Guide"),
+    startedAt,
+    endedAt,
+    durationSeconds,
+    participantCount: participants.length,
+    participants: participants.map((participant) => ({
+      userId: participant.userId,
+      name: String(participant.name || "Hiker"),
+      role: String(participant.role || "hiker"),
+      membershipStatus: String(participant.membershipStatus || "active"),
+      activityStatus: String(participant.activityStatus || "in_room"),
+      joinedAt: participant.joinedAt || null,
+      hikingStartedAt: participant.hikingStartedAt || null,
+      returnedToRoomAt: participant.returnedToRoomAt || null,
+      stoppedAt: participant.stoppedAt || null,
+      stopReason: String(participant.stopReason || ""),
+      leftAt: participant.leftAt || null,
+      removedAt: participant.removedAt || null,
+    })),
+    recordedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+}
+exports.buildHikeRoomHistoryRecord = buildHikeRoomHistoryRecord;
+
+exports.recordCompletedHikeRoom = onDocumentUpdated(
+  {
+    document: "hike_rooms/{roomId}",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!before || !after || before.status !== "active" || after.status !== "ended") {
+      return;
+    }
+    const roomId = event.params.roomId;
+    const db = admin.firestore();
+    const participantsSnapshot = await db.collection("hike_rooms")
+      .doc(roomId)
+      .collection("participants")
+      .get();
+    const history = buildHikeRoomHistoryRecord({
+      roomId,
+      before,
+      after,
+      participants: participantsSnapshot.docs.map((doc) => ({
+        userId: doc.id,
+        ...doc.data(),
+      })),
+    });
+    await db.collection("hike_room_history").doc(roomId).set(history);
+  },
+);
+
+exports.updateIncidentReportStatus = onCall(
+  { timeoutSeconds: 30, memory: "256MiB" },
+  async (request) => {
+    const mountainName = assertMountainHead(request.auth);
+    const reportId = String(request.data?.reportId ?? "").trim();
+    const action = String(request.data?.action ?? "").trim();
+    if (!/^incident_[A-Za-z0-9_-]{1,100}$/.test(reportId)) {
+      throw new HttpsError("invalid-argument", "Invalid incident report ID.");
+    }
+    const transitions = {
+      acknowledge: { from: "submitted", to: "acknowledged" },
+      send_responders: { from: "acknowledged", to: "responders_sent" },
+      resolve: { from: "responders_sent", to: "responded" },
+    };
+    const transition = transitions[action];
+    if (!transition) {
+      throw new HttpsError("invalid-argument", "Invalid report action.");
+    }
+
+    const reportRef = db.collection("incident_reports").doc(reportId);
+    const headName = String(request.auth.token.name ?? "Mountain Head");
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    let resultingStatus;
+    await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(reportRef);
+      if (!current.exists) {
+        throw new HttpsError("not-found", "Incident report not found.");
+      }
+      const report = current.data();
+      if (report.mountainName !== mountainName) {
+        throw new HttpsError(
+          "permission-denied",
+          "This incident report belongs to another mountain.",
+        );
+      }
+      if (report.status === transition.to) {
+        resultingStatus = transition.to;
+        return;
+      }
+      if (report.status !== transition.from) {
+        throw new HttpsError(
+          "failed-precondition",
+          `The report must be ${transition.from} before it can be ${transition.to}.`,
+        );
+      }
+      const update = {
+        status: transition.to,
+        updatedAt: now,
+        [action === "acknowledge"
+          ? "acknowledgedAt"
+          : action === "send_responders"
+          ? "respondersSentAt"
+          : "respondedAt"]: now,
+        [action === "acknowledge"
+          ? "acknowledgedBy"
+          : action === "send_responders"
+          ? "respondersSentBy"
+          : "respondedBy"]: request.auth.uid,
+        [action === "acknowledge"
+          ? "acknowledgedByName"
+          : action === "send_responders"
+          ? "respondersSentByName"
+          : "respondedByName"]: headName,
+      };
+      transaction.update(reportRef, update);
+      resultingStatus = transition.to;
+      const notificationRef = db.collection("users")
+        .doc(String(report.guideId))
+        .collection("notifications")
+        .doc(`incident_report_${reportId}_${transition.to}`);
+      const statusCopy = {
+        acknowledged: {
+          label: "Acknowledged",
+          body: "acknowledged your incident report",
+        },
+        responders_sent: {
+          label: "Responders sent",
+          body: "sent responders to the reported location",
+        },
+        responded: {
+          label: "Responded",
+          body: "confirmed the incident is resolved",
+        },
+      };
+      transaction.set(notificationRef, {
+        type: "incident_report_status",
+        title: `Incident report status: ${statusCopy[transition.to].label}`,
+        body: `${headName} ${statusCopy[transition.to].body} for ${report.mountainName}.`,
+        reportId,
+        status: transition.to,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+    return { updated: true, status: resultingStatus };
+  },
+);
 
 const db = admin.firestore();
 const AUTH_ATTEMPT_LIMIT = 5;
@@ -362,6 +532,160 @@ exports.sendSosEvent = onCall(
     await batch.commit();
 
     return { sent: true, eventId: eventRef.id };
+  },
+);
+
+const INCIDENT_REASON_PATTERN =
+  /\b(lost|accident|disaster|calamity|typhoon|hurricane|cyclone|flood|landslide|earthquake|volcan|tsunami|wildfire|forest fire|lightning|tornado|avalanche|mudslide)\b/i;
+
+exports.submitIncidentReport = onCall(
+  { timeoutSeconds: 30, memory: "256MiB" },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+      throw new HttpsError("unauthenticated", "You must be signed in.");
+    }
+
+    const reportId = String(request.data?.reportId ?? "").trim();
+    const roomId = String(request.data?.roomId ?? "").trim();
+    const eventId = String(request.data?.eventId ?? "").trim();
+    const source = String(request.data?.source ?? "firestore").trim();
+    const guideNotes = String(request.data?.guideNotes ?? "").trim();
+    if (
+      !/^incident_[A-Za-z0-9_-]{1,100}$/.test(reportId) ||
+      !roomId ||
+      !["firestore", "lora"].includes(source) ||
+      (source === "firestore" && !eventId)
+    ) {
+      throw new HttpsError("invalid-argument", "Invalid incident report details.");
+    }
+    if (guideNotes.length > 2000) {
+      throw new HttpsError("invalid-argument", "Incident details are too long.");
+    }
+
+    const roomRef = db.collection("hike_rooms").doc(roomId);
+    const roomSnap = await roomRef.get();
+    const room = roomSnap.data();
+    if (!roomSnap.exists || room?.guideId !== uid) {
+      throw new HttpsError(
+        "permission-denied",
+        "Only this hike room's Tour Guide can submit its incident report.",
+      );
+    }
+
+    let reason;
+    let hikerName;
+    let latitude;
+    let longitude;
+    if (source === "firestore") {
+      const eventRef = roomRef.collection("sos_events").doc(eventId);
+      const eventSnap = await eventRef.get();
+      const sos = eventSnap.data();
+      if (
+        !eventSnap.exists ||
+        sos?.status !== "acknowledged" ||
+        sos?.acknowledgedBy !== uid
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Acknowledge this SOS before submitting an incident report.",
+        );
+      }
+      reason = String(sos.reason ?? "").trim();
+      hikerName = String(sos.senderName ?? "Hiker");
+      latitude = Number(sos.latitude);
+      longitude = Number(sos.longitude);
+    } else {
+      reason = String(request.data?.reason ?? "").trim();
+      hikerName = String(request.data?.hikerName ?? "").trim() || "Hiker";
+      const rawLatitude = request.data?.latitude;
+      const rawLongitude = request.data?.longitude;
+      latitude = rawLatitude == null ? null : Number(rawLatitude);
+      longitude = rawLongitude == null ? null : Number(rawLongitude);
+      if (
+        (latitude != null &&
+          (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) ||
+        (longitude != null &&
+          (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)) ||
+        ((latitude == null) !== (longitude == null))
+      ) {
+        throw new HttpsError(
+          "invalid-argument",
+          "The LoRa SOS location is invalid.",
+        );
+      }
+    }
+    if (!INCIDENT_REASON_PATTERN.test(reason)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This SOS reason does not require an incident report.",
+      );
+    }
+
+    const mountainName = String(room.mountainName ?? "").trim();
+    const heads = mountainName
+      ? await db.collection("users")
+        .where("adminRole", "==", "mountain_head")
+        .where("managedMountainName", "==", mountainName)
+        .get()
+      : { docs: [] };
+    const reportRef = db.collection("incident_reports").doc(reportId);
+    const reportData = {
+      roomId,
+      roomCode: String(room.roomCode ?? ""),
+      mountainName,
+      source: source === "lora" ? "lora_relay_unverified" : "firestore_sos",
+      eventId: eventId || null,
+      category: reason,
+      hikerName,
+      latitude,
+      longitude,
+      guideId: uid,
+      guideName: String(room.guideName ?? "Tour Guide"),
+      guideNotes,
+      status: "submitted",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await db.runTransaction(async (transaction) => {
+      const existing = await transaction.get(reportRef);
+      if (existing.exists) {
+        if (
+          existing.data()?.guideId !== uid ||
+          existing.data()?.eventId !== (eventId || null) ||
+          existing.data()?.roomId !== roomId
+        ) {
+          throw new HttpsError("already-exists", "Report ID is already in use.");
+        }
+        return;
+      }
+      transaction.create(reportRef, reportData);
+      for (const head of heads.docs) {
+        const notificationRef = db.collection("notifications")
+          .doc(`incident_${reportId}_${head.id}`);
+        transaction.create(notificationRef, {
+          type: "incident_report",
+          title: "New Hike Incident Report",
+          message: `${reportData.guideName} reported ${reason} involving `
+            + `${reportData.hikerName} at ${mountainName}.`,
+          reportId,
+          roomId,
+          roomCode: reportData.roomCode,
+          mountainName,
+          category: reason,
+          hikerName: reportData.hikerName,
+          latitude: reportData.latitude,
+          longitude: reportData.longitude,
+          guideName: reportData.guideName,
+          guideNotes,
+          source: reportData.source,
+          isRead: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    });
+    return { sent: true, mountainHeadsNotified: heads.docs.length };
   },
 );
 
