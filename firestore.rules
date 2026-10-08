@@ -30,6 +30,34 @@ service cloud.firestore {
         && request.auth.token.get('managedMountainName', '') != '';
     }
 
+    function guideCanClearActiveHikeRoom(userId) {
+      let roomId = resource.data.get('activeHikeRoomId', '');
+      return signedIn()
+        && roomId is string
+        && roomId != ''
+        && request.resource.data.get('activeHikeRoomId', '') == ''
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['activeHikeRoomId'])
+        && get(
+          /databases/$(database)/documents/hike_rooms/$(roomId)
+        ).data.guideId == request.auth.uid
+        && getAfter(
+          /databases/$(database)/documents/hike_rooms/$(roomId)/participants/$(userId)
+        ).data.get('membershipStatus', '') == 'removed';
+    }
+
+    function userHasSafetyDetails(userId) {
+      let profile = get(
+        /databases/$(database)/documents/users/$(userId)
+      ).data;
+      return profile.get('contactNumber', '') is string
+        && profile.get('contactNumber', '') != ''
+        && profile.get('emergencyContactName', '') is string
+        && profile.get('emergencyContactName', '') != ''
+        && profile.get('emergencyContactPhone', '') is string
+        && profile.get('emergencyContactPhone', '') != '';
+    }
+
     match /users/{userId} {
       allow read: if signedIn() && (
         isTourismAdmin() ||
@@ -63,20 +91,22 @@ service cloud.firestore {
         && request.resource.data.get('role', '') != 'tour_guide'
         && request.resource.data.get('accountType', '') != 'tour_guide';
 
-      allow update: if isOwner(userId)
+      allow update: if (
+        isOwner(userId)
         && !request.resource.data.diff(resource.data).affectedKeys()
-            .hasAny([
-              'role',
-              'accountType',
-              'guideVerified',
-              'accountTypeConfirmed',
-              'adminRole',
-              'adminAccess',
-              'managedMountainName',
-              'mountainName',
-              'mountainNames',
-              'mountainsHandled'
-            ]);
+          .hasAny([
+            'role',
+            'accountType',
+            'guideVerified',
+            'accountTypeConfirmed',
+            'adminRole',
+            'adminAccess',
+            'managedMountainName',
+            'mountainName',
+            'mountainNames',
+            'mountainsHandled'
+          ])
+      ) || guideCanClearActiveHikeRoom(userId);
 
       match /notifications/{notificationId} {
         allow read, update, delete: if isOwner(userId);
@@ -212,7 +242,13 @@ service cloud.firestore {
         // both equal the creator's own uid.
         allow create: if signedIn()
           && participantId == request.auth.uid
-          && request.resource.data.userId == request.auth.uid;
+          && request.resource.data.userId == request.auth.uid
+          && (
+            get(
+              /databases/$(database)/documents/hike_rooms/$(roomId)
+            ).data.guideId == request.auth.uid
+            || userHasSafetyDetails(request.auth.uid)
+          );
         // Either the participant themself (activity status, leaving the
         // room) or the room's guide acting on someone else (kickParticipant).
         allow update: if signedIn() && (

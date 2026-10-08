@@ -548,8 +548,9 @@ class HikeRoomService {
     ).collection('participants').doc(participantId);
     final participant = await participantRef.get();
     if (!participant.exists ||
-        (participant.data()?['membershipStatus']?.toString() ?? 'active') !=
-            'active') {
+        !const {'active', 'stopped'}.contains(
+          participant.data()?['membershipStatus']?.toString() ?? 'active',
+        )) {
       throw StateError('This participant is no longer in the room.');
     }
     final batch = _firestore.batch();

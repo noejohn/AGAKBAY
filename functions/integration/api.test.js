@@ -95,6 +95,35 @@ describe("POST sendSosEvent", () => {
     });
   });
 
+  test("200 OK lets a hiker who ended their hike send SOS without rejoining", async () => {
+    const guide = await createSignedInUser("guide@test.com", "Guide Gina");
+    const hiker = await createSignedInUser("hiker@test.com", "Hiker Juan");
+    await seedActiveRoom({ roomId: "room-1", guideUid: guide.uid, hikerUids: [hiker.uid] });
+    await db.collection("hike_rooms").doc("room-1")
+      .collection("participants").doc(hiker.uid)
+      .update({ membershipStatus: "stopped", stopReason: "Too tired" });
+
+    const res = await callApi("sendSosEvent", {
+      roomId: "room-1", latitude: 7.1855, longitude: 125.6515, reason: "Accident",
+    }, hiker.idToken);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.sent).toBe(true);
+
+    const participant = await db.collection("hike_rooms").doc("room-1")
+      .collection("participants").doc(hiker.uid).get();
+    expect(participant.data().membershipStatus).toBe("stopped");
+
+    const event = await db.collection("hike_rooms").doc("room-1")
+      .collection("sos_events").doc(res.body.result.eventId).get();
+    expect(event.exists).toBe(true);
+    expect(event.data()).toMatchObject({
+      senderId: hiker.uid,
+      reason: "Accident",
+      status: "sent",
+    });
+  });
+
   test("400 FAILED_PRECONDITION on a second SOS within the 30s cooldown", async () => {
     const guide = await createSignedInUser("guide@test.com", "Guide Gina");
     const hiker = await createSignedInUser("hiker@test.com", "Hiker Juan");

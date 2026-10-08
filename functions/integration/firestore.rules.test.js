@@ -15,6 +15,8 @@ const {
   getDoc,
   setDoc,
   updateDoc,
+  writeBatch,
+  deleteField,
   deleteDoc,
   serverTimestamp,
   setLogLevel,
@@ -208,8 +210,25 @@ describe("hike_rooms — rooms and participants", () => {
   });
 
   test("a hiker can join a room as themself", async () => {
-    await seed({ "hike_rooms/room-1": { guideId: "guide-1", status: "waiting" } });
+    await seed({
+      "hike_rooms/room-1": { guideId: "guide-1", status: "waiting" },
+      "users/hiker-1": {
+        contactNumber: "09171234567",
+        emergencyContactName: "Emergency Contact",
+        emergencyContactPhone: "09179876543",
+      },
+    });
     await assertSucceeds(setDoc(doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"), {
+      userId: "hiker-1", membershipStatus: "active",
+    }));
+  });
+
+  test("a hiker CANNOT join a room without complete safety details", async () => {
+    await seed({
+      "hike_rooms/room-1": { guideId: "guide-1", status: "waiting" },
+      "users/hiker-1": { contactNumber: "09171234567" },
+    });
+    await assertFails(setDoc(doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"), {
       userId: "hiker-1", membershipStatus: "active",
     }));
   });
@@ -235,12 +254,43 @@ describe("hike_rooms — rooms and participants", () => {
     }));
   });
 
-  test("the guide can remove a hiker from their room", async () => {
-    await seed(activeRoom);
-    await assertSucceeds(updateDoc(doc(asGuide(), "hike_rooms/room-1/participants/hiker-2"), {
-      membershipStatus: "kicked",
-    }));
-  });
+  test.each(["active", "stopped"])(
+    "the guide can remove a %s hiker and clear their room pointer atomically",
+    async (membershipStatus) => {
+      await seed({
+        ...activeRoom,
+        "hike_rooms/room-1/participants/hiker-2": {
+          userId: "hiker-2",
+          membershipStatus,
+        },
+        "users/hiker-2": {
+          accountType: "hiker",
+          activeHikeRoomId: "room-1",
+        },
+      });
+
+      const db = asGuide();
+      const batch = writeBatch(db);
+      batch.update(doc(db, "hike_rooms/room-1/participants/hiker-2"), {
+        membershipStatus: "removed",
+        removedBy: "guide-1",
+        removedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      batch.update(doc(db, "users/hiker-2"), {
+        activeHikeRoomId: deleteField(),
+      });
+      batch.update(doc(db, "hike_rooms/room-1"), {
+        updatedAt: serverTimestamp(),
+      });
+
+      await assertSucceeds(batch.commit());
+      const participant = await getDoc(
+        doc(db, "hike_rooms/room-1/participants/hiker-2"),
+      );
+      expect(participant.data().membershipStatus).toBe("removed");
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

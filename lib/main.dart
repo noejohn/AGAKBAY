@@ -4154,7 +4154,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   // work if this data actually exists, so none of them should let a hike
   // start while it's missing. Returns true (and does nothing) once the
   // profile is already complete.
-  Future<bool> _ensureReadyToHike() async {
+  Future<bool> _ensureReadyToHike({bool returnToProfile = false}) async {
     if (_isSafetyProfileComplete()) {
       return true;
     }
@@ -4171,13 +4171,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       icon: Icons.health_and_safety_rounded,
       title: 'Complete Your Safety Details',
       message:
-          'Please fill out $missing before starting a hike — this is how '
-          'Agakbay and your Tour Guide can reach you in an emergency.',
+          'Please fill out $missing before joining a Hike Room or starting '
+          'a hike — this is how Agakbay and your Tour Guide can reach you in '
+          'an emergency.',
       cancelLabel: 'Cancel',
       confirmLabel: 'Go to Profile',
     );
     if (goToProfile && mounted) {
       setState(() => _selectedNavIndex = 3);
+      if (returnToProfile && mounted) {
+        await Navigator.of(context).maybePop();
+      }
     }
     return false;
   }
@@ -5428,7 +5432,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       Navigator.of(context).pop();
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => HikeRoomScreen(onStartHiking: _startHikingFromRoom),
+          builder: (_) => HikeRoomScreen(
+            onStartHiking: _startHikingFromRoom,
+            onBeforeJoinRoom: () => _ensureReadyToHike(returnToProfile: true),
+          ),
         ),
       );
     } catch (error) {
@@ -5446,7 +5453,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _showDashboardSnackBar('This room does not have a usable trail route.');
       return;
     }
-    if (!await _ensureReadyToHike() || !mounted) {
+    if (!await _ensureReadyToHike(returnToProfile: true) || !mounted) {
       return;
     }
     final trail = _NearbyTrail(
@@ -9972,8 +9979,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   onTap: () async {
                     await Navigator.of(context).push(
                       MaterialPageRoute<void>(
-                        builder: (context) =>
-                            HikeRoomScreen(onStartHiking: _startHikingFromRoom),
+                        builder: (context) => HikeRoomScreen(
+                          onStartHiking: _startHikingFromRoom,
+                          onBeforeJoinRoom: () =>
+                              _ensureReadyToHike(returnToProfile: true),
+                        ),
                       ),
                     );
                   },
@@ -13436,6 +13446,18 @@ class _ParsedGpxTrail {
   final int? peakElevationMasl;
 }
 
+class _EndedHikeNotice {
+  const _EndedHikeNotice({
+    required this.hikerName,
+    required this.reason,
+    this.participantId,
+  });
+
+  final String hikerName;
+  final String reason;
+  final String? participantId;
+}
+
 class _HikingModeScreen extends StatefulWidget {
   const _HikingModeScreen({
     required this.trail,
@@ -13479,10 +13501,18 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   final Set<String> _shownNearbySosIds = <String>{};
   DateTime? _lastPresenceAt;
   DateTime? _lastSeenLoraRelayAt;
+  DateTime? _lastSeenLoraStopRelayAt;
   static const _presenceInterval = Duration(minutes: 1);
   StreamSubscription<List<RoomSosEvent>>? _roomSosSubscription;
+  StreamSubscription<String>? _roomMembershipSubscription;
+  StreamSubscription<List<HikeRoomParticipant>>? _stoppedHikersSubscription;
   List<RoomSosEvent> _roomSosEvents = const <RoomSosEvent>[];
   Object? _roomSosStreamError;
+  Object? _stoppedHikersStreamError;
+  final List<_EndedHikeNotice> _pendingEndedHikeNotices = <_EndedHikeNotice>[];
+  final Map<String, DateTime> _recentEndedHikeNoticeKeys = <String, DateTime>{};
+  bool _showingEndedHikeDialog = false;
+  bool _leavingRemovedRoom = false;
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   GoogleMapController? _googleMapController;
@@ -13571,20 +13601,50 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     super.initState();
     final room = widget.hikeRoom;
     if (room != null) {
-      _roomSosSubscription = _hikeRoomService.watchSosEvents(room.id).listen(
-        (events) {
-          if (mounted) {
-            setState(() {
-              _roomSosEvents = events;
-              _roomSosStreamError = null;
-            });
-          }
-        },
-        onError: (Object error, StackTrace stackTrace) {
-          debugPrint('Could not load hike room SOS events: $error');
-          if (mounted) setState(() => _roomSosStreamError = error);
-        },
-      );
+      _roomSosSubscription = _hikeRoomService
+          .watchSosEvents(room.id)
+          .listen(
+            (events) {
+              if (mounted) {
+                setState(() {
+                  _roomSosEvents = events;
+                  _roomSosStreamError = null;
+                });
+              }
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              debugPrint('Could not load hike room SOS events: $error');
+              if (mounted) setState(() => _roomSosStreamError = error);
+            },
+          );
+      if (room.guideId != FirebaseAuth.instance.currentUser?.uid) {
+        _roomMembershipSubscription = _hikeRoomService
+            .watchCurrentMembership(room.id)
+            .listen(
+              _onRoomMembershipChanged,
+              onError: (Object error, StackTrace stackTrace) {
+                debugPrint('Could not watch hike room membership: $error');
+              },
+            );
+      }
+      if (FirebaseAuth.instance.currentUser?.uid == room.guideId) {
+        _stoppedHikersSubscription = _hikeRoomService
+            .watchStoppedParticipants(room.id)
+            .listen(
+              (participants) {
+                if (mounted && _stoppedHikersStreamError != null) {
+                  setState(() => _stoppedHikersStreamError = null);
+                }
+                _onStoppedHikers(participants);
+              },
+              onError: (Object error, StackTrace stackTrace) {
+                debugPrint('Could not watch ended hikes: $error');
+                if (mounted) {
+                  setState(() => _stoppedHikersStreamError = error);
+                }
+              },
+            );
+      }
     }
     _nearbySosSubscription = _nearbySosService.watchNearbySosAlerts().listen(
       _onNearbySosAlerts,
@@ -13594,6 +13654,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     // Any LoRa SOS that already arrived before this screen opened isn't
     // "new" — only pop up for ones received from here on.
     _lastSeenLoraRelayAt = HeltecBleService.instance.lastRelayAt;
+    _lastSeenLoraStopRelayAt = HeltecBleService.instance.lastStopRelayAt;
     HeltecBleService.instance.addListener(_onHeltecChanged);
     _checkpoints = const <_HikeCheckpoint>[];
     unawaited(_startConnectivityMonitor());
@@ -13630,6 +13691,8 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       }),
     );
     _roomSosSubscription?.cancel();
+    _roomMembershipSubscription?.cancel();
+    _stoppedHikersSubscription?.cancel();
     _elapsedTimer?.cancel();
     _positionSubscription?.cancel();
     _connectivitySubscription?.cancel();
@@ -13653,6 +13716,27 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
             debugPrint('Could not publish hiker presence: $error');
           }),
     );
+  }
+
+  void _onRoomMembershipChanged(String membership) {
+    if (_leavingRemovedRoom ||
+        !const {'removed', 'left', 'room_ended'}.contains(membership) ||
+        !mounted) {
+      return;
+    }
+    _leavingRemovedRoom = true;
+    final message = membership == 'removed'
+        ? 'The Tour Guide removed you from this Hike Room.'
+        : membership == 'left'
+        ? 'You are no longer in this Hike Room.'
+        : 'This Hike Room has ended.';
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: AgakColors.maroon),
+      );
+      Navigator.of(context).pop<_LiveHikeResult>(null);
+    });
   }
 
   void _onNearbySosAlerts(List<NearbySosAlert> alerts) {
@@ -13697,6 +13781,19 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
   // "nearest hikers" path: any board within radio range receives it.
   void _onHeltecChanged() {
     final ble = HeltecBleService.instance;
+    final stopAt = ble.lastStopRelayAt;
+    final room = widget.hikeRoom;
+    if (stopAt != null &&
+        stopAt != _lastSeenLoraStopRelayAt &&
+        room != null &&
+        FirebaseAuth.instance.currentUser?.uid == room.guideId) {
+      _lastSeenLoraStopRelayAt = stopAt;
+      _queueEndedHikeNotice(
+        hikerName: ble.lastStopRelaySenderName ?? 'A hiker',
+        reason: ble.lastStopRelayReason ?? 'No reason provided',
+      );
+    }
+
     final at = ble.lastRelayAt;
     if (at == null || at == _lastSeenLoraRelayAt || !mounted) return;
     _lastSeenLoraRelayAt = at;
@@ -13711,6 +13808,141 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
             ? LatLng(lat, lon)
             : null,
         viaLora: true,
+      ),
+    );
+  }
+
+  void _onStoppedHikers(List<HikeRoomParticipant> participants) {
+    for (final participant in participants) {
+      final reason = participant.stopReason;
+      if (participant.stopAcknowledged || reason == null || reason.isEmpty) {
+        continue;
+      }
+      _queueEndedHikeNotice(
+        hikerName: participant.name,
+        reason: reason,
+        participantId: participant.userId,
+      );
+    }
+  }
+
+  void _queueEndedHikeNotice({
+    required String hikerName,
+    required String reason,
+    String? participantId,
+  }) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    _recentEndedHikeNoticeKeys.removeWhere(
+      (_, seenAt) => now.difference(seenAt) > const Duration(minutes: 2),
+    );
+    final key =
+        '${hikerName.trim().toLowerCase()}|${reason.trim().toLowerCase()}';
+    final previous = _recentEndedHikeNoticeKeys[key];
+    if (previous != null &&
+        now.difference(previous) <= const Duration(minutes: 2)) {
+      return;
+    }
+    _recentEndedHikeNoticeKeys[key] = now;
+    _pendingEndedHikeNotices.add(
+      _EndedHikeNotice(
+        hikerName: hikerName,
+        reason: reason,
+        participantId: participantId,
+      ),
+    );
+    unawaited(_showNextEndedHikeDialog());
+  }
+
+  Future<void> _showNextEndedHikeDialog() async {
+    if (_showingEndedHikeDialog || !mounted) return;
+    _showingEndedHikeDialog = true;
+    try {
+      while (mounted && _pendingEndedHikeNotices.isNotEmpty) {
+        final notice = _pendingEndedHikeNotices.removeAt(0);
+        await HapticFeedback.mediumImpact();
+        if (!mounted) break;
+        final acknowledged = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            icon: const Icon(Icons.pan_tool_rounded, color: Colors.orange),
+            title: Text('${notice.hikerName} ended their hike'),
+            content: Text('Reason: ${notice.reason}'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Later'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Acknowledge'),
+              ),
+            ],
+          ),
+        );
+        if (acknowledged == true && mounted) {
+          await _acknowledgeEndedHikeNotice(notice);
+        }
+      }
+    } finally {
+      _showingEndedHikeDialog = false;
+      if (mounted && _pendingEndedHikeNotices.isNotEmpty) {
+        unawaited(_showNextEndedHikeDialog());
+      }
+    }
+  }
+
+  Future<void> _acknowledgeEndedHikeNotice(_EndedHikeNotice notice) async {
+    final room = widget.hikeRoom;
+    final ble = HeltecBleService.instance;
+    final sentByDevice = ble.isConnected
+        ? await ble.sendStopAck(hikerName: notice.hikerName)
+        : false;
+    var participantId = notice.participantId;
+    if (room != null && participantId == null) {
+      try {
+        final participants = await _hikeRoomService
+            .watchStoppedParticipants(room.id)
+            .first
+            .timeout(const Duration(seconds: 3));
+        final normalizedName = notice.hikerName.trim().toLowerCase();
+        participantId = participants
+            .where(
+              (participant) =>
+                  participant.name.trim().toLowerCase() == normalizedName &&
+                  participant.stopReason == notice.reason,
+            )
+            .map((participant) => participant.userId)
+            .firstOrNull;
+      } catch (error) {
+        debugPrint('Could not find ended hiker for acknowledgment: $error');
+      }
+    }
+
+    var sentOnline = false;
+    if (room != null && participantId != null) {
+      try {
+        await _hikeRoomService
+            .acknowledgeStop(room.id, participantId)
+            .timeout(const Duration(seconds: 10));
+        sentOnline = true;
+      } catch (error) {
+        debugPrint('Could not acknowledge ended hike online: $error');
+      }
+    }
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          sentOnline && sentByDevice
+              ? '${notice.hikerName} was told you saw it — over the internet and your device.'
+              : sentOnline
+              ? '${notice.hikerName} was told you saw it.'
+              : sentByDevice
+              ? '${notice.hikerName} was told you saw it over your device (no internet).'
+              : 'Could not reach ${notice.hikerName} — no internet and no device connected.',
+        ),
       ),
     );
   }
@@ -15387,6 +15619,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     // A server-side failure (e.g. an error from the Cloud Function) is not
     // the same as having no connection — reported differently below.
     var onlineFailed = false;
+    String? onlineFailureMessage;
     Future<bool> sendToRoom() async {
       try {
         final room = widget.hikeRoom ?? await _hikeRoomService.getActiveRoom();
@@ -15411,6 +15644,10 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       } catch (error) {
         debugPrint('Unable to send SOS online: $error');
         onlineFailed = true;
+        onlineFailureMessage = error
+            .toString()
+            .replaceFirst('Bad state: ', '')
+            .replaceFirst('Exception: ', '');
         return false;
       }
     }
@@ -15504,6 +15741,8 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                 ? 'SOS sent over Heltec LoRa. No active internet room received it.'
                 : roomTimedOut
                 ? 'Weak signal — SOS not confirmed by the hike room. Connect a Heltec device for offline SOS.'
+                : onlineFailed
+                ? 'Could not send SOS to your hike room: ${onlineFailureMessage ?? 'The server rejected the request.'}'
                 : 'No active internet room received the SOS. Connect a Heltec device for offline SOS.',
           ),
           backgroundColor: AgakColors.maroon,
@@ -16147,8 +16386,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     // tell, so it keeps the plain end-hike flow.
     final room = widget.hikeRoom;
     final isRoomHiker =
-        room != null &&
-        room.guideId != FirebaseAuth.instance.currentUser?.uid;
+        room != null && room.guideId != FirebaseAuth.instance.currentUser?.uid;
     String? endReason;
     if (isRoomHiker) {
       endReason = await showEndHikeReasonPicker(context);
@@ -16571,6 +16809,34 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
                     ),
                   ),
                 ),
+                if (widget.hikeRoom != null &&
+                    _stoppedHikersStreamError != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AgakColors.maroon.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AgakColors.maroon.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.cloud_off_rounded, color: Colors.redAccent),
+                        SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Could not monitor ended-hike alerts. Check your connection.',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 if (widget.hikeRoom != null && _roomSosStreamError != null) ...[
                   const SizedBox(height: 8),
                   Container(

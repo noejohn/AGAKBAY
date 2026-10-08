@@ -11,9 +11,10 @@ import 'package:tunga/widgets/offline_map_widget.dart';
 import 'package:tunga/widgets/sos_reason_picker.dart';
 
 class HikeRoomScreen extends StatefulWidget {
-  const HikeRoomScreen({super.key, this.onStartHiking});
+  const HikeRoomScreen({super.key, this.onStartHiking, this.onBeforeJoinRoom});
 
   final Future<void> Function(HikeRoom room)? onStartHiking;
+  final Future<bool> Function()? onBeforeJoinRoom;
 
   @override
   State<HikeRoomScreen> createState() => _HikeRoomScreenState();
@@ -152,6 +153,9 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
   }
 
   Future<void> _joinRoom() async {
+    final beforeJoin = widget.onBeforeJoinRoom;
+    if (!_isGuide && beforeJoin != null && !await beforeJoin()) return;
+    if (!mounted) return;
     await _run(() async {
       final room = await _service.joinRoom(_codeController.text);
       if (mounted) setState(() => _room = room);
@@ -394,7 +398,9 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
           reason: reason,
         );
         if (sent) {
-          _message('SOS ($reason) sent over the device. Still trying the internet...');
+          _message(
+            'SOS ($reason) sent over the device. Still trying the internet...',
+          );
         }
         return sent;
       }
@@ -802,7 +808,8 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     FilledButton.icon(
-                      onPressed: (_submitting || _openingHikingMode || !accepted)
+                      onPressed:
+                          (_submitting || _openingHikingMode || !accepted)
                           ? null
                           : () => _openHikingMode(room),
                       icon: const Icon(Icons.hiking_rounded),
@@ -819,8 +826,9 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
                         child: Text(
                           'Agree to the Terms and Conditions in the Tour Guide Policy to start hiking.',
                           textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: Colors.orange),
+                          style: Theme.of(
+                            context,
+                          ).textTheme.bodySmall?.copyWith(color: Colors.orange),
                         ),
                       ),
                   ],
@@ -1307,9 +1315,21 @@ class _HikeRoomPolicyCard extends StatelessWidget {
           subtitle: const Text('Rules, and what you can do here'),
           childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
           children: [
-            _policySection(context, "Do's", _dos, Icons.check_circle_outline_rounded, Colors.green),
+            _policySection(
+              context,
+              "Do's",
+              _dos,
+              Icons.check_circle_outline_rounded,
+              Colors.green,
+            ),
             const SizedBox(height: 14),
-            _policySection(context, "Don'ts", _donts, Icons.cancel_outlined, Colors.redAccent),
+            _policySection(
+              context,
+              "Don'ts",
+              _donts,
+              Icons.cancel_outlined,
+              Colors.redAccent,
+            ),
             const SizedBox(height: 14),
             _policySection(
               context,
@@ -1353,7 +1373,9 @@ class _HikeRoomPolicyCard extends StatelessWidget {
                         if (!context.mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(
                           SnackBar(
-                            content: Text('Could not save your agreement: $error'),
+                            content: Text(
+                              'Could not save your agreement: $error',
+                            ),
                           ),
                         );
                       }

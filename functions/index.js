@@ -305,9 +305,12 @@ exports.sendSosEvent = onCall(
 
     const participantRef = roomRef.collection("participants").doc(uid);
     const participantSnap = await participantRef.get();
+    const membershipStatus = participantSnap.data()?.membershipStatus ?? "active";
+    // A hiker who stopped remains in the room while returning and must still
+    // be able to send an SOS.
     if (
       !participantSnap.exists ||
-      (participantSnap.data()?.membershipStatus ?? "active") !== "active"
+      !["active", "stopped"].includes(membershipStatus)
     ) {
       throw new HttpsError("failed-precondition", "You are not in this room.");
     }
