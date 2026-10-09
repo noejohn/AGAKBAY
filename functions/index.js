@@ -34,6 +34,10 @@ const { reviewTrailSubmission } = require("./trailReview");
 const { sanitizeRoutePoints } = require("./routePoints");
 const { sendNearbySos } = require("./nearbySos");
 const { assertMountainHead } = require("./adminAuthorization");
+const {
+  canonicalizeDavaoMountainName,
+  normalizeMountainName,
+} = require("./mountainNames");
 
 admin.initializeApp();
 
@@ -155,7 +159,14 @@ exports.updateIncidentReportStatus = onCall(
         throw new HttpsError("not-found", "Incident report not found.");
       }
       const report = current.data();
-      if (report.mountainName !== mountainName) {
+      // Reports are saved with the canonical trail name (for example
+      // "Mt. Apo"), while the head's custom claim may use an equivalent
+      // spelling (for example "Mount Apo"). Compare normalized names so a
+      // head assigned to that mountain can perform the status transitions.
+      if (
+        normalizeMountainName(String(report.mountainName ?? "")) !==
+        normalizeMountainName(mountainName)
+      ) {
         throw new HttpsError(
           "permission-denied",
           "This incident report belongs to another mountain.",
@@ -536,7 +547,7 @@ exports.sendSosEvent = onCall(
 );
 
 const INCIDENT_REASON_PATTERN =
-  /\b(lost|accident|disaster|calamity|typhoon|hurricane|cyclone|flood|landslide|earthquake|volcan|tsunami|wildfire|forest fire|lightning|tornado|avalanche|mudslide)\b/i;
+  /\b(lost|accident|disaster|incident|calamity|typhoon|hurricane|cyclone|flood|landslide|earthquake|volcan|tsunami|wildfire|forest fire|lightning|tornado|avalanche|mudslide)\b/i;
 
 exports.submitIncidentReport = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
@@ -622,13 +633,18 @@ exports.submitIncidentReport = onCall(
       );
     }
 
-    const mountainName = String(room.mountainName ?? "").trim();
-    const heads = mountainName
+    const rawMountainName = String(room.mountainName ?? "").trim();
+    const mountainName = canonicalizeDavaoMountainName(rawMountainName) ||
+      rawMountainName;
+    const headSnapshot = mountainName
       ? await db.collection("users")
         .where("adminRole", "==", "mountain_head")
-        .where("managedMountainName", "==", mountainName)
         .get()
       : { docs: [] };
+    const heads = headSnapshot.docs.filter((head) =>
+      normalizeMountainName(head.data().managedMountainName || "") ===
+        normalizeMountainName(mountainName)
+    );
     const reportRef = db.collection("incident_reports").doc(reportId);
     const reportData = {
       roomId,
@@ -661,7 +677,7 @@ exports.submitIncidentReport = onCall(
         return;
       }
       transaction.create(reportRef, reportData);
-      for (const head of heads.docs) {
+      for (const head of heads) {
         const notificationRef = db.collection("notifications")
           .doc(`incident_${reportId}_${head.id}`);
         transaction.create(notificationRef, {
@@ -685,7 +701,7 @@ exports.submitIncidentReport = onCall(
         });
       }
     });
-    return { sent: true, mountainHeadsNotified: heads.docs.length };
+    return { sent: true, mountainHeadsNotified: heads.length };
   },
 );
 

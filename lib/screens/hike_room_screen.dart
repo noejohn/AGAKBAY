@@ -12,10 +12,16 @@ import 'package:tunga/widgets/incident_report_prompt.dart';
 import 'package:tunga/widgets/sos_reason_picker.dart';
 
 class HikeRoomScreen extends StatefulWidget {
-  const HikeRoomScreen({super.key, this.onStartHiking, this.onBeforeJoinRoom});
+  const HikeRoomScreen({
+    super.key,
+    this.onStartHiking,
+    this.onBeforeJoinRoom,
+    this.onBeforeStartHike,
+  });
 
   final Future<void> Function(HikeRoom room)? onStartHiking;
   final Future<bool> Function()? onBeforeJoinRoom;
+  final Future<bool> Function()? onBeforeStartHike;
 
   @override
   State<HikeRoomScreen> createState() => _HikeRoomScreenState();
@@ -164,6 +170,8 @@ class _HikeRoomScreenState extends State<HikeRoomScreen>
   }
 
   Future<void> _startRoom(String roomId) async {
+    final beforeStart = widget.onBeforeStartHike;
+    if (beforeStart != null && !await beforeStart()) return;
     await _run(() => _service.startRoom(roomId));
   }
 

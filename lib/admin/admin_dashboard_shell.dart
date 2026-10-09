@@ -59,6 +59,34 @@ class _AdminAccess {
   bool get isTourismAdmin => !isMountainHead;
 }
 
+List<String> _mountainNameVariants(String mountainName) {
+  String normalize(String value) => value
+      .trim()
+      .toLowerCase()
+      .replaceFirst(RegExp(r'^mt\.?\s*'), 'mount ')
+      .replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+  final normalized = normalize(mountainName);
+  final canonical = davaoMountains
+      .where((mountain) => normalize(mountain.name) == normalized)
+      .map((mountain) => mountain.name)
+      .firstOrNull;
+  final base = canonical ?? mountainName.trim();
+  final variants = <String>{base};
+  if (base.toLowerCase().startsWith('mt. ')) {
+    final remainder = base.substring(4);
+    variants.addAll(['Mt $remainder', 'Mount $remainder']);
+  } else if (base.toLowerCase().startsWith('mt ')) {
+    final remainder = base.substring(3);
+    variants.addAll(['Mt. $remainder', 'Mount $remainder']);
+  } else if (base.toLowerCase().startsWith('mount ')) {
+    final remainder = base.substring(6);
+    variants.addAll(['Mt. $remainder', 'Mt $remainder']);
+  }
+  variants.add(mountainName.trim());
+  return variants.where((name) => name.isNotEmpty).toList(growable: false);
+}
+
 class AdminDashboardShell extends StatefulWidget {
   const AdminDashboardShell({
     super.key,
@@ -179,28 +207,7 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                                 ),
                               ),
                             ),
-                          if (access.isTourismAdmin)
-                            Expanded(
-                              child: LayoutBuilder(
-                                builder: (context, searchConstraints) {
-                                  final searchWidth = searchConstraints.maxWidth
-                                      .clamp(80.0, 320.0)
-                                      .toDouble();
-                                  return Center(
-                                    child: SizedBox(
-                                      width: searchWidth,
-                                      height: 42,
-                                      child: _AdminGlobalSearch(
-                                        onNavigate: (index) =>
-                                            _navigateToPage(index, access),
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                            )
-                          else
-                            const Spacer(),
+                          const Spacer(),
                           _NotificationBell(
                             access: access,
                             onOpenSosMonitoring: () =>
@@ -310,269 +317,6 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _AdminSearchResult {
-  const _AdminSearchResult({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-    required this.destination,
-  });
-
-  final String title;
-  final String subtitle;
-  final IconData icon;
-  final int destination;
-}
-
-class _AdminGlobalSearch extends StatefulWidget {
-  const _AdminGlobalSearch({required this.onNavigate});
-
-  final ValueChanged<int> onNavigate;
-
-  @override
-  State<_AdminGlobalSearch> createState() => _AdminGlobalSearchState();
-}
-
-class _AdminGlobalSearchState extends State<_AdminGlobalSearch> {
-  final _controller = TextEditingController();
-  bool _searching = false;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  String? _firstValue(Map<String, dynamic> data, List<String> keys) {
-    for (final key in keys) {
-      final value = data[key]?.toString().trim();
-      if (value != null && value.isNotEmpty) return value;
-    }
-    return null;
-  }
-
-  bool _matches(
-    Map<String, dynamic> data,
-    String id,
-    String query,
-    List<String> fields,
-  ) {
-    final searchable = [
-      id,
-      for (final field in fields) data[field]?.toString() ?? '',
-    ].join(' ').toLowerCase();
-    return searchable.contains(query);
-  }
-
-  Future<void> _search() async {
-    final query = _controller.text.trim().toLowerCase();
-    if (query.isEmpty || _searching) return;
-    setState(() => _searching = true);
-    try {
-      final database = FirebaseFirestore.instance;
-      final snapshots = await Future.wait([
-        database.collection('users').limit(300).get(),
-        database.collection('trail_submissions').limit(300).get(),
-        database.collection('mountain_trails').limit(300).get(),
-      ]);
-      if (!mounted) return;
-
-      final results = <_AdminSearchResult>[];
-      final userFields = [
-        'fullName',
-        'displayName',
-        'name',
-        'email',
-        'username',
-      ];
-      for (final doc in snapshots[0].docs) {
-        final data = doc.data();
-        if (!_matches(data, doc.id, query, userFields)) continue;
-        results.add(
-          _AdminSearchResult(
-            title:
-                _firstValue(data, ['fullName', 'displayName', 'name']) ??
-                _firstValue(data, ['email']) ??
-                doc.id,
-            subtitle: 'User · ${_firstValue(data, ['email']) ?? doc.id}',
-            icon: Icons.person_outline_rounded,
-            destination: 6,
-          ),
-        );
-      }
-
-      final trailFields = [
-        'trailName',
-        'mountainName',
-        'name',
-        'title',
-        'submitterName',
-        'submitterEmail',
-        'status',
-      ];
-      for (final doc in snapshots[1].docs) {
-        final data = doc.data();
-        if (!_matches(data, doc.id, query, trailFields)) continue;
-        results.add(
-          _AdminSearchResult(
-            title:
-                _firstValue(data, [
-                  'trailName',
-                  'mountainName',
-                  'title',
-                  'name',
-                ]) ??
-                doc.id,
-            subtitle:
-                'Trail submission · ${_firstValue(data, ['status']) ?? 'unknown status'}',
-            icon: Icons.route_outlined,
-            destination: 2,
-          ),
-        );
-      }
-
-      final mountainFields = [
-        'mountainName',
-        'name',
-        'title',
-        'region',
-        'province',
-      ];
-      for (final doc in snapshots[2].docs) {
-        final data = doc.data();
-        if (!_matches(data, doc.id, query, mountainFields)) continue;
-        results.add(
-          _AdminSearchResult(
-            title: _firstValue(data, mountainFields) ?? doc.id,
-            subtitle:
-                'Mountain trail · ${_firstValue(data, ['status']) ?? 'available'}',
-            icon: Icons.terrain_rounded,
-            destination: 2,
-          ),
-        );
-      }
-
-      await showDialog<void>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: Text('Search results for “${_controller.text.trim()}”'),
-          content: SizedBox(
-            width: 480,
-            height: 360,
-            child: results.isEmpty
-                ? const Center(
-                    child: Text(
-                      'No matching mountains, users, or trails found.',
-                    ),
-                  )
-                : ListView.separated(
-                    itemCount: results.length > 30 ? 30 : results.length,
-                    separatorBuilder: (context, index) =>
-                        const Divider(height: 1),
-                    itemBuilder: (context, index) {
-                      final result = results[index];
-                      return ListTile(
-                        leading: Icon(result.icon, color: AdminColors.accent),
-                        title: Text(
-                          result.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          result.subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onTap: () {
-                          Navigator.of(dialogContext).pop();
-                          widget.onNavigate(result.destination);
-                        },
-                      );
-                    },
-                  ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        ),
-      );
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Search failed: $error')));
-      }
-    } finally {
-      if (mounted) setState(() => _searching = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 220;
-        final veryCompact = constraints.maxWidth < 160;
-        return TextField(
-          controller: _controller,
-          textInputAction: TextInputAction.search,
-          onChanged: (_) => setState(() {}),
-          onSubmitted: (_) => _search(),
-          decoration: InputDecoration(
-            hintText: compact
-                ? 'Search...'
-                : 'Search mountains, users, trails...',
-            prefixIcon: veryCompact ? null : const Icon(Icons.search_rounded),
-            suffixIcon: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_controller.text.isNotEmpty)
-                  IconButton(
-                    tooltip: 'Clear search',
-                    onPressed: () {
-                      _controller.clear();
-                      setState(() {});
-                    },
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                if (_searching)
-                  const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                else if (_controller.text.isEmpty || !compact)
-                  IconButton(
-                    tooltip: 'Search',
-                    onPressed: _search,
-                    icon: const Icon(Icons.arrow_forward_rounded),
-                  ),
-              ],
-            ),
-            filled: true,
-            fillColor: const Color(0xFFF4F7F8),
-            contentPadding: EdgeInsets.zero,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xFFDCE5E9)),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xFFDCE5E9)),
-            ),
-          ),
-        );
-      },
     );
   }
 }
@@ -1015,7 +759,10 @@ class _NotificationBellState extends State<_NotificationBell> {
             'type',
             whereIn: const ['sos', 'trail_submission', 'incident_report'],
           )
-          .where('mountainName', isEqualTo: widget.access.managedMountainName);
+          .where(
+            'mountainName',
+            whereIn: _mountainNameVariants(widget.access.managedMountainName!),
+          );
     }
     return query.orderBy('createdAt', descending: true).limit(50).snapshots();
   }
@@ -1519,21 +1266,22 @@ class _DashboardOverviewPage extends StatelessWidget {
         .where('status', isEqualTo: 'sent');
     if (access.isMountainHead) {
       final mountainName = access.managedMountainName!;
+      final mountainNames = _mountainNameVariants(mountainName);
       pendingGuidesQuery = pendingGuidesQuery.where(
         'mountainNames',
-        arrayContains: mountainName,
+        arrayContainsAny: mountainNames,
       );
       pendingTrailsQuery = pendingTrailsQuery.where(
         'mountainName',
-        isEqualTo: mountainName,
+        whereIn: mountainNames,
       );
       activeRoomsQuery = activeRoomsQuery.where(
         'mountainName',
-        isEqualTo: mountainName,
+        whereIn: mountainNames,
       );
       activeSosQuery = activeSosQuery.where(
         'mountainName',
-        isEqualTo: mountainName,
+        whereIn: mountainNames,
       );
     }
     return SingleChildScrollView(
@@ -1587,6 +1335,8 @@ class _DashboardOverviewPage extends StatelessWidget {
           ),
           const SizedBox(height: 28),
           _OverviewQuickPanels(access: access, onNavigate: onNavigate),
+          const SizedBox(height: 20),
+          _OverviewIncidentReports(access: access, onNavigate: onNavigate),
           const SizedBox(height: 20),
           if (access.isTourismAdmin || access.isMountainHead)
             _SectionCard(
@@ -1905,11 +1655,9 @@ class _OverviewQuickPanels extends StatelessWidget {
         .collectionGroup('sos_events')
         .where('status', isEqualTo: 'sent');
     if (access.isMountainHead) {
-      rooms = rooms.where(
-        'mountainName',
-        isEqualTo: access.managedMountainName,
-      );
-      sos = sos.where('mountainName', isEqualTo: access.managedMountainName);
+      final mountainNames = _mountainNameVariants(access.managedMountainName!);
+      rooms = rooms.where('mountainName', whereIn: mountainNames);
+      sos = sos.where('mountainName', whereIn: mountainNames);
     }
     final roomsStream = rooms.snapshots();
     final sosStream = sos.snapshots();
@@ -2163,6 +1911,166 @@ class _OverviewQuickPanels extends StatelessWidget {
   }
 }
 
+class _OverviewIncidentReports extends StatelessWidget {
+  const _OverviewIncidentReports({
+    required this.access,
+    required this.onNavigate,
+  });
+
+  final _AdminAccess access;
+  final ValueChanged<int> onNavigate;
+
+  @override
+  Widget build(BuildContext context) {
+    Query<Map<String, dynamic>> reports = FirebaseFirestore.instance
+        .collection('incident_reports');
+    if (access.isMountainHead) {
+      reports = reports.where(
+        'mountainName',
+        whereIn: _mountainNameVariants(access.managedMountainName!),
+      );
+    }
+    reports = reports.orderBy('createdAt', descending: true).limit(4);
+
+    return _SectionCard(
+      title: 'Recent Incident Reports',
+      child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: reports.snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
+          if (!snapshot.hasData) return const _LoadingRow();
+          final docs = snapshot.data!.docs;
+          if (docs.isEmpty) {
+            return const _EmptyRow('No incident reports have been filed.');
+          }
+
+          return Column(
+            children: [
+              for (final doc in docs) ...[
+                InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => onNavigate(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 10,
+                      horizontal: 4,
+                    ),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 20,
+                          backgroundColor: _incidentStatusColor(
+                            _reportStatus(doc.data()),
+                          ).withValues(alpha: 0.12),
+                          child: Icon(
+                            _incidentStatusIcon(_reportStatus(doc.data())),
+                            color: _incidentStatusColor(
+                              _reportStatus(doc.data()),
+                            ),
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${doc.data()['mountainName'] ?? 'Unknown mountain'} · '
+                                '${doc.data()['category'] ?? 'Incident'}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                'Hiker: ${doc.data()['hikerName'] ?? 'Hiker'} · '
+                                'Guide: ${doc.data()['guideName'] ?? 'Tour Guide'} · '
+                                '${_formatTimestamp(doc.data()['createdAt'])}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.black54,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        _IncidentReportStatusBadge(
+                          status: _reportStatus(doc.data()),
+                        ),
+                        const SizedBox(width: 4),
+                        const Icon(
+                          Icons.chevron_right_rounded,
+                          color: Colors.black45,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                if (doc != docs.last) const Divider(height: 1),
+              ],
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () => onNavigate(8),
+                  icon: const Icon(Icons.assignment_outlined, size: 18),
+                  label: const Text('View all incident reports'),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+Color _incidentStatusColor(String status) => switch (status) {
+  'acknowledged' => Colors.blue,
+  'responders_sent' => Colors.deepPurple,
+  'responded' => Colors.green,
+  _ => Colors.orange,
+};
+
+IconData _incidentStatusIcon(String status) => switch (status) {
+  'acknowledged' => Icons.visibility_rounded,
+  'responders_sent' => Icons.support_agent_rounded,
+  'responded' => Icons.check_circle_rounded,
+  _ => Icons.assignment_late_rounded,
+};
+
+class _IncidentReportStatusBadge extends StatelessWidget {
+  const _IncidentReportStatusBadge({required this.status});
+
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _incidentStatusColor(status);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.30)),
+      ),
+      child: Text(
+        _incidentStatusLabel(status),
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
 String _actionVerb(String action) {
   switch (action) {
     case 'send_sos':
@@ -2324,13 +2232,18 @@ class _TourGuideVerificationPage extends StatelessWidget {
     if (access.isMountainHead) {
       pendingGuidesQuery = pendingGuidesQuery.where(
         'mountainNames',
-        arrayContains: access.managedMountainName,
+        arrayContainsAny: _mountainNameVariants(access.managedMountainName!),
       );
     }
-    final legacyGuidesQuery = FirebaseFirestore.instance
+    Query<Map<String, dynamic>> legacyGuidesQuery = FirebaseFirestore.instance
         .collection('tour_guide_applications')
-        .where('status', isEqualTo: 'pending')
-        .where('mountainsHandled', isEqualTo: access.managedMountainName);
+        .where('status', isEqualTo: 'pending');
+    if (access.isMountainHead) {
+      legacyGuidesQuery = legacyGuidesQuery.where(
+          'mountainsHandled',
+          whereIn: _mountainNameVariants(access.managedMountainName!),
+        );
+    }
 
     return SingleChildScrollView(
       padding: _adminPagePadding(context),
@@ -2900,7 +2813,7 @@ class _TrailVerificationPage extends StatelessWidget {
     if (access.isMountainHead) {
       pendingTrailsQuery = pendingTrailsQuery.where(
         'mountainName',
-        isEqualTo: access.managedMountainName,
+        whereIn: _mountainNameVariants(access.managedMountainName!),
       );
     }
 
@@ -3606,23 +3519,41 @@ class _StreamErrorRow extends StatelessWidget {
   );
 }
 
-class _IncidentReportsPage extends StatelessWidget {
+class _IncidentReportsPage extends StatefulWidget {
   const _IncidentReportsPage({required this.access});
 
   final _AdminAccess access;
+
+  @override
+  State<_IncidentReportsPage> createState() => _IncidentReportsPageState();
+}
+
+class _IncidentReportsPageState extends State<_IncidentReportsPage> {
+  static const _pageSize = 20;
+
+  int _pageIndex = 0;
+  String _selectedStatus = 'all';
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>?> _pageCursors = [
+    null,
+  ];
 
   @override
   Widget build(BuildContext context) {
     Query<Map<String, dynamic>> reports = FirebaseFirestore.instance.collection(
       'incident_reports',
     );
-    if (access.isMountainHead) {
+    if (widget.access.isMountainHead) {
       reports = reports.where(
         'mountainName',
-        isEqualTo: access.managedMountainName,
+        whereIn: _mountainNameVariants(widget.access.managedMountainName!),
       );
     }
-    reports = reports.orderBy('createdAt', descending: true).limit(100);
+    reports = reports.orderBy('createdAt', descending: true);
+    final pageCursor = _pageCursors[_pageIndex];
+    if (pageCursor != null) {
+      reports = reports.startAfterDocument(pageCursor);
+    }
+    reports = reports.limit(_pageSize + 1);
 
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: reports.snapshots(),
@@ -3637,7 +3568,15 @@ class _IncidentReportsPage extends StatelessWidget {
           return const Center(child: CircularProgressIndicator());
         }
 
-        final reportDocs = snapshot.data!.docs;
+        final reportDocs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+        final seenReportEvents = <String>{};
+        for (final report in snapshot.data!.docs.take(_pageSize)) {
+          final data = report.data();
+          final eventId = data['eventId']?.toString().trim() ?? '';
+          final roomId = data['roomId']?.toString() ?? '';
+          final uniqueKey = eventId.isEmpty ? report.id : '$roomId:$eventId';
+          if (seenReportEvents.add(uniqueKey)) reportDocs.add(report);
+        }
         final submittedCount = reportDocs
             .where((doc) => _reportStatus(doc.data()) == 'submitted')
             .length;
@@ -3650,10 +3589,20 @@ class _IncidentReportsPage extends StatelessWidget {
         final respondedCount = reportDocs
             .where((doc) => _reportStatus(doc.data()) == 'responded')
             .length;
+        final visibleReportDocs = _selectedStatus == 'all'
+            ? reportDocs
+            : reportDocs
+                  .where(
+                    (doc) => _reportStatus(doc.data()) == _selectedStatus,
+                  )
+                  .toList(growable: false);
 
-        return ListView(
-          padding: _adminPagePadding(context),
-          children: [
+        return Container(
+          color: const Color(0xFFFFF6E5),
+          child: ListView(
+            key: ValueKey(_pageIndex),
+            padding: _adminPagePadding(context),
+            children: [
             Text(
               'Incident Reports',
               style: Theme.of(
@@ -3662,7 +3611,7 @@ class _IncidentReportsPage extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              access.isMountainHead
+              widget.access.isMountainHead
                   ? 'Acknowledge each report, mark when responders are sent, then mark it responded once resolved.'
                   : 'Monitor hike incident reports across all mountains.',
               style: const TextStyle(color: Colors.black54),
@@ -3672,49 +3621,92 @@ class _IncidentReportsPage extends StatelessWidget {
               spacing: 10,
               runSpacing: 10,
               children: [
-                _IncidentReportCount(label: 'Total', count: reportDocs.length),
+                _IncidentReportCount(
+                  label: 'All',
+                  count: reportDocs.length,
+                  selected: _selectedStatus == 'all',
+                  onTap: () => setState(() => _selectedStatus = 'all'),
+                ),
                 _IncidentReportCount(
                   label: 'Filed',
                   count: submittedCount,
                   color: Colors.orange,
+                  selected: _selectedStatus == 'submitted',
+                  onTap: () => setState(() => _selectedStatus = 'submitted'),
                 ),
                 _IncidentReportCount(
                   label: 'Acknowledged',
                   count: acknowledgedCount,
                   color: Colors.blue,
+                  selected: _selectedStatus == 'acknowledged',
+                  onTap: () =>
+                      setState(() => _selectedStatus = 'acknowledged'),
                 ),
                 _IncidentReportCount(
                   label: 'Responders sent',
                   count: respondersSentCount,
                   color: Colors.deepPurple,
+                  selected: _selectedStatus == 'responders_sent',
+                  onTap: () =>
+                      setState(() => _selectedStatus = 'responders_sent'),
                 ),
                 _IncidentReportCount(
                   label: 'Responded',
                   count: respondedCount,
                   color: Colors.green,
+                  selected: _selectedStatus == 'responded',
+                  onTap: () => setState(() => _selectedStatus = 'responded'),
                 ),
               ],
             ),
             const SizedBox(height: 16),
             if (reportDocs.isEmpty)
               const _EmptyRow('No incident reports have been filed.')
+            else if (visibleReportDocs.isEmpty)
+              _EmptyRow(
+                'No ${_incidentStatusLabel(_selectedStatus).toLowerCase()} reports on this page.',
+              )
             else
-              for (final reportDoc in reportDocs)
+              for (final reportDoc in visibleReportDocs)
                 _IncidentReportListCard(
                   reportId: reportDoc.id,
                   data: reportDoc.data(),
-                  canRespond: access.isMountainHead,
+                  canRespond: widget.access.isMountainHead,
                 ),
-            if (reportDocs.length == 100)
-              const Padding(
-                padding: EdgeInsets.only(top: 8, bottom: 20),
-                child: Text(
-                  'Showing the 100 most recent reports.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.black54, fontSize: 12),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _pageIndex == 0
+                      ? null
+                      : () => setState(() => _pageIndex--),
+                  icon: const Icon(Icons.chevron_left),
+                  label: const Text('Previous'),
                 ),
-              ),
-          ],
+                const SizedBox(width: 16),
+                Text('Page ${_pageIndex + 1}'),
+                const SizedBox(width: 16),
+                OutlinedButton.icon(
+                  onPressed: snapshot.data!.docs.length <= _pageSize
+                      ? null
+                      : () {
+                          final nextPage = _pageIndex + 1;
+                          if (nextPage == _pageCursors.length) {
+                            _pageCursors.add(
+                              snapshot.data!.docs[_pageSize - 1],
+                            );
+                          }
+                          setState(() => _pageIndex = nextPage);
+                        },
+                  icon: const Icon(Icons.chevron_right),
+                  label: const Text('Next'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ],
+          ),
         );
       },
     );
@@ -3738,38 +3730,53 @@ String _incidentStatusLabel(String status) => switch (status) {
   _ => 'Filed',
 };
 
-String? _nextIncidentAction(String status) => switch (status) {
-  'submitted' => 'acknowledge',
-  'acknowledged' => 'send_responders',
-  'responders_sent' => 'resolve',
-  _ => null,
-};
-
-String _nextIncidentActionLabel(String status) => switch (status) {
-  'submitted' => 'Acknowledge',
-  'acknowledged' => 'Mark responders sent',
-  'responders_sent' => 'Mark responded',
-  _ => 'Responded',
-};
-
 class _IncidentReportCount extends StatelessWidget {
   const _IncidentReportCount({
     required this.label,
     required this.count,
+    required this.selected,
+    required this.onTap,
     this.color = AdminColors.accent,
   });
 
   final String label;
   final int count;
   final Color color;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      avatar: Icon(Icons.circle, size: 12, color: color),
-      label: Text('$label: $count'),
-      backgroundColor: color.withValues(alpha: 0.08),
-      side: BorderSide(color: color.withValues(alpha: 0.22)),
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: 'Filter $label incident reports. $count reports.',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: selected ? 0.20 : 0.08),
+              border: Border.all(
+                color: color.withValues(alpha: selected ? 0.85 : 0.40),
+                width: selected ? 1.5 : 1,
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.circle, size: 11, color: color),
+                const SizedBox(width: 10),
+                Text('$label: $count', style: const TextStyle(fontSize: 14)),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -3794,7 +3801,6 @@ class _IncidentReportListCard extends StatelessWidget {
       'responders_sent' => Colors.deepPurple,
       _ => Colors.orange,
     };
-    final action = _nextIncidentAction(status);
     final created = _formatTimestamp(data['createdAt']);
     final subject =
         '${data['mountainName'] ?? 'Unknown mountain'} · '
@@ -3803,24 +3809,14 @@ class _IncidentReportListCard extends StatelessWidget {
         'Hiker: ${data['hikerName'] ?? 'Hiker'} · '
         'Guide: ${data['guideName'] ?? 'Tour Guide'}'
         '${created.isEmpty ? '' : ' · $created'}';
-    final reportButton = OutlinedButton.icon(
-      onPressed: () => _openReport(context),
-      icon: Icon(
-        canRespond ? Icons.edit_note_rounded : Icons.visibility_outlined,
-      ),
-      label: const Text('Review report'),
-    );
-    final statusButton = canRespond
-        ? _IncidentStatusActionButton(
-            reportId: reportId,
-            action: action,
-            label: _nextIncidentActionLabel(status),
-          )
-        : null;
-
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
-      color: Colors.white,
+      color: const Color(0xFFFFFDF2),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: const BorderSide(color: Color(0xFFE8DCC1)),
+      ),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final reportDetails = Row(
@@ -3876,16 +3872,16 @@ class _IncidentReportListCard extends StatelessWidget {
             ],
           );
 
-          final reportActions = Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              reportButton,
-              if (statusButton != null) ...[
-                const SizedBox(height: 6),
-                statusButton,
-              ],
-            ],
+          final reportActions = OutlinedButton.icon(
+            onPressed: () => _openReport(context),
+            icon: const Icon(Icons.visibility_outlined, size: 18),
+            label: const Text('Review report'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF356B3C),
+              side: const BorderSide(color: Color(0xFF9C947E)),
+              shape: const StadiumBorder(),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
           );
 
           return Padding(
@@ -3925,61 +3921,6 @@ class _IncidentReportListCard extends StatelessWidget {
   }
 }
 
-class _IncidentStatusActionButton extends StatefulWidget {
-  const _IncidentStatusActionButton({
-    required this.reportId,
-    required this.action,
-    required this.label,
-  });
-
-  final String reportId;
-  final String? action;
-  final String label;
-
-  @override
-  State<_IncidentStatusActionButton> createState() =>
-      _IncidentStatusActionButtonState();
-}
-
-class _IncidentStatusActionButtonState
-    extends State<_IncidentStatusActionButton> {
-  bool _updating = false;
-
-  Future<void> _advanceStatus() async {
-    final action = widget.action;
-    if (action == null) return;
-    setState(() => _updating = true);
-    try {
-      await FirebaseFunctions.instance
-          .httpsCallable('updateIncidentReportStatus')
-          .call({'reportId': widget.reportId, 'action': action});
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not update report status: $error')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _updating = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FilledButton.icon(
-      onPressed: widget.action == null || _updating ? null : _advanceStatus,
-      icon: _updating
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : const Icon(Icons.arrow_forward_rounded),
-      label: Text(_updating ? 'Updating...' : widget.label),
-    );
-  }
-}
-
 class _HikeRoomMonitoringPage extends StatelessWidget {
   const _HikeRoomMonitoringPage({required this.access});
 
@@ -3997,11 +3938,14 @@ class _HikeRoomMonitoringPage extends StatelessWidget {
     if (access.isMountainHead) {
       currentRoomsQuery = currentRoomsQuery.where(
         'mountainName',
-        isEqualTo: access.managedMountainName,
+        whereIn: _mountainNameVariants(access.managedMountainName!),
       );
       historyQuery = FirebaseFirestore.instance
           .collection('hike_room_history')
-          .where('mountainName', isEqualTo: access.managedMountainName)
+          .where(
+            'mountainName',
+            whereIn: _mountainNameVariants(access.managedMountainName!),
+          )
           .orderBy('endedAt', descending: true)
           .limit(50);
     }
@@ -4715,6 +4659,7 @@ class _SosMonitoringPage extends StatefulWidget {
 class _SosMonitoringPageState extends State<_SosMonitoringPage> {
   bool _cleaningOrphanedAlerts = false;
   _SosAlertFilter _filter = _SosAlertFilter.all;
+  DateTimeRange? _dateRange;
   int _page = 0;
   Set<String> _deletedSenderIds = {};
   String? _deletedSenderLookupError;
@@ -4731,6 +4676,112 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
   void _selectFilter(_SosAlertFilter filter) {
     setState(() {
       _filter = filter;
+      _page = 0;
+    });
+  }
+
+  Future<void> _selectDateRange() async {
+    final now = DateTime.now();
+    final range = await showDialog<DateTimeRange>(
+      context: context,
+      builder: (dialogContext) {
+        DateTime? start = _dateRange?.start;
+        DateTime? end = _dateRange?.end;
+        final today = DateTime(now.year, now.month, now.day);
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final canApply = start != null &&
+                end != null &&
+                !end!.isBefore(start!);
+
+            return AlertDialog(
+              title: const Text('Filter SOS alerts'),
+              content: SizedBox(
+                width: 340,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Choose the date range for SOS alerts.'),
+                    const SizedBox(height: 16),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: dialogContext,
+                          initialDate: start ?? end ?? today,
+                          firstDate: DateTime(2020),
+                          lastDate: today,
+                          helpText: 'Select start date',
+                        );
+                        if (picked == null) return;
+                        setDialogState(() {
+                          start = DateTime(
+                            picked.year,
+                            picked.month,
+                            picked.day,
+                          );
+                          if (end != null && end!.isBefore(start!)) end = null;
+                        });
+                      },
+                      icon: const Icon(Icons.calendar_today_outlined),
+                      label: Text(
+                        start == null
+                            ? 'Start date'
+                            : 'Start: ${start!.month}/${start!.day}/${start!.year}',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final picked = await showDatePicker(
+                          context: dialogContext,
+                          initialDate: end ?? start ?? today,
+                          firstDate: start ?? DateTime(2020),
+                          lastDate: today,
+                          helpText: 'Select end date',
+                        );
+                        if (picked == null) return;
+                        setDialogState(() {
+                          end = DateTime(picked.year, picked.month, picked.day);
+                        });
+                      },
+                      icon: const Icon(Icons.event_outlined),
+                      label: Text(
+                        end == null
+                            ? 'End date'
+                            : 'End: ${end!.month}/${end!.day}/${end!.year}',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: canApply
+                      ? () => Navigator.pop(
+                          dialogContext,
+                          DateTimeRange(start: start!, end: end!),
+                        )
+                      : null,
+                  child: const Text('Apply'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (range == null || !mounted) return;
+    setState(() {
+      _dateRange = DateTimeRange(
+        start: DateTime(range.start.year, range.start.month, range.start.day),
+        end: DateTime(range.end.year, range.end.month, range.end.day),
+      );
       _page = 0;
     });
   }
@@ -4775,15 +4826,30 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
 
   Stream<QuerySnapshot<Map<String, dynamic>>> _sosEventsStream() {
     Query<Map<String, dynamic>> query = FirebaseFirestore.instance
-        .collectionGroup('sos_events')
-        .orderBy('createdAt', descending: true)
-        .limit(_maxLoadedAlerts);
+        .collectionGroup('sos_events');
+    final range = _dateRange;
+    if (range != null) {
+      query = query
+          .where(
+            'createdAt',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(range.start.toUtc()),
+          )
+          .where(
+            'createdAt',
+            isLessThan: Timestamp.fromDate(
+              range.end.add(const Duration(days: 1)).toUtc(),
+            ),
+          );
+    }
     if (widget.access.isMountainHead) {
       query = query.where(
         'mountainName',
-        isEqualTo: widget.access.managedMountainName,
+        whereIn: _mountainNameVariants(widget.access.managedMountainName!),
       );
     }
+    query = query
+        .orderBy('createdAt', descending: true)
+        .limit(_maxLoadedAlerts);
     return query.snapshots();
   }
 
@@ -5008,50 +5074,101 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
                       ),
                       const SizedBox(height: 18),
                     ],
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      runSpacing: 8,
+                      spacing: 12,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            _SosFilterChip(
+                              label: 'All',
+                              count: events.length,
+                              selected: _filter == _SosAlertFilter.all,
+                              onSelected: () =>
+                                  _selectFilter(_SosAlertFilter.all),
+                            ),
+                            _SosFilterChip(
+                              label: 'Acknowledged',
+                              count: acknowledgedEvents.length,
+                              selected:
+                                  _filter == _SosAlertFilter.acknowledged,
+                              onSelected: () =>
+                                  _selectFilter(_SosAlertFilter.acknowledged),
+                            ),
+                            _SosFilterChip(
+                              label: 'Unacknowledged',
+                              count: unacknowledgedEvents.length,
+                              selected:
+                                  _filter == _SosAlertFilter.unacknowledged,
+                              onSelected: () => _selectFilter(
+                                _SosAlertFilter.unacknowledged,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: _selectDateRange,
+                              icon: const Icon(
+                                Icons.calendar_today_outlined,
+                                size: 16,
+                              ),
+                              label: Text(
+                                _dateRange == null
+                                    ? 'Date range'
+                                    : '${_dateRange!.start.month}/${_dateRange!.start.day}/${_dateRange!.start.year} – '
+                                          '${_dateRange!.end.month}/${_dateRange!.end.day}/${_dateRange!.end.year}',
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 8,
+                                ),
+                              ),
+                            ),
+                            if (_dateRange != null)
+                              IconButton(
+                                tooltip: 'Clear date filter',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () => setState(() {
+                                  _dateRange = null;
+                                  _page = 0;
+                                }),
+                                icon: const Icon(Icons.close_rounded, size: 18),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
                     if (events.isEmpty)
-                      const _SosPageMessage(
+                      _SosPageMessage(
                         icon: Icons.check_circle_outline_rounded,
-                        message: 'No SOS alerts recorded.',
-                        detail:
-                            'New alerts will appear here when a hiker sends an SOS.',
+                        message: _dateRange == null
+                            ? 'No SOS alerts recorded.'
+                            : 'No SOS alerts for this date range.',
+                        detail: _dateRange == null
+                            ? 'New alerts will appear here when a hiker sends an SOS.'
+                            : 'Choose another date range or clear the date filter.',
                       )
                     else if (displayedEvents.isEmpty)
                       _SosPageMessage(
                         icon: Icons.filter_alt_off_rounded,
-                        message:
-                            'No ${_filter.label.toLowerCase()} SOS alerts.',
-                        detail:
-                            'Choose another filter to view more SOS alerts.',
+                        message: _dateRange == null
+                            ? 'No ${_filter.label.toLowerCase()} SOS alerts.'
+                            : 'No ${_filter.label.toLowerCase()} SOS alerts for this date range.',
+                        detail: _dateRange == null
+                            ? 'Choose another filter to view more SOS alerts.'
+                            : 'Choose another date range or clear the date filter.',
                       )
                     else ...[
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          _SosFilterChip(
-                            label: 'All',
-                            count: events.length,
-                            selected: _filter == _SosAlertFilter.all,
-                            onSelected: () =>
-                                _selectFilter(_SosAlertFilter.all),
-                          ),
-                          _SosFilterChip(
-                            label: 'Acknowledged',
-                            count: acknowledgedEvents.length,
-                            selected: _filter == _SosAlertFilter.acknowledged,
-                            onSelected: () =>
-                                _selectFilter(_SosAlertFilter.acknowledged),
-                          ),
-                          _SosFilterChip(
-                            label: 'Unacknowledged',
-                            count: unacknowledgedEvents.length,
-                            selected: _filter == _SosAlertFilter.unacknowledged,
-                            onSelected: () =>
-                                _selectFilter(_SosAlertFilter.unacknowledged),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
                       ...pageEvents.map((event) {
                         final data = event.data();
                         final roomId =
@@ -6082,7 +6199,9 @@ class _UserManagementPageState extends State<_UserManagementPage> {
               .where('accountType', isEqualTo: 'tour_guide')
               .where(
                 'mountainNames',
-                arrayContains: widget.access.managedMountainName,
+                arrayContainsAny: _mountainNameVariants(
+                  widget.access.managedMountainName!,
+                ),
               )
               .orderBy('email')
         : usersCollection.orderBy('email');

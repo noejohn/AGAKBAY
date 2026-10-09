@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:tunga/services/activity_sync_service.dart';
 import 'package:tunga/services/hike_room_service.dart';
 import 'package:tunga/services/offline_activity_database.dart';
@@ -8,7 +9,7 @@ bool isIncidentReportWorthySos(String? reason) {
   if (normalized == 'lost' || normalized == 'accident') return true;
   return RegExp(
     r'\b(disaster|calamity|typhoon|hurricane|cyclone|flood|landslide|'
-    r'earthquake|volcan|tsunami|wildfire|forest fire|lightning|'
+    r'earthquake|volcan|tsunami|wildfire|forest fire|lightning|incident|'
     r'tornado|avalanche|mudslide)\b',
   ).hasMatch(normalized);
 }
@@ -68,6 +69,7 @@ Future<void> _offerIncidentReport(
 }) async {
   final notes = await showDialog<String>(
     context: context,
+    barrierDismissible: false,
     builder: (dialogContext) => _IncidentReportDialog(
       room: room,
       senderName: senderName,
@@ -84,7 +86,9 @@ Future<void> _offerIncidentReport(
   try {
     final payload = <String, dynamic>{
       'roomId': room.id,
+      'guideId': FirebaseAuth.instance.currentUser?.uid,
       'source': source,
+      'mountainName': room.mountainName,
       'hikerName': senderName,
       'reason': reason,
       'latitude': latitude,
@@ -93,26 +97,29 @@ Future<void> _offerIncidentReport(
       'eventId': ?eventId,
       'receivedAt': ?receivedAt?.toUtc().toIso8601String(),
     };
-    final reportId = await OfflineActivityDatabase.instance.queueIncidentReport(
+    final reportId = source == 'firestore' && eventId != null
+        ? 'incident_${room.id}_$eventId'
+        : source == 'lora' && receivedAt != null
+        ? 'incident_lora_${room.id}_${receivedAt.microsecondsSinceEpoch}'
+        : null;
+    final queuedReportId = await OfflineActivityDatabase.instance.queueIncidentReport(
       payload,
-      id: source == 'lora' && receivedAt != null
-          ? 'incident_lora_${receivedAt.microsecondsSinceEpoch}'
-          : null,
+      id: reportId,
     );
     try {
       await ActivitySyncService.shared.syncPendingActivities();
     } catch (error) {
       syncError = error.toString();
-      debugPrint('Could not sync incident report $reportId: $error');
+      debugPrint('Could not sync incident report $queuedReportId: $error');
     }
     var stillPending = true;
     try {
       stillPending =
           (await OfflineActivityDatabase.instance.getPendingIncidentReports())
-              .any((report) => report.id == reportId);
+              .any((report) => report.id == queuedReportId);
     } catch (error) {
       syncError = error.toString();
-      debugPrint('Could not check incident report $reportId status: $error');
+      debugPrint('Could not check incident report $queuedReportId status: $error');
     }
     if (!context.mounted) return;
     messenger.showSnackBar(
@@ -172,7 +179,9 @@ class _IncidentReportDialogState extends State<_IncidentReportDialog> {
         ? 'Location unavailable'
         : 'Location: ${widget.latitude!.toStringAsFixed(6)}, '
               '${widget.longitude!.toStringAsFixed(6)}';
-    return AlertDialog(
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
       icon: const Icon(Icons.report_problem_rounded),
       title: const Text('Report this incident?'),
       content: SingleChildScrollView(
@@ -201,22 +210,21 @@ class _IncidentReportDialogState extends State<_IncidentReportDialog> {
                 hintText: 'What happened and what action was taken?',
                 border: OutlineInputBorder(),
               ),
+              onChanged: (_) => setState(() {}),
             ),
           ],
         ),
       ),
       actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Not now'),
-        ),
         FilledButton.icon(
-          onPressed: () =>
-              Navigator.of(context).pop(_notesController.text.trim()),
+          onPressed: _notesController.text.trim().isEmpty
+              ? null
+              : () => Navigator.of(context).pop(_notesController.text.trim()),
           icon: const Icon(Icons.save_rounded),
-          label: const Text('Save report'),
+          label: const Text('Save and Submit'),
         ),
       ],
+      ),
     );
   }
 }

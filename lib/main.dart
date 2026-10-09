@@ -20,6 +20,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:tunga/firebase_options.dart';
+import 'package:tunga/data/davao_mountains.dart';
 import 'package:tunga/admin/incident_report_dialog.dart';
 import 'package:tunga/screens/account_suspended_screen.dart';
 import 'package:tunga/services/kyrielle_rag_service.dart';
@@ -4164,12 +4165,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     ].join(' and ');
     final goToProfile = await _showAgakConfirmDialog(
       context,
-      icon: Icons.health_and_safety_rounded,
+      icon: Icons.warning_amber_rounded,
       title: 'Complete Your Safety Details',
       message:
-          'Please fill out $missing before joining a Hike Room or starting '
-          'a hike — this is how Agakbay and your Tour Guide can reach you in '
-          'an emergency.',
+          'Please fill out $missing before creating or joining a Hike Room, '
+          'or starting a hike. This is how Agakbay and your Tour Guide can '
+          'reach you in an emergency.',
       cancelLabel: 'Cancel',
       confirmLabel: 'Go to Profile',
     );
@@ -5108,6 +5109,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .toSet();
   }
 
+  String _canonicalDavaoMountainName(String mountainName) {
+    final tokens = _mountainTokens(mountainName);
+    for (final mountain in davaoMountains) {
+      final canonicalTokens = _mountainTokens(mountain.name);
+      if (tokens.length == canonicalTokens.length &&
+          canonicalTokens.containsAll(tokens)) {
+        return mountain.name;
+      }
+    }
+    return mountainName.trim();
+  }
+
   String _provinceOrCityFromAddress(String address) {
     final parts = address
         .split(RegExp(r'[,\n]'))
@@ -5401,6 +5414,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _MountainRouteOption? selectedRoute,
     _CommunityTrailData? communityTrail,
   ) async {
+    if (!await _ensureReadyToHike(returnToProfile: true) || !mounted) {
+      return;
+    }
     final routePoints = await _loadRoomRoutePoints(
       selectedRoute,
       communityTrail,
@@ -5413,7 +5429,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
     try {
       await _hikeRoomService.createRoom(
-        mountainName: trail.name,
+        mountainName: _canonicalDavaoMountainName(trail.name),
         mountainPlaceId: trail.placeId,
         mountainLatitude: trail.location.latitude,
         mountainLongitude: trail.location.longitude,
@@ -5431,6 +5447,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           builder: (_) => HikeRoomScreen(
             onStartHiking: _startHikingFromRoom,
             onBeforeJoinRoom: () => _ensureReadyToHike(returnToProfile: true),
+            onBeforeStartHike: () => _ensureReadyToHike(returnToProfile: true),
           ),
         ),
       );
@@ -6004,7 +6021,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final estimatedQuality = _estimateSubmissionQuality(hikeResult);
       await OfflineActivityDatabase.instance.queueTrailSubmission({
         'mountainKey': mountainKey,
-        'mountainName': trail.name,
+        'mountainName': _canonicalDavaoMountainName(trail.name),
         'trailName': recordingDetails?.trailName ?? trail.name,
         'stations': recordingDetails?.stationNames ?? const <String>[],
         'provinceOrCity': trail.provinceOrCity,
@@ -10009,6 +10026,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           onStartHiking: _startHikingFromRoom,
                           onBeforeJoinRoom: () =>
                               _ensureReadyToHike(returnToProfile: true),
+                          onBeforeStartHike: () =>
+                              _ensureReadyToHike(returnToProfile: true),
                         ),
                       ),
                     );
@@ -10042,6 +10061,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ],
             ),
+            if (_accountType == 'tour_guide') ...[
+              const SizedBox(height: 16),
+              _profileSection(
+                title: 'Filed Incident Reports',
+                children: [
+                  _GuideIncidentReportsSection(userId: user?.uid ?? ''),
+                ],
+              ),
+            ],
             const SizedBox(height: 16),
             _profileSection(
               title: 'Trail Activity',
@@ -17907,4 +17935,382 @@ class _SheetLoading extends StatelessWidget {
       ),
     );
   }
+}
+
+class _GuideIncidentReportsSection extends StatefulWidget {
+  const _GuideIncidentReportsSection({required this.userId});
+
+  final String userId;
+
+  @override
+  State<_GuideIncidentReportsSection> createState() =>
+      _GuideIncidentReportsSectionState();
+}
+
+class _GuideIncidentReportsSectionState
+    extends State<_GuideIncidentReportsSection> {
+  late Future<List<PendingIncidentReport>> _pendingReports;
+
+  @override
+  void initState() {
+    super.initState();
+    _pendingReports = _loadPendingReports();
+  }
+
+  Future<List<PendingIncidentReport>> _loadPendingReports() async {
+    try {
+      return await OfflineActivityDatabase.instance.getPendingIncidentReports();
+    } catch (_) {
+      return const <PendingIncidentReport>[];
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.userId.isEmpty) {
+      return const ListTile(title: Text('Sign in to view incident reports.'));
+    }
+    final reports = FirebaseFirestore.instance
+        .collection('incident_reports')
+        .where('guideId', isEqualTo: widget.userId);
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: reports.snapshots(),
+      builder: (context, snapshot) =>
+          FutureBuilder<List<PendingIncidentReport>>(
+            future: _pendingReports,
+            builder: (context, pendingSnapshot) {
+              final synced = snapshot.data?.docs ?? const [];
+              final syncedIds = synced.map((doc) => doc.id).toSet();
+              final pending =
+                  (pendingSnapshot.data ?? const <PendingIncidentReport>[])
+                      .where(
+                        (report) =>
+                            report.payload['guideId'] == widget.userId &&
+                            !syncedIds.contains(report.id),
+                      )
+                      .toList(growable: false);
+              if (snapshot.hasError && pending.isEmpty) {
+                return ListTile(
+                  leading: const Icon(Icons.cloud_off_rounded),
+                  title: const Text('Could not load filed reports'),
+                  subtitle: Text(snapshot.error.toString()),
+                );
+              }
+              if (!snapshot.hasData &&
+                  pendingSnapshot.connectionState == ConnectionState.waiting) {
+                return const ListTile(
+                  leading: SizedBox.square(
+                    dimension: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  title: Text('Loading incident reports...'),
+                );
+              }
+              if (synced.isEmpty && pending.isEmpty) {
+                return const ListTile(
+                  leading: Icon(Icons.assignment_outlined),
+                  title: Text('No incident reports filed yet'),
+                );
+              }
+              return Column(
+                children: [
+                  for (final report in pending)
+                    _guideIncidentReportTile(
+                      context,
+                      data: report.payload,
+                      status: 'Saved on this device · waiting to send',
+                      createdAt: report.createdAt,
+                    ),
+                  for (final report in synced)
+                    _guideIncidentReportTile(
+                      context,
+                      data: report.data(),
+                      status: _guideIncidentStatusLabel(
+                        _guideIncidentStatus(report.data()),
+                      ),
+                      createdAt: _incidentDate(report.data()['createdAt']),
+                    ),
+                ],
+              );
+            },
+          ),
+    );
+  }
+}
+
+DateTime? _incidentDate(dynamic value) {
+  if (value is Timestamp) return value.toDate();
+  if (value is DateTime) return value;
+  return null;
+}
+
+String _guideIncidentStatus(Map<String, dynamic> report) {
+  final status = report['status']?.toString();
+  if (status == 'acknowledged' ||
+      status == 'responders_sent' ||
+      status == 'responded') {
+    return status ?? 'submitted';
+  }
+  return 'submitted';
+}
+
+String _guideIncidentStatusLabel(String status) => switch (status) {
+  'acknowledged' => 'Acknowledged by Mountain Head',
+  'responders_sent' => 'Responders sent',
+  'responded' => 'Responded',
+  _ => 'Filed',
+};
+
+Widget _guideIncidentReportTile(
+  BuildContext context, {
+  required Map<String, dynamic> data,
+  required String status,
+  DateTime? createdAt,
+}) {
+  final mountain = data['mountainName']?.toString() ?? 'Hike incident';
+  final category = data['category']?.toString() ?? data['reason']?.toString();
+  final statusStyle = status.startsWith('Saved on this device')
+      ? (
+          icon: Icons.cloud_upload_outlined,
+          color: const Color(0xFF607D8B),
+        )
+      : switch (status) {
+        'Acknowledged by Mountain Head' => (
+          icon: Icons.visibility_rounded,
+          color: const Color(0xFF2878C8),
+        ),
+        'Responders sent' => (
+          icon: Icons.support_agent_rounded,
+          color: const Color(0xFF8A35B5),
+        ),
+        'Responded' => (
+          icon: Icons.check_circle_rounded,
+          color: const Color(0xFF2E9B58),
+        ),
+        _ => (
+          icon: Icons.assignment_late_rounded,
+          color: const Color(0xFFE58A00),
+        ),
+      };
+  final dateText = createdAt == null
+      ? ''
+      : '${createdAt.month}/${createdAt.day}/${createdAt.year}';
+  return ListTile(
+    leading: CircleAvatar(
+      radius: 17,
+      backgroundColor: statusStyle.color.withValues(alpha: 0.14),
+      child: Icon(statusStyle.icon, color: statusStyle.color, size: 19),
+    ),
+    title: Text(
+      category == null || category.isEmpty ? mountain : '$mountain · $category',
+    ),
+    subtitle: Text(
+      [status, if (dateText.isNotEmpty) dateText].join(' · '),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    ),
+    trailing: const Icon(Icons.chevron_right_rounded),
+    onTap: () {
+      final hikerName = data['hikerName']?.toString() ?? 'Hiker';
+      final roomCode = data['roomCode']?.toString() ?? '';
+      final notes = data['guideNotes']?.toString().trim() ?? '';
+      final latitude = (data['latitude'] as num?)?.toDouble();
+      final longitude = (data['longitude'] as num?)?.toDouble();
+
+      Widget detailRow(IconData icon, String label, String value) => Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 19, color: AgakColors.maroon),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 74,
+              child: Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.black54,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: const TextStyle(
+                  color: AgakColors.ink,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+
+      showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: const Color(0xFFFFFCF4),
+          surfaceTintColor: Colors.transparent,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(22, 22, 22, 8),
+          contentPadding: const EdgeInsets.fromLTRB(22, 8, 22, 12),
+          actionsPadding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
+          title: Row(
+            children: [
+              CircleAvatar(
+                radius: 22,
+                backgroundColor: statusStyle.color.withValues(alpha: 0.14),
+                child: Icon(
+                  statusStyle.icon,
+                  color: statusStyle.color,
+                  size: 23,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  'Incident report',
+                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 380,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: statusStyle.color.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(30),
+                      border: Border.all(
+                        color: statusStyle.color.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Text(
+                      status,
+                      style: TextStyle(
+                        color: statusStyle.color,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(14, 16, 14, 2),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: AgakColors.ink.withValues(alpha: 0.08),
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        detailRow(Icons.terrain_rounded, 'Mountain', mountain),
+                        detailRow(
+                          Icons.person_outline_rounded,
+                          'Hiker',
+                          hikerName,
+                        ),
+                        detailRow(
+                          Icons.warning_amber_rounded,
+                          'Reason',
+                          category?.isNotEmpty == true
+                              ? category!
+                              : 'Incident',
+                        ),
+                        if (dateText.isNotEmpty)
+                          detailRow(
+                            Icons.calendar_today_outlined,
+                            'Filed',
+                            dateText,
+                          ),
+                        if (roomCode.isNotEmpty)
+                          detailRow(
+                            Icons.groups_2_outlined,
+                            'Room',
+                            roomCode,
+                          ),
+                        if (latitude != null && longitude != null)
+                          detailRow(
+                            Icons.location_on_outlined,
+                            'Location',
+                            '${latitude.toStringAsFixed(5)}, '
+                                '${longitude.toStringAsFixed(5)}',
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF7F0E3),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(
+                              Icons.notes_rounded,
+                              size: 18,
+                              color: AgakColors.maroon,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Guide report',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          notes.isEmpty
+                              ? 'No additional details were provided.'
+                              : notes,
+                          style: const TextStyle(
+                            height: 1.4,
+                            color: AgakColors.ink,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: AgakColors.maroon,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              icon: const Icon(Icons.check_rounded, size: 18),
+              label: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }

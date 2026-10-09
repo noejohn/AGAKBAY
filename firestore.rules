@@ -30,6 +30,31 @@ service cloud.firestore {
         && request.auth.token.get('managedMountainName', '') != '';
     }
 
+    function assignedMountainNameVariants() {
+      let assigned = request.auth.token.get('managedMountainName', '');
+      return assigned == 'Mt. Apo' || assigned == 'Mt Apo' || assigned == 'Mount Apo'
+        ? ['Mt. Apo', 'Mt Apo', 'Mount Apo']
+        : assigned == 'Mount Dinor' || assigned == 'Mt. Dinor' || assigned == 'Mt Dinor'
+        ? ['Mount Dinor', 'Mt. Dinor', 'Mt Dinor']
+        : assigned == 'Mount Loay' || assigned == 'Mt. Loay' || assigned == 'Mt Loay'
+        ? ['Mount Loay', 'Mt. Loay', 'Mt Loay']
+        : assigned == 'Mount Megatong' || assigned == 'Mt. Megatong' || assigned == 'Mt Megatong'
+        ? ['Mount Megatong', 'Mt. Megatong', 'Mt Megatong']
+        : assigned == 'Mt. Hamiguitan' || assigned == 'Mt Hamiguitan' || assigned == 'Mount Hamiguitan'
+        ? ['Mt. Hamiguitan', 'Mt Hamiguitan', 'Mount Hamiguitan']
+        : assigned == 'Mt. Kampalili' || assigned == 'Mt Kampalili' || assigned == 'Mount Kampalili'
+        ? ['Mt. Kampalili', 'Mt Kampalili', 'Mount Kampalili']
+        : assigned == 'Mt. Talomo' || assigned == 'Mt Talomo' || assigned == 'Mount Talomo'
+        ? ['Mt. Talomo', 'Mt Talomo', 'Mount Talomo']
+        : [assigned];
+    }
+
+    function isAssignedMountainName(mountainName) {
+      return isMountainHead()
+        && mountainName is string
+        && mountainName in assignedMountainNameVariants();
+    }
+
     function guideCanClearActiveHikeRoom(userId) {
       let roomId = resource.data.get('activeHikeRoomId', '');
       return signedIn()
@@ -63,9 +88,9 @@ service cloud.firestore {
         isTourismAdmin() ||
         (isMountainHead()
           && resource.data.accountType == 'tour_guide'
-          && resource.data.get('mountainNames', []).hasAny([
-            request.auth.token.managedMountainName
-          ])) ||
+          && resource.data.get('mountainNames', []).hasAny(
+            assignedMountainNameVariants()
+          )) ||
         (!isAdmin() && resource.data.accountType == 'tour_guide') ||
         isOwner(userId)
       );
@@ -211,9 +236,7 @@ service cloud.firestore {
         && (
           !isAdmin() ||
           isTourismAdmin() ||
-          (isMountainHead()
-            && resource.data.get('mountainName', '') ==
-              request.auth.token.managedMountainName)
+          isAssignedMountainName(resource.data.get('mountainName', ''))
         );
       allow create: if signedIn()
         && request.resource.data.guideId == request.auth.uid;
@@ -233,9 +256,9 @@ service cloud.firestore {
           && (
             !isAdmin() ||
             isTourismAdmin() ||
-            (isMountainHead() && get(
+            (isAssignedMountainName(get(
               /databases/$(database)/documents/hike_rooms/$(roomId)
-            ).data.mountainName == request.auth.token.managedMountainName)
+            ).data.get('mountainName', '')))
           );
         // Every participant doc is created by its own owner (createRoom
         // for the guide, joinRoom for a hiker) — doc id and userId field
@@ -263,13 +286,10 @@ service cloud.firestore {
         allow read: if signedIn() && (
           isTourismAdmin() ||
           !isAdmin() ||
-          (isMountainHead() && (
-            resource.data.get('mountainName', '') ==
-              request.auth.token.managedMountainName ||
-            get(
+          (isAssignedMountainName(resource.data.get('mountainName', '')) ||
+            (isMountainHead() && isAssignedMountainName(get(
               /databases/$(database)/documents/hike_rooms/$(roomId)
-            ).data.mountainName == request.auth.token.managedMountainName
-          ))
+            ).data.get('mountainName', ''))))
         );
         // Creation goes through the sendSosEvent Cloud Function only (see
         // functions/index.js), which re-verifies room/participant status
@@ -298,9 +318,7 @@ service cloud.firestore {
     // collection-group query across every hike room.
     match /{path=**}/sos_events/{eventId} {
       allow read: if isTourismAdmin()
-        || (isMountainHead()
-          && resource.data.get('mountainName', '') ==
-            request.auth.token.managedMountainName);
+        || isAssignedMountainName(resource.data.get('mountainName', ''));
     }
 
     match /trail_submissions/{submissionId} {
@@ -312,9 +330,7 @@ service cloud.firestore {
         && (
           resource.data.submittedBy == request.auth.uid ||
           isTourismAdmin() ||
-          (isMountainHead()
-            && resource.data.get('mountainName', '') ==
-              request.auth.token.managedMountainName)
+          isAssignedMountainName(resource.data.get('mountainName', ''))
         );
       allow create: if signedIn() && request.resource.data.submittedBy == request.auth.uid;
       allow update, delete: if false;
@@ -357,12 +373,10 @@ service cloud.firestore {
         resource.data.uid == request.auth.uid ||
         isTourismAdmin() ||
         (isMountainHead()
-          && resource.data.get('mountainNames', []).hasAny([
-            request.auth.token.managedMountainName
-          ])) ||
-        (isMountainHead()
-          && resource.data.get('mountainsHandled', '') ==
-            request.auth.token.managedMountainName)
+          && resource.data.get('mountainNames', []).hasAny(
+            assignedMountainNameVariants()
+          )) ||
+        isAssignedMountainName(resource.data.get('mountainsHandled', ''))
       );
       allow create: if signedIn()
         && request.resource.data.uid == request.auth.uid
@@ -383,8 +397,7 @@ service cloud.firestore {
           && resource.data.get('type', '') in [
             'sos', 'trail_submission', 'incident_report'
           ]
-          && resource.data.get('mountainName', '') ==
-            request.auth.token.managedMountainName);
+          && isAssignedMountainName(resource.data.get('mountainName', '')));
 
       allow create: if false;
       allow delete: if false;
@@ -397,8 +410,7 @@ service cloud.firestore {
             && resource.data.get('type', '') in [
               'sos', 'trail_submission', 'incident_report'
             ]
-            && resource.data.get('mountainName', '') ==
-              request.auth.token.managedMountainName)
+            && isAssignedMountainName(resource.data.get('mountainName', '')))
         );
     }
 
@@ -427,9 +439,7 @@ service cloud.firestore {
       allow read: if signedIn() && (
         isTourismAdmin() ||
         resource.data.get('guideId', '') == request.auth.uid ||
-        (isMountainHead()
-          && resource.data.get('mountainName', '') ==
-            request.auth.token.managedMountainName)
+        isAssignedMountainName(resource.data.get('mountainName', ''))
       );
       allow write: if false;
     }
@@ -437,9 +447,7 @@ service cloud.firestore {
     match /hike_room_history/{roomId} {
       allow read: if signedIn() && (
         isTourismAdmin() ||
-        (isMountainHead()
-          && resource.data.get('mountainName', '') ==
-            request.auth.token.managedMountainName)
+        isAssignedMountainName(resource.data.get('mountainName', ''))
       );
       allow write: if false;
     }
