@@ -16,7 +16,8 @@
     "@upstash/redis": "^1.38.4",
     "firebase-admin": "^12.7.0",
     "firebase-functions": "^5.1.1",
-    "jose": "^4.15.9"
+    "jose": "^4.15.9",
+    "nodemailer": "^10.0.16"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",

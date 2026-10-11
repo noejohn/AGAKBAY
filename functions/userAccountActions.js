@@ -2,6 +2,7 @@ const admin = require("firebase-admin");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { assertTourismAdmin } = require("./adminAuthorization");
 const { canonicalizeDavaoMountainName } = require("./mountainNames");
+const { MAIL_SECRETS, sendAdminWelcomeEmail } = require("./mailer");
 
 exports.refreshAdminClaims = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
@@ -81,9 +82,19 @@ exports.refreshAdminClaims = onCall(
 // User-owned hike data is stored under hike_rooms, not users/{uid}. Remove
 // their SOS event details and membership, and end any room they guide so
 // other participants are not left in a live room without its guide.
+// Runs `worker` over `items` with at most `limit` in flight at once — every
+// item used to be awaited one after another, so deletion time grew with
+// every hike room ever created.
+async function forEachConcurrently(items, limit, worker) {
+  for (let offset = 0; offset < items.length; offset += limit) {
+    await Promise.all(items.slice(offset, offset + limit).map(worker));
+  }
+}
+
 async function deleteUserHikeRecords(db, uid) {
-  const [notifications, rooms] = await Promise.all([
-    db.collection("notifications").get(),
+  // Only this user's SOS notifications — not the whole collection.
+  const [sosNotifications, rooms] = await Promise.all([
+    db.collection("notifications").where("senderId", "==", uid).get(),
     db.collection("hike_rooms").get(),
   ]);
 
@@ -91,23 +102,22 @@ async function deleteUserHikeRecords(db, uid) {
   const queueUpdate = (ref, data) => writesByPath.set(ref.path, { ref, data });
   const queueDelete = (ref) => writesByPath.set(ref.path, { ref, delete: true });
 
-  for (const notification of notifications.docs) {
-    const data = notification.data();
-    if (data.type === "sos" && data.senderId === uid) {
-      queueDelete(notification.ref);
-    }
+  for (const notification of sosNotifications.docs) {
+    if (notification.data().type === "sos") queueDelete(notification.ref);
   }
 
   // Walk rooms directly so deletion does not depend on collection-group
-  // indexes for participant or SOS sender fields.
-  for (const room of rooms.docs) {
+  // indexes for participant or SOS sender fields — but check them in
+  // parallel, and only read the SOS events this user actually sent.
+  await forEachConcurrently(rooms.docs, 20, async (room) => {
     const targetParticipantRef = room.ref.collection("participants").doc(uid);
-    const targetParticipant = await targetParticipantRef.get();
+    const [targetParticipant, sosEvents] = await Promise.all([
+      targetParticipantRef.get(),
+      room.ref.collection("sos_events").where("senderId", "==", uid).get(),
+    ]);
     if (targetParticipant.exists) queueDelete(targetParticipantRef);
 
-    const sosEvents = await room.ref.collection("sos_events").get();
     for (const event of sosEvents.docs) {
-      if (event.data().senderId !== uid) continue;
       queueDelete(event.ref);
       queueDelete(
         db.collection("notifications").doc(`sos_${room.id}_${event.id}`),
@@ -115,7 +125,7 @@ async function deleteUserHikeRecords(db, uid) {
     }
 
     queueDelete(room.ref.collection("sos_cooldowns").doc(uid));
-    if (room.data().guideId !== uid) continue;
+    if (room.data().guideId !== uid) return;
 
     queueUpdate(room.ref, {
       status: "ended",
@@ -124,27 +134,26 @@ async function deleteUserHikeRecords(db, uid) {
       autoEndedReason: "guide_account_deleted",
     });
     const roomParticipants = await room.ref.collection("participants").get();
-    for (const participant of roomParticipants.docs) {
+    await Promise.all(roomParticipants.docs.map(async (participant) => {
       const participantData = participant.data();
       if (participantData.userId === uid || participant.id === uid) {
         queueDelete(participant.ref);
-        continue;
+        return;
       }
-      if ((participantData.membershipStatus || "active") === "active") {
-        queueUpdate(participant.ref, {
-          membershipStatus: "room_ended",
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      if ((participantData.membershipStatus || "active") !== "active") return;
+      queueUpdate(participant.ref, {
+        membershipStatus: "room_ended",
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      const participantUserRef = db.collection("users").doc(participant.id);
+      const participantUser = await participantUserRef.get();
+      if (participantUser.exists) {
+        queueUpdate(participantUserRef, {
+          activeHikeRoomId: admin.firestore.FieldValue.delete(),
         });
-        const participantUserRef = db.collection("users").doc(participant.id);
-        const participantUser = await participantUserRef.get();
-        if (participantUser.exists) {
-          queueUpdate(participantUserRef, {
-            activeHikeRoomId: admin.firestore.FieldValue.delete(),
-          });
-        }
       }
-    }
-  }
+    }));
+  });
 
   const writes = [...writesByPath.values()];
 
@@ -262,12 +271,10 @@ async function deleteUserAccount({
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    phase = "clean-up-hike-data";
-    await cleanupHikeData(db, uid);
-
-    phase = "delete-private-user-data";
-    await cleanupPrivateData(db, uid);
-
+    // The sign-in account goes FIRST: it frees the email for a new sign-up
+    // and locks the person out immediately. If any cleanup step below then
+    // fails or times out, the leftover profile can simply be deleted again
+    // (manageUserAccount handles a profile with no sign-in account).
     if (deleteAuthUser) {
       phase = "delete-auth-account";
       try {
@@ -276,6 +283,12 @@ async function deleteUserAccount({
         if (error.code !== "auth/user-not-found") throw error;
       }
     }
+
+    phase = "clean-up-hike-data";
+    await cleanupHikeData(db, uid);
+
+    phase = "delete-private-user-data";
+    await cleanupPrivateData(db, uid);
 
     phase = "delete-firestore-profile";
     await db.recursiveDelete(userRef);
@@ -385,8 +398,15 @@ exports.cleanupOrphanedSosEvents = onCall(
   },
 );
 
+// Same region as the Firestore database (asia-southeast1). Running these in
+// the default us-central1 made every one of their many sequential database
+// reads cross the Pacific and back — the main reason Delete and Suspend were
+// so slow. The admin dashboard calls them through this region too
+// (_adminFunctions in lib/admin/admin_dashboard_shell.dart).
+const ADMIN_FUNCTIONS_REGION = "asia-southeast1";
+
 exports.manageUserAccount = onCall(
-  { timeoutSeconds: 120, memory: "256MiB" },
+  { timeoutSeconds: 300, memory: "512MiB", region: ADMIN_FUNCTIONS_REGION },
   async (request) => {
     assertTourismAdmin(request.auth);
 
@@ -406,7 +426,14 @@ exports.manageUserAccount = onCall(
     const db = admin.firestore();
 
     const userRef = db.collection("users").doc(uid);
-    const userSnap = await userRef.get();
+    // Profile and sign-in account are independent — fetch both at once.
+    const [userSnap, targetResult] = await Promise.all([
+      userRef.get(),
+      auth.getUser(uid).then(
+        (user) => ({ user }),
+        (error) => ({ error }),
+      ),
+    ]);
     if (!userSnap.exists) {
       throw new HttpsError("not-found", "User profile not found.");
     }
@@ -415,10 +442,9 @@ exports.manageUserAccount = onCall(
       profile.role === "admin" ||
       profile.accountType === "admin";
 
-    let target;
-    try {
-      target = await auth.getUser(uid);
-    } catch (error) {
+    const target = targetResult.user;
+    if (targetResult.error) {
+      const error = targetResult.error;
       if (error.code !== "auth/user-not-found") throw error;
       if (action !== "delete") {
         // Suspend/restore/revoke need a live sign-in account to act on.
@@ -443,9 +469,11 @@ exports.manageUserAccount = onCall(
     }
 
     if (["revoke_admin", "suspend", "delete"].includes(action) && isAdmin) {
-      const markedAdmins = await db.collection("users").where("adminAccess", "==", true).get();
-      const legacyAdmins = await db.collection("users").where("role", "==", "admin").get();
-      const legacyAccountTypeAdmins = await db.collection("users").where("accountType", "==", "admin").get();
+      const [markedAdmins, legacyAdmins, legacyAccountTypeAdmins] = await Promise.all([
+        db.collection("users").where("adminAccess", "==", true).get(),
+        db.collection("users").where("role", "==", "admin").get(),
+        db.collection("users").where("accountType", "==", "admin").get(),
+      ]);
       const admins = new Map([
         ...markedAdmins.docs,
         ...legacyAdmins.docs,
@@ -505,8 +533,8 @@ exports.manageUserAccount = onCall(
       newStatus = suspend ? "suspended" : "active";
     }
 
-    await userRef.update(updates);
-    await db.collection("admin_actions").add({
+    // Profile update and audit entry don't depend on each other.
+    await Promise.all([userRef.update(updates), db.collection("admin_actions").add({
       adminId: request.auth.uid,
       adminEmail: request.auth.token.email || null,
       action,
@@ -516,14 +544,19 @@ exports.manageUserAccount = onCall(
       previousStatus,
       newStatus,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    })]);
 
     return { action, status: newStatus };
   },
 );
 
 exports.createAdminAccount = onCall(
-  { timeoutSeconds: 30, memory: "256MiB" },
+  {
+    timeoutSeconds: 60,
+    memory: "256MiB",
+    region: ADMIN_FUNCTIONS_REGION,
+    secrets: MAIL_SECRETS,
+  },
   async (request) => {
     assertTourismAdmin(request.auth);
 
@@ -560,6 +593,7 @@ exports.createAdminAccount = onCall(
     const auth = admin.auth();
     const db = admin.firestore();
     let createdUser;
+    let sendingEmail = false;
     try {
       createdUser = await auth.createUser({
         email,
@@ -596,18 +630,37 @@ exports.createAdminAccount = onCall(
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       await auth.setCustomUserClaims(createdUser.uid, claims);
-      const resetLink = await auth.generatePasswordResetLink(email);
-      await db.collection("admin_actions").add({
-        adminId: request.auth.uid,
-        adminEmail: request.auth.token.email || null,
-        action: "create_admin",
-        targetId: createdUser.uid,
-        targetEmail: email,
-        targetName: fullName,
-        previousStatus: null,
-        newStatus: adminRole,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      // The one-time "set your password" link goes ONLY to the new admin's
+      // own inbox. It used to be returned to (and shown on the screen of)
+      // the admin who created the account — anyone who saw or copied it
+      // could have set the password and taken the account over.
+      const setupLink = await auth.generatePasswordResetLink(email);
+      sendingEmail = true;
+      await sendAdminWelcomeEmail({
+        to: email,
+        fullName,
+        adminRole,
+        managedMountainName,
+        setupLink,
       });
+      sendingEmail = false;
+      // The email is already in their inbox at this point, so an audit-log
+      // hiccup must not roll back (and invalidate) the account it describes.
+      try {
+        await db.collection("admin_actions").add({
+          adminId: request.auth.uid,
+          adminEmail: request.auth.token.email || null,
+          action: "create_admin",
+          targetId: createdUser.uid,
+          targetEmail: email,
+          targetName: fullName,
+          previousStatus: null,
+          newStatus: adminRole,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } catch (error) {
+        console.error("createAdminAccount: audit log write failed", error);
+      }
       return {
         uid: createdUser.uid,
         email,
@@ -615,9 +668,10 @@ exports.createAdminAccount = onCall(
         managedMountainName: adminRole === "mountain_head"
           ? managedMountainName
           : null,
-        resetLink,
+        emailSent: true,
       };
     } catch (error) {
+      // Roll the account back so the same email can simply be tried again.
       if (createdUser) {
         await auth.deleteUser(createdUser.uid).catch(() => {});
         await db.collection("users").doc(createdUser.uid).delete().catch(() => {});
@@ -625,6 +679,16 @@ exports.createAdminAccount = onCall(
       if (error instanceof HttpsError) throw error;
       if (error.code === "auth/email-already-exists") {
         throw new HttpsError("already-exists", "An account already uses this email.");
+      }
+      if (sendingEmail) {
+        console.error("createAdminAccount: welcome email failed", {
+          code: error?.code || null,
+          message: error?.message || String(error),
+        });
+        throw new HttpsError(
+          "unavailable",
+          "The account was not created because the welcome email could not be sent. Check the email address and try again.",
+        );
       }
       throw new HttpsError("internal", "Could not create the admin account.");
     }

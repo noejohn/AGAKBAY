@@ -33,6 +33,10 @@ const { backfillAuditLogNames } = require("./auditLogMaintenance");
 const { reviewTrailSubmission } = require("./trailReview");
 const { sanitizeRoutePoints } = require("./routePoints");
 const { sendNearbySos } = require("./nearbySos");
+const {
+  requestAdminPasswordReset,
+  confirmAdminPasswordReset,
+} = require("./adminPasswordReset");
 const { assertMountainHead } = require("./adminAuthorization");
 const {
   canonicalizeDavaoMountainName,
@@ -58,6 +62,8 @@ exports.backfillAuditLogNames = backfillAuditLogNames;
 exports.reviewTrailSubmission = reviewTrailSubmission;
 exports.sanitizeRoutePoints = sanitizeRoutePoints;
 exports.sendNearbySos = sendNearbySos;
+exports.requestAdminPasswordReset = requestAdminPasswordReset;
+exports.confirmAdminPasswordReset = confirmAdminPasswordReset;
 
 function buildHikeRoomHistoryRecord({ roomId, before, after, participants }) {
   if (before?.status !== "active" || after?.status !== "ended") return null;

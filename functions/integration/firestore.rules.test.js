@@ -559,6 +559,12 @@ describe("tour guide applications and admin data", () => {
     await assertFails(getDoc(doc(asHiker(), "admin_actions/a1")));
   });
 
+  test("nobody — not even an admin — can read password reset codes", async () => {
+    await seed({ "admin_password_resets/r1": { uid: "admin-1", codeHash: "abc" } });
+    await assertFails(getDoc(doc(asTourismAdmin(), "admin_password_resets/r1")));
+    await assertFails(getDoc(doc(asHiker(), "admin_password_resets/r1")));
+  });
+
   test("a Tourism Admin can read the admin audit log", async () => {
     await seed({ "admin_actions/a1": { action: "approve" } });
     await assertSucceeds(getDoc(doc(asTourismAdmin(), "admin_actions/a1")));
