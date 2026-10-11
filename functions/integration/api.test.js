@@ -173,7 +173,9 @@ describe("POST submitIncidentReport", () => {
     expect(report.data()).toMatchObject({
       guideId: guide.uid,
       eventId: "sos-1",
-      mountainName: "Mount Apo",
+      // The room says "Mount Apo"; submitIncidentReport stores the official
+      // Davao list spelling (canonicalizeDavaoMountainName in mountainNames.js).
+      mountainName: "Mt. Apo",
       category: "Accident",
       hikerName: "Hiker Juan",
       guideNotes: "Guide checked the location and contacted rescue.",
@@ -184,7 +186,7 @@ describe("POST submitIncidentReport", () => {
     expect(notifications.size).toBe(1);
     expect(notifications.docs[0].data()).toMatchObject({
       type: "incident_report",
-      mountainName: "Mount Apo",
+      mountainName: "Mt. Apo",
       guideNotes: "Guide checked the location and contacted rescue.",
     });
   });
