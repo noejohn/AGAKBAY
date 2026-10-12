@@ -14,6 +14,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import 'admin/admin_dashboard_shell.dart';
+import 'admin/admin_forgot_password_dialog.dart';
 import 'firebase_options.dart';
 import 'services/admin_password_auth_service.dart';
 
@@ -58,6 +59,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
   bool _restoring = true;
   bool _signingIn = false;
   String? _error;
+  String? _info;
 
   @override
   void initState() {
@@ -102,10 +104,25 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
     }
   }
 
+  Future<void> _forgotPassword() async {
+    final resetEmail = await showAdminForgotPasswordDialog(
+      context,
+      initialEmail: _emailController.text.trim(),
+    );
+    if (resetEmail == null || !mounted) return;
+    setState(() {
+      _emailController.text = resetEmail;
+      _passwordController.clear();
+      _error = null;
+      _info = 'Password changed. Sign in with your new password.';
+    });
+  }
+
   Future<void> _signIn() async {
     setState(() {
       _signingIn = true;
       _error = null;
+      _info = null;
     });
     try {
       final user = await _adminAuth.signIn(
@@ -173,7 +190,9 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                         passwordController: _passwordController,
                         loading: _signingIn,
                         error: _error,
+                        info: _info,
                         onSignIn: _signIn,
+                        onForgotPassword: _forgotPassword,
                       ),
               ),
             ),
@@ -211,20 +230,63 @@ class _MountainPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
+/// Sign-in password box with an eye icon to show/hide what was typed.
+class _PasswordField extends StatefulWidget {
+  const _PasswordField({required this.controller, required this.onSubmitted});
+
+  final TextEditingController controller;
+  final VoidCallback onSubmitted;
+
+  @override
+  State<_PasswordField> createState() => _PasswordFieldState();
+}
+
+class _PasswordFieldState extends State<_PasswordField> {
+  bool _visible = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: widget.controller,
+      obscureText: !_visible,
+      onSubmitted: (_) => widget.onSubmitted(),
+      decoration: InputDecoration(
+        prefixIcon: const Icon(Icons.lock_outline),
+        suffixIcon: IconButton(
+          tooltip: _visible ? 'Hide password' : 'Show password',
+          onPressed: () => setState(() => _visible = !_visible),
+          icon: Icon(
+            _visible
+                ? Icons.visibility_off_outlined
+                : Icons.visibility_outlined,
+          ),
+        ),
+        border: const OutlineInputBorder(
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+        ),
+      ),
+    );
+  }
+}
+
 class _SignInCard extends StatelessWidget {
   const _SignInCard({
     required this.emailController,
     required this.passwordController,
     required this.loading,
     required this.error,
+    required this.info,
     required this.onSignIn,
+    required this.onForgotPassword,
   });
 
   final TextEditingController emailController;
   final TextEditingController passwordController;
   final bool loading;
   final String? error;
+  final String? info;
   final VoidCallback onSignIn;
+  final VoidCallback onForgotPassword;
 
   @override
   Widget build(BuildContext context) {
@@ -282,16 +344,18 @@ class _SignInCard extends StatelessWidget {
                 const SizedBox(height: 16),
                 const Text('Password', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                 const SizedBox(height: 6),
-                TextField(
+                _PasswordField(
                   controller: passwordController,
-                  obscureText: true,
-                  onSubmitted: (_) => loading ? null : onSignIn(),
-                  decoration: const InputDecoration(
-                    prefixIcon: Icon(Icons.lock_outline),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(10))),
+                  onSubmitted: () => loading ? null : onSignIn(),
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: loading ? null : onForgotPassword,
+                    child: const Text('Forgot password?'),
                   ),
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 8),
                 SizedBox(
                   height: 48,
                   child: FilledButton(
@@ -309,6 +373,18 @@ class _SignInCard extends StatelessWidget {
                         : const Text('Sign In'),
                   ),
                 ),
+                if (info != null) ...[
+                  const SizedBox(height: 16),
+                  Text(
+                    info!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: AdminColors.accent,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 if (error != null) ...[
                   const SizedBox(height: 16),
                   Text(

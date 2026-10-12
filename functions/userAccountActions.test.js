@@ -15,7 +15,13 @@ jest.mock("firebase-functions/v2/https", () => ({
   },
 }));
 
+jest.mock("./mailer", () => ({
+  MAIL_SECRETS: [],
+  sendAdminWelcomeEmail: jest.fn().mockResolvedValue(),
+}));
+
 const admin = require("firebase-admin");
+const mailer = require("./mailer");
 const {
   findDeletedSosSenderIds,
   deleteUserAccount,
@@ -78,7 +84,7 @@ it("persists and returns the selected Mountain Head role and mountain", async ()
     uid: "head-uid",
     adminRole: "mountain_head",
     managedMountainName: "Mt. Apo",
-    resetLink: "reset-link",
+    emailSent: true,
   });
   expect(savedProfile).toMatchObject({
     role: "admin",
@@ -94,9 +100,69 @@ it("persists and returns the selected Mountain Head role and mountain", async ()
     adminRole: "mountain_head",
     managedMountainName: "Mt. Apo",
   });
+  // The setup link goes to the new admin's inbox only...
+  expect(mailer.sendAdminWelcomeEmail).toHaveBeenCalledWith(expect.objectContaining({
+    to: "head@example.com",
+    adminRole: "mountain_head",
+    managedMountainName: "Mt. Apo",
+    setupLink: "reset-link",
+  }));
 });
 
-it("deletes auth, hike, and profile data in order", async () => {
+it("never returns the password setup link to the admin who created the account", async () => {
+  admin.auth.mockReturnValue({
+    createUser: jest.fn().mockResolvedValue({ uid: "new-uid" }),
+    setCustomUserClaims: jest.fn().mockResolvedValue(),
+    generatePasswordResetLink: jest.fn().mockResolvedValue("secret-setup-link"),
+    deleteUser: jest.fn(),
+  });
+  admin.firestore.mockReturnValue({
+    collection: jest.fn(() => ({
+      doc: jest.fn(() => ({ set: jest.fn().mockResolvedValue() })),
+      add: jest.fn().mockResolvedValue(),
+    })),
+  });
+
+  const result = await createAdminAccount.run({
+    auth: { uid: "tourism-admin", token: { admin: true } },
+    data: { fullName: "New Admin", email: "new@example.com", adminRole: "tourism_admin" },
+  });
+
+  expect(JSON.stringify(result)).not.toContain("secret-setup-link");
+});
+
+it("rolls the account back when the welcome email cannot be sent", async () => {
+  mailer.sendAdminWelcomeEmail.mockRejectedValueOnce(new Error("SMTP auth failed"));
+  const deleteUser = jest.fn().mockResolvedValue();
+  const deleteProfile = jest.fn().mockResolvedValue();
+  admin.auth.mockReturnValue({
+    createUser: jest.fn().mockResolvedValue({ uid: "new-uid" }),
+    setCustomUserClaims: jest.fn().mockResolvedValue(),
+    generatePasswordResetLink: jest.fn().mockResolvedValue("link"),
+    deleteUser,
+  });
+  admin.firestore.mockReturnValue({
+    collection: jest.fn(() => ({
+      doc: jest.fn(() => ({
+        set: jest.fn().mockResolvedValue(),
+        delete: deleteProfile,
+      })),
+      add: jest.fn().mockResolvedValue(),
+    })),
+  });
+  const consoleError = jest.spyOn(console, "error").mockImplementation(() => {});
+
+  await expect(createAdminAccount.run({
+    auth: { uid: "tourism-admin", token: { admin: true } },
+    data: { fullName: "New Admin", email: "new@example.com", adminRole: "tourism_admin" },
+  })).rejects.toMatchObject({ code: "unavailable" });
+
+  expect(deleteUser).toHaveBeenCalledWith("new-uid");
+  expect(deleteProfile).toHaveBeenCalled();
+  consoleError.mockRestore();
+});
+
+it("deletes the sign-in account first (freeing the email), then hike and profile data", async () => {
   const order = [];
   const db = {
     collection: jest.fn(() => ({
@@ -134,7 +200,7 @@ it("deletes auth, hike, and profile data in order", async () => {
       cleanupPrivateData,
     }),
   ).resolves.toEqual({ action: "delete", status: "deleted" });
-  expect(order).toEqual(["audit", "hikes", "private", "auth", "profile"]);
+  expect(order).toEqual(["audit", "auth", "hikes", "private", "profile"]);
 });
 
 it("deletes guide applications and private storage files for the account", async () => {

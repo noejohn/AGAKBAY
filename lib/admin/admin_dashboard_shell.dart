@@ -14,12 +14,17 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../admin_main.dart' show AdminColors;
 import '../data/davao_mountains.dart';
 import 'incident_report_dialog.dart';
+
+/// Account-management Cloud Functions (manageUserAccount,
+/// createAdminAccount) run in asia-southeast1, next to the Firestore
+/// database — see ADMIN_FUNCTIONS_REGION in functions/userAccountActions.js.
+FirebaseFunctions get _adminFunctions =>
+    FirebaseFunctions.instanceFor(region: 'asia-southeast1');
 
 class _NavItem {
   const _NavItem(this.label, this.icon);
@@ -6538,7 +6543,7 @@ class _UserManagementPageState extends State<_UserManagementPage> {
     if (confirmed != true || !mounted) return;
 
     try {
-      await FirebaseFunctions.instance.httpsCallable('manageUserAccount').call({
+      await _adminFunctions.httpsCallable('manageUserAccount').call({
         'uid': userId,
         'action': action,
       });
@@ -6741,7 +6746,10 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
   bool _creating = false;
   String _adminRole = 'tourism_admin';
   String? _error;
-  String? _resetLink;
+  // Set once the server confirms the welcome email (with the one-time
+  // password setup link) went to the new admin's inbox. The link itself is
+  // never sent back here.
+  String? _sentToEmail;
   String? _createdAdminRole;
   String? _createdMountainName;
 
@@ -6761,7 +6769,7 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
       _error = null;
     });
     try {
-      final result = await FirebaseFunctions.instance
+      final result = await _adminFunctions
           .httpsCallable('createAdminAccount')
           .call<Map<String, dynamic>>({
             'fullName': _nameController.text.trim(),
@@ -6778,12 +6786,12 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
         throw StateError(
           'Firebase did not confirm the selected admin role and mountain. '
           'The account may have been created with different access. '
-          'Check the user profile before sharing the password setup link.',
+          'Check the user profile before they sign in.',
         );
       }
       if (!mounted) return;
       setState(() {
-        _resetLink = result.data['resetLink'] as String?;
+        _sentToEmail = result.data['email'] as String?;
         _createdAdminRole = createdRole as String;
         _createdMountainName = createdMountain as String?;
       });
@@ -6800,7 +6808,7 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final created = _resetLink != null;
+    final created = _sentToEmail != null;
     return AlertDialog(
       title: Text(created ? 'Admin Account Created' : 'Create Admin Account'),
       content: SizedBox(
@@ -6810,8 +6818,28 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.mark_email_read_outlined,
+                        color: AdminColors.accent,
+                        size: 28,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Sign-in details were emailed to $_sentToEmail.',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
                   const Text(
-                    'Send this password setup link to the new admin. It can be used to choose their sign-in password.',
+                    'The email explains that this is an Agakbay admin account and '
+                    'includes a one-time link for them to set their own password, '
+                    'plus a link to the admin dashboard. For security, the link is '
+                    'sent only to their inbox — it is not shown here.',
                   ),
                   const SizedBox(height: 12),
                   Text(
@@ -6821,7 +6849,11 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                   if (_createdAdminRole == 'mountain_head')
                     Text('Managed mountain: $_createdMountainName'),
                   const SizedBox(height: 12),
-                  SelectableText(_resetLink!),
+                  Text(
+                    'Not in their inbox? Ask them to check Spam. If the link '
+                    'expires, they can use "Forgot password?" on the sign-in page.',
+                    style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+                  ),
                 ],
               )
             : Form(
@@ -6913,24 +6945,16 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
               ),
       ),
       actions: [
-        TextButton(
-          onPressed: _creating ? null : () => Navigator.of(context).pop(),
-          child: Text(created ? 'Done' : 'Cancel'),
-        ),
         if (created)
-          FilledButton.icon(
-            onPressed: () async {
-              await Clipboard.setData(ClipboardData(text: _resetLink!));
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Password setup link copied.')),
-                );
-              }
-            },
-            icon: const Icon(Icons.copy),
-            label: const Text('Copy Link'),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Done'),
           )
-        else
+        else ...[
+          TextButton(
+            onPressed: _creating ? null : () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
             onPressed: _creating ? null : _createAccount,
             child: _creating
@@ -6939,8 +6963,9 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Text('Create Account'),
+                : const Text('Create & Email'),
           ),
+        ],
       ],
     );
   }
