@@ -146,6 +146,19 @@ service cloud.firestore {
         allow read: if signedIn();
         allow write: if isOwner(userId);
       }
+
+      // GPS activities recorded offline and uploaded later by
+      // ActivitySyncService (lib/services/activity_sync_service.dart) —
+      // the activity summary plus every recorded GPS point. Owner only.
+      // Without this, every upload since June 2026 was silently denied
+      // and offline activities never reached the server.
+      match /offline_activities/{activityId} {
+        allow read, create, update: if isOwner(userId);
+
+        match /points/{pointId} {
+          allow read, create, update: if isOwner(userId);
+        }
+      }
     }
 
     match /leaderboard/{userId} {

@@ -171,6 +171,48 @@ describe("users — profiles and roles", () => {
     await assertFails(updateDoc(doc(asHiker(), "users/hiker-2"), { fullName: "Hacked" }));
   });
 
+  // ST-NF-005: another user's hike record can't be changed or deleted.
+  test("a hiker can save their own hike record", async () => {
+    await assertSucceeds(setDoc(doc(asHiker(), "users/hiker-1/hikes/h1"), {
+      mountainName: "Mount Apo", distanceKm: 5.2, reachedSummit: true,
+    }));
+  });
+
+  test("a hiker CANNOT read, add, change, or delete another user's hike records", async () => {
+    await seed({ "users/hiker-2/hikes/h1": { mountainName: "Mount Apo", distanceKm: 5.2 } });
+    const other = doc(asHiker(), "users/hiker-2/hikes/h1");
+    await assertFails(getDoc(other));
+    await assertFails(setDoc(doc(asHiker(), "users/hiker-2/hikes/fake"), { distanceKm: 99 }));
+    await assertFails(updateDoc(other, { distanceKm: 99 }));
+    await assertFails(deleteDoc(other));
+  });
+
+  test("hike records can't be altered after saving, even by their owner", async () => {
+    await seed({ "users/hiker-1/hikes/h1": { mountainName: "Mount Apo", distanceKm: 5.2 } });
+    await assertFails(updateDoc(doc(asHiker(), "users/hiker-1/hikes/h1"), { distanceKm: 99 }));
+  });
+
+  test("a hiker can upload their own offline GPS activity and its points", async () => {
+    const db = asHiker();
+    await assertSucceeds(setDoc(doc(db, "users/hiker-1/offline_activities/act-1"), {
+      status: "finished", pointCount: 1, uploadComplete: false,
+    }));
+    await assertSucceeds(setDoc(doc(db, "users/hiker-1/offline_activities/act-1/points/00000000"), {
+      lat: 7.0, lon: 125.0,
+    }));
+    await assertSucceeds(updateDoc(doc(db, "users/hiker-1/offline_activities/act-1"), {
+      uploadComplete: true,
+    }));
+  });
+
+  test("a hiker CANNOT read or write someone else's offline activities", async () => {
+    await seed({ "users/hiker-2/offline_activities/act-1": { status: "finished" } });
+    await assertFails(getDoc(doc(asHiker(), "users/hiker-2/offline_activities/act-1")));
+    await assertFails(setDoc(doc(asHiker(), "users/hiker-2/offline_activities/act-2"), {
+      status: "finished",
+    }));
+  });
+
   test("a hiker CANNOT read someone else's notifications", async () => {
     await seed({ "users/hiker-2/notifications/n1": { title: "Private" } });
     await assertFails(getDoc(doc(asHiker(), "users/hiker-2/notifications/n1")));

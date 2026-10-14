@@ -336,6 +336,81 @@ describe("POST updateIncidentReportStatus", () => {
     expect(report.data().status).toBe("submitted");
   });
 
+  // ADM-UT-004: "the selected action updates the report status only once".
+  function guideStatusNotifications() {
+    return db.collection("users").doc("guide-1").collection("notifications")
+      .where("reportId", "==", "incident_status_test").get();
+  }
+
+  test("ADM-UT-004: pressing the same action twice updates the status only once", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport();
+    const body = { reportId: "incident_status_test", action: "acknowledge" };
+
+    const first = await callApi("updateIncidentReportStatus", body, head.idToken);
+    const afterFirst = (await db.collection("incident_reports")
+      .doc("incident_status_test").get()).data();
+    const second = await callApi("updateIncidentReportStatus", body, head.idToken);
+    const afterSecond = (await db.collection("incident_reports")
+      .doc("incident_status_test").get()).data();
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body.result.status).toBe("acknowledged");
+    // The second press changed nothing: same timestamp, same details.
+    expect(afterSecond.acknowledgedAt.isEqual(afterFirst.acknowledgedAt)).toBe(true);
+    expect(afterSecond.guideNotes).toBe("Initial report details.");
+    expect((await guideStatusNotifications()).size).toBe(1);
+  });
+
+  test("ADM-UT-004: two simultaneous presses still update the status only once", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport();
+    const body = { reportId: "incident_status_test", action: "acknowledge" };
+
+    const results = await Promise.all([
+      callApi("updateIncidentReportStatus", body, head.idToken),
+      callApi("updateIncidentReportStatus", body, head.idToken),
+    ]);
+
+    expect(results.map((res) => res.status)).toEqual([200, 200]);
+    const report = (await db.collection("incident_reports")
+      .doc("incident_status_test").get()).data();
+    expect(report.status).toBe("acknowledged");
+    expect((await guideStatusNotifications()).size).toBe(1);
+  });
+
+  test("ADM-UT-004: an earlier action can't be re-applied once the report has moved on", async () => {
+    const head = await createSignedInUser("head@test.com", "Head Helen", {
+      admin: true,
+      adminRole: "mountain_head",
+      managedMountainName: "Mount Apo",
+    });
+    await seedIncidentReport();
+    for (const action of ["acknowledge", "send_responders"]) {
+      await callApi("updateIncidentReportStatus", {
+        reportId: "incident_status_test", action,
+      }, head.idToken);
+    }
+
+    const res = await callApi("updateIncidentReportStatus", {
+      reportId: "incident_status_test", action: "acknowledge",
+    }, head.idToken);
+
+    expect(res.status).toBe(400);
+    const report = (await db.collection("incident_reports")
+      .doc("incident_status_test").get()).data();
+    expect(report.status).toBe("responders_sent");
+  });
+
   test("a Mountain Head cannot update a report for another mountain", async () => {
     const head = await createSignedInUser("head@test.com", "Head Helen", {
       admin: true,
@@ -452,5 +527,146 @@ describe("POST endHikeRoom", () => {
 
     const hikerProfile = await db.collection("users").doc(hiker.uid).get();
     expect(hikerProfile.data().activeHikeRoomId).toBeUndefined();
+  });
+});
+
+// ADM-UT-003: account changes made from the admin dashboard
+// (manageUserAccount, asia-southeast1) land on the intended account — in
+// both Firebase Authentication and the Firestore profile — and nowhere else.
+describe("POST manageUserAccount (ADM-UT-003)", () => {
+  const ADMIN_REGION = "asia-southeast1";
+
+  async function seedTourismAdminAndTarget() {
+    const tourismAdmin = await createSignedInUser("tourism@test.com", "Tourism Tina", {
+      admin: true,
+      role: "admin",
+      adminRole: "tourism_admin",
+    });
+    await db.collection("users").doc(tourismAdmin.uid).set({
+      fullName: "Tourism Tina",
+      email: "tourism@test.com",
+      role: "admin",
+      accountType: "admin",
+      adminRole: "tourism_admin",
+      adminAccess: true,
+    });
+    const target = await createSignedInUser("target@test.com", "Target Hiker");
+    await db.collection("users").doc(target.uid).set({
+      fullName: "Target Hiker",
+      email: "target@test.com",
+      role: "hiker",
+      accountType: "hiker",
+    });
+    const bystander = await createSignedInUser("bystander@test.com", "Bystander");
+    await db.collection("users").doc(bystander.uid).set({
+      fullName: "Bystander",
+      email: "bystander@test.com",
+      role: "hiker",
+      accountType: "hiker",
+    });
+    return { tourismAdmin, target, bystander };
+  }
+
+  test("Suspend: disables only the chosen account and records it", async () => {
+    const { tourismAdmin, target, bystander } = await seedTourismAdminAndTarget();
+
+    const res = await callApi("manageUserAccount", {
+      uid: target.uid, action: "suspend",
+    }, tourismAdmin.idToken, ADMIN_REGION);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result).toMatchObject({ action: "suspend", status: "suspended" });
+    expect((await admin.auth().getUser(target.uid)).disabled).toBe(true);
+    expect((await db.collection("users").doc(target.uid).get()).data().accountSuspended)
+      .toBe(true);
+    // Nobody else was touched.
+    expect((await admin.auth().getUser(bystander.uid)).disabled).toBe(false);
+    const audit = await db.collection("admin_actions")
+      .where("targetId", "==", target.uid).get();
+    expect(audit.docs.map((doc) => doc.data())).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "suspend", adminId: tourismAdmin.uid, newStatus: "suspended",
+      }),
+    ]));
+  });
+
+  test("Restore: re-enables a suspended account", async () => {
+    const { tourismAdmin, target } = await seedTourismAdminAndTarget();
+    await callApi("manageUserAccount", { uid: target.uid, action: "suspend" },
+      tourismAdmin.idToken, ADMIN_REGION);
+
+    const res = await callApi("manageUserAccount", {
+      uid: target.uid, action: "restore",
+    }, tourismAdmin.idToken, ADMIN_REGION);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.status).toBe("active");
+    expect((await admin.auth().getUser(target.uid)).disabled).toBe(false);
+    expect((await db.collection("users").doc(target.uid).get()).data().accountSuspended)
+      .toBe(false);
+  });
+
+  test("Revoke admin: removes admin access from that admin only", async () => {
+    const { tourismAdmin } = await seedTourismAdminAndTarget();
+    const head = await createSignedInUser("head@test.com", "Head Hank", {
+      admin: true, role: "admin", adminRole: "mountain_head", managedMountainName: "Mt. Apo",
+    });
+    await db.collection("users").doc(head.uid).set({
+      fullName: "Head Hank", role: "admin", accountType: "admin",
+      adminRole: "mountain_head", managedMountainName: "Mt. Apo", adminAccess: true,
+    });
+
+    const res = await callApi("manageUserAccount", {
+      uid: head.uid, action: "revoke_admin",
+    }, tourismAdmin.idToken, ADMIN_REGION);
+
+    expect(res.status).toBe(200);
+    expect((await admin.auth().getUser(head.uid)).customClaims).toMatchObject({ admin: false });
+    const profile = (await db.collection("users").doc(head.uid).get()).data();
+    expect(profile.adminAccess).toBe(false);
+    expect(profile.adminRole).toBeUndefined();
+    // The acting admin keeps their own access.
+    expect((await admin.auth().getUser(tourismAdmin.uid)).customClaims.admin).toBe(true);
+  });
+
+  test("Delete: removes the account and profile, and the email can sign up again", async () => {
+    const { tourismAdmin, target } = await seedTourismAdminAndTarget();
+
+    const res = await callApi("manageUserAccount", {
+      uid: target.uid, action: "delete",
+    }, tourismAdmin.idToken, ADMIN_REGION);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.status).toBe("deleted");
+    await expect(admin.auth().getUser(target.uid))
+      .rejects.toMatchObject({ code: "auth/user-not-found" });
+    expect((await db.collection("users").doc(target.uid).get()).exists).toBe(false);
+    // The same email is free for a brand-new account.
+    const reused = await admin.auth().createUser({
+      email: "target@test.com", password: "New#pass2026",
+    });
+    expect(reused.uid).not.toBe(target.uid);
+  });
+
+  test("403 PERMISSION_DENIED when a non-admin tries, and nothing changes", async () => {
+    const { target, bystander } = await seedTourismAdminAndTarget();
+
+    const res = await callApi("manageUserAccount", {
+      uid: target.uid, action: "suspend",
+    }, bystander.idToken, ADMIN_REGION);
+
+    expect(res.status).toBe(403);
+    expect((await admin.auth().getUser(target.uid)).disabled).toBe(false);
+  });
+
+  test("400 FAILED_PRECONDITION when an admin tries to restrict their own account", async () => {
+    const { tourismAdmin } = await seedTourismAdminAndTarget();
+
+    const res = await callApi("manageUserAccount", {
+      uid: tourismAdmin.uid, action: "suspend",
+    }, tourismAdmin.idToken, ADMIN_REGION);
+
+    expect(res.status).toBe(400);
+    expect((await admin.auth().getUser(tourismAdmin.uid)).disabled).toBe(false);
   });
 });

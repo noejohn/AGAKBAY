@@ -57,11 +57,11 @@ async function createSignedInUser(email, displayName, customClaims) {
  * an HTTP POST with { data } and the user's ID token. Returns the HTTP
  * status plus the parsed body ({ result } on success, { error } on failure).
  */
-async function callApi(name, data, idToken) {
+async function callApi(name, data, idToken, region = REGION) {
   const headers = { "Content-Type": "application/json" };
   if (idToken) headers.Authorization = `Bearer ${idToken}`;
   const response = await fetch(
-    `http://${FUNCTIONS_HOST}/${PROJECT_ID}/${REGION}/${name}`,
+    `http://${FUNCTIONS_HOST}/${PROJECT_ID}/${region}/${name}`,
     { method: "POST", headers, body: JSON.stringify({ data }) },
   );
   return { status: response.status, body: await response.json() };
