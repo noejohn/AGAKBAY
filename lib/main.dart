@@ -1748,6 +1748,11 @@ enum _MarkerStatusFilter { all, open, closed }
 
 enum _MyHikesView { completed, recorded }
 
+/// Filter chips on My Hikes → Recorded.
+/// uploading = still only on this phone (no internet yet);
+/// pending = uploaded, waiting for an admin's review.
+enum _RecordingFilter { all, uploading, pending, approved, rejected }
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -1799,6 +1804,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _selectedNavIndex = 0;
   int _communityFeedFilterIndex = 0;
   _MyHikesView _myHikesView = _MyHikesView.completed;
+  _RecordingFilter _recordingFilter = _RecordingFilter.all;
   Marker? _searchMarker;
   List<_NearbyTrail> _nearbyTrails = const [];
   List<PendingTrailSubmission> _pendingTrailSubmissions =
@@ -9617,10 +9623,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
           );
         }
+        // Every uploaded recording falls in exactly one of these.
+        _RecordingFilter categoryOf(
+          QueryDocumentSnapshot<Map<String, dynamic>> doc,
+        ) {
+          final status = (doc.data()['status']?.toString() ?? '').toLowerCase();
+          if (_liveTrailStatuses.contains(status)) {
+            return _RecordingFilter.approved;
+          }
+          if (status == 'rejected') return _RecordingFilter.rejected;
+          return _RecordingFilter.pending;
+        }
+
+        final counts = <_RecordingFilter, int>{
+          for (final filter in _RecordingFilter.values) filter: 0,
+        };
+        counts[_RecordingFilter.uploading] = _pendingTrailSubmissions.length;
+        for (final doc in remoteDocs) {
+          final category = categoryOf(doc);
+          counts[category] = counts[category]! + 1;
+        }
+        counts[_RecordingFilter.all] =
+            _pendingTrailSubmissions.length + remoteDocs.length;
+
+        final filter = _recordingFilter;
+        final showLocal =
+            hasLocal &&
+            (filter == _RecordingFilter.all ||
+                filter == _RecordingFilter.uploading);
+        final shownRemote = filter == _RecordingFilter.all
+            ? remoteDocs
+            : remoteDocs.where((doc) => categoryOf(doc) == filter).toList();
+
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
           children: [
-            if (hasLocal) ...[
+            _recordingFilterChips(counts),
+            const SizedBox(height: 12),
+            if (!showLocal && shownRemote.isEmpty)
+              _recordingFilterEmptyNotice(filter),
+            if (showLocal) ...[
               _myHikesSectionLabel('Saved on this device'),
               for (final submission in _pendingTrailSubmissions) ...[
                 _localTrailSubmissionCard(submission),
@@ -9628,9 +9670,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ],
               const SizedBox(height: 8),
             ],
-            if (remoteDocs.isNotEmpty) ...[
+            if (shownRemote.isNotEmpty) ...[
               _myHikesSectionLabel('Uploaded recordings'),
-              for (final doc in remoteDocs) ...[
+              for (final doc in shownRemote) ...[
                 _remoteTrailSubmissionCard(doc),
                 const SizedBox(height: 10),
               ],
@@ -9638,6 +9680,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ],
         );
       },
+    );
+  }
+
+  static const _recordingFilterLabels = {
+    _RecordingFilter.all: 'All',
+    _RecordingFilter.uploading: 'Uploading',
+    _RecordingFilter.pending: 'Pending',
+    _RecordingFilter.approved: 'Approved',
+    _RecordingFilter.rejected: 'Rejected',
+  };
+
+  Widget _recordingFilterChips(Map<_RecordingFilter, int> counts) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final filter in _RecordingFilter.values) ...[
+            ChoiceChip(
+              label: Text(
+                '${_recordingFilterLabels[filter]} ${counts[filter] ?? 0}',
+              ),
+              selected: _recordingFilter == filter,
+              onSelected: (_) => setState(() => _recordingFilter = filter),
+              showCheckmark: false,
+              selectedColor: AgakColors.maroon,
+              backgroundColor: Colors.white,
+              side: BorderSide(
+                color: _recordingFilter == filter
+                    ? AgakColors.maroon
+                    : AgakColors.ink.withValues(alpha: 0.15),
+              ),
+              labelStyle: TextStyle(
+                color: _recordingFilter == filter
+                    ? AgakColors.cream
+                    : AgakColors.ink,
+                fontWeight: FontWeight.w800,
+                fontSize: 12.5,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _recordingFilterEmptyNotice(_RecordingFilter filter) {
+    final message = switch (filter) {
+      _RecordingFilter.uploading =>
+        'Nothing waiting to upload — every recording has reached the server.',
+      _RecordingFilter.pending => 'No recordings waiting for review.',
+      _RecordingFilter.approved => 'No approved recordings yet.',
+      _RecordingFilter.rejected => 'No rejected recordings.',
+      _RecordingFilter.all => 'No recordings yet.',
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 28),
+      child: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: AgakColors.ink.withValues(alpha: 0.6),
+          fontSize: 13,
+        ),
+      ),
     );
   }
 
@@ -10028,7 +10135,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'checked' => 'Live Trail',
       'accepted' => 'Live Trail',
       'rejected' => 'Rejected',
-      _ => 'Processing',
+      _ => 'Pending Review',
     };
   }
 
@@ -10039,7 +10146,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       'checked' => 'This recording is now the trail for this mountain.',
       'accepted' => 'This recording is now the trail for this mountain.',
       'rejected' => 'This recording could not be used.',
-      _ => 'Uploaded and becoming a trail.',
+      _ => 'Uploaded — waiting for an admin to review it.',
     };
   }
 
