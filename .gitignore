@@ -90,3 +90,6 @@ id_rsa.pub
 
 # Stray JDK install that ended up inside the firmware sketch folder — not project source
 firmware/agakbay_heltec/oracleJdk-26/
+
+# Web Google Maps key (see web/maps_config.example.js)
+web/maps_config.js
