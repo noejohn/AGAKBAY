@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <esp_sleep.h>
 #include "HT_TinyGPS++.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -17,18 +16,18 @@
 #define GNSS_TX_PIN 34
 #define BUZZER_PIN 47
 
-// Heltec's onboard BOOT button is GPIO0 and is active-low. Holding it for
-// two seconds puts the ESP32, BLE, GNSS, and LoRa radio into deep sleep;
-// pressing it again wakes the board and restarts setup(). This saves power
-// but does not physically disconnect the battery.
-#define POWER_BUTTON_PIN 0
-#define POWER_BUTTON_HOLD_MS 2000
+// External momentary SOS switch: wire between exposed GPIO4 and GND.
+// The external latching power switch controls power; the onboard BOOT
+// button remains untouched.
+#define SOS_BUTTON_PIN 4
+#define BATTERY_ADC_PIN 1
+#define BATTERY_ADC_ENABLE_PIN 37
 
 // Change this one line before flashing each board: "AGAKBAY-Hiker" for a
 // hiker's unit, "AGAKBAY-TourGuide" for the tour guide's unit. The app
 // scans for the name matching its own user's role, so each phone
 // connects to the physically correct device instead of any nearby one.
-#define DEVICE_NAME "AGAKBAY-Hiker"
+#define DEVICE_NAME "AGAKBAY-TourGuide"
 
 // These UUIDs must match lib/services/heltec_ble_service.dart exactly, or
 // the app will never find the matching service/characteristics.
@@ -128,8 +127,9 @@ double lastRelayLat = 0;
 double lastRelayLng = 0;
 unsigned long sosBannerUntilMs = 0;
 const unsigned long sosBannerDurationMs = 30000;
-unsigned long powerButtonPressedAtMs = 0;
-bool powerButtonShutdownStarted = false;
+bool sosButtonWasPressed = false;
+unsigned long sosButtonLastChangedMs = 0;
+const unsigned long sosButtonDebounceMs = 40;
 
 // --- "I Can't Continue" relay state ---
 // Same send/receive plumbing as SOS above, kept as its own set of
@@ -177,6 +177,64 @@ void buzzStop() {
   }
 }
 
+// Heltec WiFi LoRa 32 V3 battery sense uses GPIO1 through a 390k/100k
+// divider, enabled by driving GPIO37 high. This percentage is an estimate
+// for a single-cell Li-ion battery (about 3.3V empty to 4.2V full).
+int readBatteryPercent() {
+  uint32_t millivolts = 0;
+  for (int i = 0; i < 8; i++) {
+    millivolts += analogReadMilliVolts(BATTERY_ADC_PIN) * 4.9f;
+    delay(2);
+  }
+  millivolts /= 8;
+  if (millivolts <= 3300) return 0;
+  if (millivolts >= 4200) return 100;
+  return (millivolts - 3300) * 100 / 900;
+}
+
+void drawBatteryPercent() {
+  const int batteryPercent = readBatteryPercent();
+
+  // Compact phone-style battery icon: outline, terminal, and a fill level
+  // tied to the measured percentage.
+  const int iconX = 87;
+  const int iconY = 1;
+  const int iconWidth = 14;
+  const int iconHeight = 8;
+  const int innerWidth = iconWidth - 4;
+  const int fillWidth = innerWidth * batteryPercent / 100;
+
+  display.drawRect(iconX, iconY, iconWidth, iconHeight);
+  display.fillRect(iconX + iconWidth, iconY + 2, 2, 4);
+  if (fillWidth > 0) {
+    display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
+  }
+
+  display.setTextAlignment(TEXT_ALIGN_RIGHT);
+  display.drawString(128, 0, String(batteryPercent) + "%");
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
+}
+
+// A BOOT-button press sends an SOS directly over LoRa.
+void queueButtonSos() {
+  if (sosPending) return;
+  pendingSosName = "Hiker";
+  pendingSosHasFix = gps.location.isValid();
+  pendingSosLat = pendingSosHasFix ? gps.location.lat() : 0;
+  pendingSosLng = pendingSosHasFix ? gps.location.lng() : 0;
+  pendingSosReason = "Manual button";
+  sosPending = true;
+  Serial.printf("SOS triggered by BOOT button: fix=%s at %.6f,%.6f\n",
+                pendingSosHasFix ? "yes" : "NO", pendingSosLat, pendingSosLng);
+  // Brief feedback that works even when no phone is connected.
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(100);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(100);
+  }
+}
+
 // Redraws the whole screen from current state. Called on every state change
 // (BLE connect/disconnect, hike info received, GPS fix acquired) rather than
 // on a timer — the status only needs to change when something actually
@@ -185,6 +243,7 @@ void updateDisplay() {
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.setFont(ArialMT_Plain_10);
+  drawBatteryPercent();
 
   // A relayed SOS takes over the whole screen for a while.
   // Five single lines (rather than wrapping ones) so the reason fits
@@ -246,7 +305,7 @@ void updateDisplay() {
   // Common status information
   display.drawString(
       0, 0,
-      deviceConnected ? "BLE: Connected" : "BLE: Advertising...");
+      deviceConnected ? "BLE: Connected" : "BLE: Adv.");
 
   display.drawString(
       0, 12,
@@ -672,7 +731,10 @@ void setupLora() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
+  analogReadResolution(12);
+  pinMode(BATTERY_ADC_ENABLE_PIN, OUTPUT);
+  digitalWrite(BATTERY_ADC_ENABLE_PIN, HIGH);
+  pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
@@ -693,31 +755,16 @@ void setup() {
 }
 
 void loop() {
-  // Long-press the onboard BOOT button to shut down. Deep sleep stops the
-  // ESP32 and peripherals; GPIO0 is configured as the wake source so the
-  // next button press boots the firmware again.
-  if (digitalRead(POWER_BUTTON_PIN) == LOW) {
-    if (powerButtonPressedAtMs == 0) {
-      powerButtonPressedAtMs = millis();
-    } else if (!powerButtonShutdownStarted &&
-               millis() - powerButtonPressedAtMs >= POWER_BUTTON_HOLD_MS) {
-      powerButtonShutdownStarted = true;
-      Serial.println("Power button held: entering deep sleep; press again to wake.");
-      Radio.Sleep();
-      digitalWrite(VGNSS_CTRL, LOW);
-      pinMode(Vext, OUTPUT);
-      digitalWrite(Vext, HIGH);
-      // Avoid waking immediately if the button is still held when sleep
-      // begins. The next press after release will wake the board.
-      while (digitalRead(POWER_BUTTON_PIN) == LOW) {
-        delay(10);
-      }
-      esp_sleep_enable_ext0_wakeup((gpio_num_t)POWER_BUTTON_PIN, 0);
-      esp_deep_sleep_start();
+  // Debounce the external SOS button and trigger once on its press edge.
+  bool buttonPressed = digitalRead(SOS_BUTTON_PIN) == LOW;
+  if (buttonPressed != sosButtonWasPressed) {
+    if (millis() - sosButtonLastChangedMs >= sosButtonDebounceMs) {
+      sosButtonWasPressed = buttonPressed;
+      sosButtonLastChangedMs = millis();
+      if (buttonPressed) queueButtonSos();
     }
   } else {
-    powerButtonPressedAtMs = 0;
-    powerButtonShutdownStarted = false;
+    sosButtonLastChangedMs = millis();
   }
 
   // Temporary debug aid: mirrors raw GPS module output to the Serial
