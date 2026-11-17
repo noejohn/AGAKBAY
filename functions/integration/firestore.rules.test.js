@@ -278,6 +278,48 @@ describe("hike_rooms — rooms and participants", () => {
     }));
   });
 
+  // Mirrors HikeRoomService.joinRoom exactly: code lookup query, then one
+  // batch writing the participant doc, the user's room pointer and the
+  // room's updatedAt.
+  test("a hiker can join through the app's full joinRoom flow", async () => {
+    await seed({
+      "hike_rooms/room-1": {
+        guideId: "guide-1",
+        status: "waiting",
+        roomCode: "979335",
+        mountainName: "Mount Apo",
+      },
+      "users/hiker-1": {
+        accountType: "hiker",
+        role: "hiker",
+        contactNumber: "09171234567",
+        emergencyContactName: "Emergency Contact",
+        emergencyContactPhone: "09179876543",
+      },
+    });
+    const db = asHiker();
+    await assertSucceeds(getDoc(doc(db, "users/hiker-1")));
+    const found = await assertSucceeds(getDocs(query(
+      collection(db, "hike_rooms"),
+      where("roomCode", "==", "979335"),
+      limit(1),
+    )));
+    expect(found.docs).toHaveLength(1);
+    const batch = writeBatch(db);
+    batch.set(doc(db, "hike_rooms/room-1/participants/hiker-1"), {
+      userId: "hiker-1",
+      name: "Hiker",
+      role: "hiker",
+      deviceStatus: "not_connected",
+      membershipStatus: "active",
+      activityStatus: "in_room",
+      joinedAt: serverTimestamp(),
+    });
+    batch.update(doc(db, "users/hiker-1"), { activeHikeRoomId: "room-1" });
+    batch.update(doc(db, "hike_rooms/room-1"), { updatedAt: serverTimestamp() });
+    await assertSucceeds(batch.commit());
+  });
+
   test("a hiker CANNOT join a room without complete safety details", async () => {
     await seed({
       "hike_rooms/room-1": { guideId: "guide-1", status: "waiting" },
@@ -346,6 +388,165 @@ describe("hike_rooms — rooms and participants", () => {
       expect(participant.data().membershipStatus).toBe("removed");
     },
   );
+
+  // --- Rejoining and status transitions ------------------------------------
+  const safeHiker = {
+    accountType: "hiker",
+    contactNumber: "09171234567",
+    emergencyContactName: "Emergency Contact",
+    emergencyContactPhone: "09179876543",
+  };
+  const rejoinRecord = {
+    userId: "hiker-1",
+    name: "Juan",
+    role: "hiker",
+    deviceStatus: "not_connected",
+    membershipStatus: "active",
+    activityStatus: "in_room",
+  };
+
+  test("a hiker the guide removed CANNOT rejoin by entering the code again", async () => {
+    await seed({
+      "hike_rooms/room-1": { guideId: "guide-1", status: "waiting" },
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", role: "hiker", membershipStatus: "removed",
+      },
+      "users/hiker-1": safeHiker,
+    });
+    await assertFails(setDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      rejoinRecord,
+    ));
+  });
+
+  test("a removed hiker CANNOT edit their frozen record at all", async () => {
+    await seed({
+      "hike_rooms/room-1": { guideId: "guide-1", status: "active" },
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", role: "hiker", membershipStatus: "removed",
+      },
+    });
+    await assertFails(updateDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      { latitude: 7.0, longitude: 125.0 },
+    ));
+  });
+
+  test("a hiker who left on their own can rejoin a waiting room", async () => {
+    await seed({
+      "hike_rooms/room-1": { guideId: "guide-1", status: "waiting" },
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", role: "hiker", membershipStatus: "left",
+      },
+      "users/hiker-1": safeHiker,
+    });
+    await assertSucceeds(setDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      rejoinRecord,
+    ));
+  });
+
+  test("a hiker who left CANNOT rejoin once the hike has started", async () => {
+    await seed({
+      "hike_rooms/room-1": { guideId: "guide-1", status: "active" },
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", role: "hiker", membershipStatus: "left",
+      },
+      "users/hiker-1": safeHiker,
+    });
+    await assertFails(setDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      rejoinRecord,
+    ));
+  });
+
+  test.each(["active", "ended"])(
+    "a hiker CANNOT join a room that is already %s",
+    async (status) => {
+      await seed({
+        "hike_rooms/room-1": { guideId: "guide-1", status },
+        "users/hiker-1": safeHiker,
+      });
+      await assertFails(setDoc(
+        doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+        rejoinRecord,
+      ));
+    },
+  );
+
+  test("a hiker CANNOT bring a stopped record back to active", async () => {
+    await seed({
+      ...activeRoom,
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", membershipStatus: "stopped",
+      },
+    });
+    await assertFails(updateDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      { membershipStatus: "active" },
+    ));
+  });
+
+  test("a hiker CANNOT promote their own participant role", async () => {
+    await seed(activeRoom);
+    await assertFails(updateDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      { role: "tour_guide" },
+    ));
+  });
+
+  // The hiker's own everyday updates must keep working.
+  test.each([
+    ["share location", "active", { latitude: 7.0, longitude: 125.0, lastLocationAt: serverTimestamp() }],
+    ["start hiking", "active", { activityStatus: "hiking", hikingStartedAt: serverTimestamp() }],
+    ["accept the policy", "active", { policyAcceptedAt: serverTimestamp() }],
+    ["leave the room", "active", { membershipStatus: "left", leftAt: serverTimestamp() }],
+    ["leave after stopping", "stopped", { membershipStatus: "left", leftAt: serverTimestamp() }],
+    ["stop again with a new reason", "stopped", { membershipStatus: "stopped", stopReason: "Knee pain" }],
+  ])("a hiker can still %s", async (_label, membershipStatus, update) => {
+    await seed({
+      ...activeRoom,
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", role: "hiker", membershipStatus,
+      },
+    });
+    await assertSucceeds(updateDoc(
+      doc(asHiker(), "hike_rooms/room-1/participants/hiker-1"),
+      { ...update, updatedAt: serverTimestamp() },
+    ));
+  });
+
+  test("the guide can still acknowledge a stopped hiker", async () => {
+    await seed({
+      ...activeRoom,
+      "hike_rooms/room-1/participants/hiker-1": {
+        userId: "hiker-1", membershipStatus: "stopped",
+      },
+    });
+    await assertSucceeds(updateDoc(
+      doc(asGuide(), "hike_rooms/room-1/participants/hiker-1"),
+      { stopAcknowledgedBy: "guide-1", stopAcknowledgedAt: serverTimestamp() },
+    ));
+  });
+
+  // Mirrors HikeRoomService.createRoom: room, guide participant record and
+  // the guide's room pointer in one batch (guide has no safety details).
+  test("a guide can still create a room through the app's full createRoom flow", async () => {
+    await seed({ "users/guide-1": { accountType: "tour_guide" } });
+    const db = asGuide();
+    const batch = writeBatch(db);
+    batch.set(doc(db, "hike_rooms/new-room"), {
+      roomCode: "123456", guideId: "guide-1", status: "waiting",
+      mountainName: "Mount Apo", createdAt: serverTimestamp(),
+    });
+    batch.set(doc(db, "hike_rooms/new-room/participants/guide-1"), {
+      userId: "guide-1", name: "Gina", role: "tour_guide",
+      deviceStatus: "not_connected", membershipStatus: "active",
+      activityStatus: "in_room", joinedAt: serverTimestamp(),
+    });
+    batch.update(doc(db, "users/guide-1"), { activeHikeRoomId: "new-room" });
+    await assertSucceeds(batch.commit());
+  });
 });
 
 // ---------------------------------------------------------------------------

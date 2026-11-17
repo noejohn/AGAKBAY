@@ -83,6 +83,38 @@ service cloud.firestore {
         && profile.get('emergencyContactPhone', '') != '';
     }
 
+    // A hiker may (re)enter a room only while it is still waiting for the
+    // guide to start, and only with complete safety details.
+    function hikerCanJoinRoom(roomId) {
+      return get(
+        /databases/$(database)/documents/hike_rooms/$(roomId)
+      ).data.get('status', '') == 'waiting'
+        && userHasSafetyDetails(request.auth.uid);
+    }
+
+    // A participant editing their OWN record (not the guide). They can never
+    // change their role or userId, and can only move along the transitions
+    // the app actually makes:
+    //   active  -> left | stopped     (leaveRoom, stopHiking)
+    //   stopped -> left               (leaveRoom after stopping)
+    //   left    -> active             (rejoining — same checks as joining)
+    // A record the guide marked 'removed' (or a server-side 'room_ended')
+    // is frozen for the participant, so a kicked hiker can't re-enter the
+    // room just by typing the code again.
+    function participantSelfUpdateAllowed(roomId) {
+      let before = resource.data.get('membershipStatus', 'active');
+      let after = request.resource.data.get('membershipStatus', 'active');
+      return request.resource.data.get('userId', request.auth.uid) == request.auth.uid
+        && request.resource.data.get('role', 'hiker') == resource.data.get('role', 'hiker')
+        && before in ['active', 'stopped', 'left']
+        && (
+          after == before
+          || (before == 'active' && after in ['left', 'stopped'])
+          || (before == 'stopped' && after == 'left')
+          || (before == 'left' && after == 'active' && hikerCanJoinRoom(roomId))
+        );
+    }
+
     match /users/{userId} {
       allow read: if signedIn() && (
         isTourismAdmin() ||
@@ -275,22 +307,28 @@ service cloud.firestore {
           );
         // Every participant doc is created by its own owner (createRoom
         // for the guide, joinRoom for a hiker) — doc id and userId field
-        // both equal the creator's own uid.
+        // both equal the creator's own uid. A hiker can only join a room
+        // that hasn't started yet (see hikerCanJoinRoom). The guide check
+        // uses getAfter: createRoom writes the room and the guide's record
+        // in one batch, so get() would see no room yet (a null-value error
+        // that denied guides without safety details on their profile).
         allow create: if signedIn()
           && participantId == request.auth.uid
           && request.resource.data.userId == request.auth.uid
           && (
-            get(
+            getAfter(
               /databases/$(database)/documents/hike_rooms/$(roomId)
             ).data.guideId == request.auth.uid
-            || userHasSafetyDetails(request.auth.uid)
+            || hikerCanJoinRoom(roomId)
           );
-        // Either the participant themself (activity status, leaving the
-        // room) or the room's guide acting on someone else (kickParticipant).
+        // Either the room's guide (kickParticipant, acknowledgeStop, their
+        // own record) or the participant themself within the transitions
+        // allowed by participantSelfUpdateAllowed.
         allow update: if signedIn() && (
-          participantId == request.auth.uid ||
           get(/databases/$(database)/documents/hike_rooms/$(roomId)).data.guideId
-            == request.auth.uid
+            == request.auth.uid ||
+          (participantId == request.auth.uid
+            && participantSelfUpdateAllowed(roomId))
         );
 
       }

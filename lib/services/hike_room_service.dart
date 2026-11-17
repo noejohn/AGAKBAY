@@ -432,26 +432,86 @@ class HikeRoomService {
 
   Future<HikeRoom> joinRoom(String code) async {
     final user = _user;
-    final profile = await getCurrentUserProfile();
-    if (accountTypeFromProfile(profile) != 'hiker') {
-      throw StateError('Only Hiker accounts can join a guide room.');
+    final Map<String, dynamic> profile;
+    try {
+      profile = await getCurrentUserProfile();
+    } on FirebaseException catch (error) {
+      if (error.code != 'permission-denied') rethrow;
+      throw StateError(
+        'Could not read your profile (permission denied on users/'
+        '${user.uid}).',
+      );
+    }
+    final accountType = accountTypeFromProfile(profile);
+    if (accountType != 'hiker') {
+      // Name the type actually stored, so a "hiker" who sees this can tell
+      // whether the profile is wrong (e.g. an approved guide application)
+      // or a different account is signed in.
+      throw StateError(
+        'Only Hiker accounts can join a guide room. The signed-in account '
+        '(${user.email ?? user.uid}) is set up as "$accountType".',
+      );
     }
     if ((profile['activeHikeRoomId']?.toString() ?? '').isNotEmpty) {
       throw StateError('Leave your current room first.');
+    }
+    // Same check firestore.rules (userHasSafetyDetails) applies to the
+    // participant write — fail here with a readable reason instead of a raw
+    // permission-denied from the batch.
+    final missingSafety = [
+      'contactNumber',
+      'emergencyContactName',
+      'emergencyContactPhone',
+    ].where((field) => (profile[field]?.toString().trim() ?? '').isEmpty);
+    if (missingSafety.isNotEmpty) {
+      throw StateError(
+        'Add your contact number and emergency contact in Profile before '
+        'joining a room.',
+      );
     }
     final cleanCode = code.replaceAll(RegExp(r'\D'), '');
     if (cleanCode.length != 6) {
       throw ArgumentError('Enter the 6-digit room code.');
     }
-    final query = await _firestore
-        .collection('hike_rooms')
-        .where('roomCode', isEqualTo: cleanCode)
-        .limit(1)
-        .get();
+    final QuerySnapshot<Map<String, dynamic>> query;
+    try {
+      query = await _firestore
+          .collection('hike_rooms')
+          .where('roomCode', isEqualTo: cleanCode)
+          .limit(1)
+          .get();
+    } on FirebaseException catch (error) {
+      if (error.code != 'permission-denied') rethrow;
+      throw StateError(
+        'This account is not allowed to look up hike rooms '
+        '(permission denied on room lookup).',
+      );
+    }
     if (query.docs.isEmpty) throw StateError('Room code not found.');
     final room = HikeRoom.fromSnapshot(query.docs.first);
     if (room.status != HikeRoomStatus.waiting) {
       throw StateError('This room is no longer accepting hikers.');
+    }
+    // firestore.rules freezes a record the guide marked 'removed', so a
+    // kicked hiker can't rejoin — say so plainly instead of failing the
+    // batch with a permission error.
+    final DocumentSnapshot<Map<String, dynamic>> existing;
+    try {
+      existing = await _roomRef(
+        room.id,
+      ).collection('participants').doc(user.uid).get();
+    } on FirebaseException catch (error) {
+      if (error.code != 'permission-denied') rethrow;
+      throw StateError(
+        'Could not check your membership in this room (permission denied '
+        'on the participant read).',
+      );
+    }
+    if (existing.data()?['membershipStatus']?.toString() == 'removed') {
+      throw StateError(
+        'You were removed from this room by the Tour Guide and cannot '
+        'rejoin it.',
+      );
     }
     final batch = _firestore.batch();
     batch.set(_roomRef(room.id).collection('participants').doc(user.uid), {
@@ -467,7 +527,16 @@ class HikeRoomService {
     batch.update(_roomRef(room.id), {
       'updatedAt': FieldValue.serverTimestamp(),
     });
-    await batch.commit();
+    try {
+      await batch.commit();
+    } on FirebaseException catch (error) {
+      if (error.code != 'permission-denied') rethrow;
+      throw StateError(
+        'Could not join the room (permission denied while saving your '
+        'membership). Re-save your contact number and emergency contact '
+        'in Profile, then try again.',
+      );
+    }
     return room;
   }
 
