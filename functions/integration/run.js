@@ -39,7 +39,9 @@ const result = spawnSync(
   "firebase",
   [
     "emulators:exec",
-    "--only", "auth,firestore,functions",
+    // storage too: account deletion removes Storage files, and without the
+    // Storage emulator those calls would go to the live bucket.
+    "--only", "auth,firestore,functions,storage",
     "--project", "tunga-app-2026",
     "\"npx jest --config integration/jest.config.js --runInBand\"",
   ],

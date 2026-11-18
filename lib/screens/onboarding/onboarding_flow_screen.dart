@@ -59,7 +59,7 @@ class _OnboardingFlowScreenState extends State<OnboardingFlowScreen> {
   }
 
   void _goBack() {
-    if (_step > _stepWelcome && _step < _stepConfirmation) {
+    if (_step > _stepWelcome && _step <= _stepConfirmation) {
       setState(() => _step -= 1);
     }
   }
@@ -138,7 +138,7 @@ class _OnboardingFlowScreenState extends State<OnboardingFlowScreen> {
       canPop: _step == _stepWelcome,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        if (_step > _stepWelcome && _step < _stepConfirmation) {
+        if (_step > _stepWelcome && _step <= _stepConfirmation) {
           _goBack();
         }
       },
@@ -153,7 +153,7 @@ class _OnboardingFlowScreenState extends State<OnboardingFlowScreen> {
                     padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
                     child: Row(
                       children: [
-                        if (_step > _stepName && _step < _stepConfirmation)
+                        if (_step > _stepName && _step <= _stepConfirmation)
                           IconButton(
                             onPressed: _goBack,
                             icon: const Icon(

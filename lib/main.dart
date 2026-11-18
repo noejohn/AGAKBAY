@@ -1509,6 +1509,13 @@ Future<String> _answerHikeAssistantQuestion({
       contextBuffer.writeln(
         'Relevant Agakbay app facts:\n${retrievedFaqAnswers.join('\n')}',
       );
+    } else {
+      // Said outright so the model can't blur general knowledge into
+      // something that sounds like the app's verified guidance.
+      contextBuffer.writeln(
+        'No verified Agakbay or DENR hiking-safety guidance matched this '
+        'question.',
+      );
     }
     if (trail != null) {
       contextBuffer.writeln(
@@ -1538,7 +1545,9 @@ Future<String> _answerHikeAssistantQuestion({
         '''
 The user asked: "$question"
 $contextBuffer
-Answer the user's actual question directly and helpfully. Treat retrieved Agakbay app facts as authoritative for app workflows and policies; do not contradict them or invent unsupported steps. Use general knowledge when retrieved facts do not cover the question. Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
+Answer the user's actual question directly and helpfully. Treat retrieved Agakbay app facts as authoritative for app workflows and policies; do not contradict them or invent unsupported steps.
+If no verified guidance matched, you may share general hiking knowledge, but you MUST say plainly that it is general advice and not verified Agakbay or DENR guidance, and suggest confirming with their tour guide or local authorities. Never make up specific facts you were not given — fees, permits, schedules, phone numbers, rules, or app features — instead say you don't have verified information on that. If it sounds like a medical or life-threatening emergency, tell them to use SOS and contact emergency services.
+Only bring up organizer contacts if the question is actually about finding a guide, or the listed contacts are directly relevant. Keep it to 2-4 sentences.
 ''';
     final aiAnswer = await fetchGeminiResponse(
       apiKey: aiApiKey,
@@ -1552,6 +1561,17 @@ Answer the user's actual question directly and helpfully. Treat retrieved Agakba
 
   if (retrievedFaqAnswers.isNotEmpty) {
     return retrievedFaqAnswers.join('\n');
+  }
+
+  // The AI was tried and gave nothing back (no internet, quota used up,
+  // or the service is down) and there's no offline answer to fall back on.
+  // Say so plainly — the old fallbacks below ("I couldn't find a mountain
+  // matching that") made it look like the question itself was the problem.
+  if (aiApiKey.isNotEmpty && trail == null) {
+    return "I can't reach my AI service right now — please check your "
+        'internet connection and try again in a moment. If this is an '
+        'emergency, use SOS: it still works without internet through your '
+        'Heltec device.';
   }
 
   if (trail == null) {
@@ -1728,6 +1748,11 @@ enum _MarkerStatusFilter { all, open, closed }
 
 enum _MyHikesView { completed, recorded }
 
+/// Filter chips on My Hikes → Recorded.
+/// uploading = still only on this phone (no internet yet);
+/// pending = uploaded, waiting for an admin's review.
+enum _RecordingFilter { all, uploading, pending, approved, rejected }
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -1779,6 +1804,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _selectedNavIndex = 0;
   int _communityFeedFilterIndex = 0;
   _MyHikesView _myHikesView = _MyHikesView.completed;
+  _RecordingFilter _recordingFilter = _RecordingFilter.all;
   Marker? _searchMarker;
   List<_NearbyTrail> _nearbyTrails = const [];
   List<PendingTrailSubmission> _pendingTrailSubmissions =
@@ -9324,26 +9350,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ],
           ),
           const SizedBox(height: 14),
-          Row(
-            children: [
-              _myHikesSummaryStat(
-                label: 'Hikes',
-                value: hikeCount.toString(),
-                color: AgakColors.maroon,
-              ),
-              const SizedBox(width: 8),
-              _myHikesSummaryStat(
-                label: 'Distance',
-                value: '${totalDistanceKm.toStringAsFixed(1)} km',
-                color: AgakColors.olive,
-              ),
-              const SizedBox(width: 8),
-              _myHikesSummaryStat(
-                label: 'Summits',
-                value: summitCount.toString(),
-                color: AgakColors.goldDark,
-              ),
-            ],
+          // Approved trail recordings also count: their kilometres go into
+          // Distance, and each one is a "Trail Contributed". A recording
+          // that reached the summit is already a completed hike (and already
+          // in Distance), so only non-summit recordings add distance here —
+          // otherwise the same walk would be counted twice.
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: _trailSubmissionsStream(),
+            builder: (context, snapshot) {
+              final liveRecordings = (snapshot.data?.docs ?? const [])
+                  .map((doc) => doc.data())
+                  .where(
+                    (data) => _liveTrailStatuses.contains(
+                      (data['status']?.toString() ?? '').toLowerCase(),
+                    ),
+                  )
+                  .toList(growable: false);
+              final recordingKm = liveRecordings
+                  .where((data) => data['reachedSummit'] != true)
+                  .fold<double>(
+                    0,
+                    (total, data) =>
+                        total + ((data['distanceKm'] as num?)?.toDouble() ?? 0),
+                  );
+              return Column(
+                children: [
+                  Row(
+                    children: [
+                      _myHikesSummaryStat(
+                        label: 'Hikes',
+                        value: hikeCount.toString(),
+                        color: AgakColors.maroon,
+                      ),
+                      const SizedBox(width: 8),
+                      _myHikesSummaryStat(
+                        label: 'Distance',
+                        value:
+                            '${(totalDistanceKm + recordingKm).toStringAsFixed(1)} km',
+                        color: AgakColors.olive,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      _myHikesSummaryStat(
+                        label: 'Summits',
+                        value: summitCount.toString(),
+                        color: AgakColors.goldDark,
+                      ),
+                      const SizedBox(width: 8),
+                      _myHikesSummaryStat(
+                        label: 'Trails Contributed',
+                        value: liveRecordings.length.toString(),
+                        color: AgakColors.maroon,
+                      ),
+                    ],
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -9557,10 +9623,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
           );
         }
+        // Every uploaded recording falls in exactly one of these.
+        _RecordingFilter categoryOf(
+          QueryDocumentSnapshot<Map<String, dynamic>> doc,
+        ) {
+          final status = (doc.data()['status']?.toString() ?? '').toLowerCase();
+          if (_liveTrailStatuses.contains(status)) {
+            return _RecordingFilter.approved;
+          }
+          if (status == 'rejected') return _RecordingFilter.rejected;
+          return _RecordingFilter.pending;
+        }
+
+        final counts = <_RecordingFilter, int>{
+          for (final filter in _RecordingFilter.values) filter: 0,
+        };
+        counts[_RecordingFilter.uploading] = _pendingTrailSubmissions.length;
+        for (final doc in remoteDocs) {
+          final category = categoryOf(doc);
+          counts[category] = counts[category]! + 1;
+        }
+        counts[_RecordingFilter.all] =
+            _pendingTrailSubmissions.length + remoteDocs.length;
+
+        final filter = _recordingFilter;
+        final showLocal =
+            hasLocal &&
+            (filter == _RecordingFilter.all ||
+                filter == _RecordingFilter.uploading);
+        final shownRemote = filter == _RecordingFilter.all
+            ? remoteDocs
+            : remoteDocs.where((doc) => categoryOf(doc) == filter).toList();
+
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
           children: [
-            if (hasLocal) ...[
+            _recordingFilterChips(counts),
+            const SizedBox(height: 12),
+            if (!showLocal && shownRemote.isEmpty)
+              _recordingFilterEmptyNotice(filter),
+            if (showLocal) ...[
               _myHikesSectionLabel('Saved on this device'),
               for (final submission in _pendingTrailSubmissions) ...[
                 _localTrailSubmissionCard(submission),
@@ -9568,9 +9670,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ],
               const SizedBox(height: 8),
             ],
-            if (remoteDocs.isNotEmpty) ...[
+            if (shownRemote.isNotEmpty) ...[
               _myHikesSectionLabel('Uploaded recordings'),
-              for (final doc in remoteDocs) ...[
+              for (final doc in shownRemote) ...[
                 _remoteTrailSubmissionCard(doc),
                 const SizedBox(height: 10),
               ],
@@ -9578,6 +9680,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ],
         );
       },
+    );
+  }
+
+  static const _recordingFilterLabels = {
+    _RecordingFilter.all: 'All',
+    _RecordingFilter.uploading: 'Uploading',
+    _RecordingFilter.pending: 'Pending',
+    _RecordingFilter.approved: 'Approved',
+    _RecordingFilter.rejected: 'Rejected',
+  };
+
+  Widget _recordingFilterChips(Map<_RecordingFilter, int> counts) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (final filter in _RecordingFilter.values) ...[
+            ChoiceChip(
+              label: Text(
+                '${_recordingFilterLabels[filter]} ${counts[filter] ?? 0}',
+              ),
+              selected: _recordingFilter == filter,
+              onSelected: (_) => setState(() => _recordingFilter = filter),
+              showCheckmark: false,
+              selectedColor: AgakColors.maroon,
+              backgroundColor: Colors.white,
+              side: BorderSide(
+                color: _recordingFilter == filter
+                    ? AgakColors.maroon
+                    : AgakColors.ink.withValues(alpha: 0.15),
+              ),
+              labelStyle: TextStyle(
+                color: _recordingFilter == filter
+                    ? AgakColors.cream
+                    : AgakColors.ink,
+                fontWeight: FontWeight.w800,
+                fontSize: 12.5,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _recordingFilterEmptyNotice(_RecordingFilter filter) {
+    final message = switch (filter) {
+      _RecordingFilter.uploading =>
+        'Nothing waiting to upload — every recording has reached the server.',
+      _RecordingFilter.pending => 'No recordings waiting for review.',
+      _RecordingFilter.approved => 'No approved recordings yet.',
+      _RecordingFilter.rejected => 'No rejected recordings.',
+      _RecordingFilter.all => 'No recordings yet.',
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 28),
+      child: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: AgakColors.ink.withValues(alpha: 0.6),
+          fontSize: 13,
+        ),
+      ),
     );
   }
 
@@ -9950,28 +10117,42 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // A recording that became a real trail. 'approved' is what the admin
+  // dashboard's review (reviewTrailSubmission in functions/trailReview.js)
+  // writes today; 'included' / 'checked' / 'accepted' are older statuses
+  // from the earlier auto-publishing flow.
+  static const _liveTrailStatuses = {
+    'approved',
+    'included',
+    'checked',
+    'accepted',
+  };
+
   String _submissionStatusLabel(String status) {
     return switch (status) {
+      'approved' => 'Live Trail',
       'included' => 'Live Trail',
       'checked' => 'Live Trail',
       'accepted' => 'Live Trail',
       'rejected' => 'Rejected',
-      _ => 'Processing',
+      _ => 'Pending Review',
     };
   }
 
   String _submissionStatusDescription(String status) {
     return switch (status) {
+      'approved' => 'This recording is now the trail for this mountain.',
       'included' => 'This recording is now the trail for this mountain.',
       'checked' => 'This recording is now the trail for this mountain.',
       'accepted' => 'This recording is now the trail for this mountain.',
       'rejected' => 'This recording could not be used.',
-      _ => 'Uploaded and becoming a trail.',
+      _ => 'Uploaded — waiting for an admin to review it.',
     };
   }
 
   Color _submissionStatusColor(String status) {
     return switch (status) {
+      'approved' => AgakColors.olive,
       'included' => AgakColors.olive,
       'checked' => AgakColors.olive,
       'accepted' => AgakColors.olive,
@@ -9982,6 +10163,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   IconData _submissionStatusIcon(String status) {
     return switch (status) {
+      'approved' => Icons.check_circle_rounded,
       'included' => Icons.route_rounded,
       'checked' => Icons.check_circle_rounded,
       'accepted' => Icons.check_circle_rounded,
@@ -14638,7 +14820,14 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
         _plannedRoutePoints.length < 2) {
       return;
     }
-    final nearestIndex = _findNearestRouteIndex(start);
+    // Join the trail somewhere in its first half. On an out-and-back or loop
+    // trail the finish sits right beside the start, so a search over the
+    // whole route could pick the very last point — everything before it was
+    // then dropped and the route became one straight line to the finish.
+    final nearestIndex = _findNearestRouteIndex(
+      start,
+      toIndex: (_plannedRoutePoints.length - 1) ~/ 2,
+    );
     final nearestPoint = _plannedRoutePoints[nearestIndex];
     final joinDistance = Geolocator.distanceBetween(
       start.latitude,
@@ -15462,7 +15651,7 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
 
       _lastPosition = position;
       _currentLocation = currentPoint;
-      _activeRouteIndex = _findNearestRouteIndex(currentPoint);
+      _activeRouteIndex = _advanceRouteIndex(currentPoint);
 
       final altitude = position.altitude;
       final altitudeAccuracy = position.altitudeAccuracy;
@@ -16008,13 +16197,18 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
     );
   }
 
-  int _findNearestRouteIndex(LatLng point) {
+  /// Nearest route point to [point], searching only indices
+  /// [fromIndex]..[toIndex] (inclusive) when given.
+  int _findNearestRouteIndex(LatLng point, {int fromIndex = 0, int? toIndex}) {
     if (_plannedRoutePoints.isEmpty) {
       return 0;
     }
-    var bestIndex = 0;
+    final lastIndex = _plannedRoutePoints.length - 1;
+    final start = fromIndex.clamp(0, lastIndex);
+    final end = (toIndex ?? lastIndex).clamp(start, lastIndex);
+    var bestIndex = start;
     var bestDistance = double.infinity;
-    for (var i = 0; i < _plannedRoutePoints.length; i++) {
+    for (var i = start; i <= end; i++) {
       final routePoint = _plannedRoutePoints[i];
       final distance = Geolocator.distanceBetween(
         point.latitude,
@@ -16028,6 +16222,37 @@ class _HikingModeScreenState extends State<_HikingModeScreen> {
       }
     }
     return bestIndex;
+  }
+
+  // How far ahead along the route the hiker's position is allowed to snap
+  // between two GPS updates.
+  static const double _routeSnapLookaheadMeters = 400;
+
+  /// Where the hiker is along the route, moving forward only. A plain
+  /// "nearest point on the whole route" search jumped straight to the end
+  /// of out-and-back or loop trails (whose start and finish are close
+  /// together), so the remaining route collapsed into a straight line.
+  int _advanceRouteIndex(LatLng point) {
+    if (_plannedRoutePoints.isEmpty ||
+        _routeProgressMeters.length != _plannedRoutePoints.length) {
+      return _findNearestRouteIndex(point);
+    }
+    final lastIndex = _plannedRoutePoints.length - 1;
+    // A small step back absorbs GPS jitter.
+    final fromIndex = (_activeRouteIndex - 5).clamp(0, lastIndex);
+    final limitMeters =
+        _routeProgressMeters[_activeRouteIndex.clamp(0, lastIndex)] +
+        _routeSnapLookaheadMeters;
+    var toIndex = fromIndex;
+    while (toIndex < lastIndex &&
+        _routeProgressMeters[toIndex + 1] <= limitMeters) {
+      toIndex++;
+    }
+    return _findNearestRouteIndex(
+      point,
+      fromIndex: fromIndex,
+      toIndex: toIndex,
+    );
   }
 
   double _distanceToNearestRouteMeters(LatLng point) {

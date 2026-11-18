@@ -22,13 +22,28 @@
 
   <!--
     Required for google_maps_flutter's web implementation (used by the
-    Trail Route Verification page). The mobile app's existing Maps key
-    (android/local.properties' MAPS_API_KEY) is restricted to the Android
-    app and will NOT work here — create/loosen a key for the web origin
-    in Google Cloud Console (APIs & Services > Credentials), restricted
-    by HTTP referrer (e.g. http://localhost:3000/*), and paste it below.
+    Trail Route Verification page). The key is NOT committed: copy
+    web/maps_config.example.js to web/maps_config.js (gitignored) and put
+    a web Maps key there. Flutter copies it into build/web, so it ships
+    with the Vercel deploy. Restrict that key in Google Cloud Console
+    (APIs & Services > Credentials) by HTTP referrer
+    (https://agakbay.vercel.app/*, http://localhost:3000/*) and to the
+    Maps JavaScript API only.
   -->
-  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAhEsrUkAIEBQNYdpRvU6-sScueaORZNts" defer></script>
+  <script src="maps_config.js"></script>
+  <script>
+    (function () {
+      var key = window.AGAKBAY_MAPS_API_KEY;
+      if (!key) {
+        console.warn("Google Maps key missing: create web/maps_config.js (see maps_config.example.js).");
+        return;
+      }
+      var s = document.createElement("script");
+      s.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key);
+      s.defer = true;
+      document.head.appendChild(s);
+    })();
+  </script>
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">

@@ -11,12 +11,33 @@ class OfflineMapService {
   static const String tileUrlTemplate =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
+  /// OSM's tile usage policy requires an identifying User-Agent. Requests
+  /// with the default `Dart/x (dart:io)` or a `com.example.*` package name
+  /// get served an "Access blocked" image — with HTTP 200, so it looks like
+  /// a valid tile and was being cached to disk.
+  static const String userAgentPackageName = 'com.agakbay.tunga';
+  static const String userAgent =
+      'AGAKBAY/1.0 (+https://github.com/noejohn/AGAKBAY)';
+  static const Map<String, String> tileHeaders = {'User-Agent': userAgent};
+
+  /// Bumped from `offline_maps` so tiles cached while blocked are discarded.
+  static const String _cacheDirName = 'offline_maps_v2';
+  static const String _legacyCacheDirName = 'offline_maps';
+
   late Directory _offlineMapDir;
   bool _isInitialized = false;
 
   static Future<Directory> getTileCacheDirectory() async {
     final cacheDir = await getApplicationCacheDirectory();
-    return Directory('${cacheDir.path}/offline_maps');
+    final legacy = Directory('${cacheDir.path}/$_legacyCacheDirName');
+    if (await legacy.exists()) {
+      try {
+        await legacy.delete(recursive: true);
+      } catch (e) {
+        debugPrint('Could not remove legacy tile cache: $e');
+      }
+    }
+    return Directory('${cacheDir.path}/$_cacheDirName');
   }
 
   static String tilePath(String cacheDirectoryPath, int x, int y, int z) {
@@ -50,7 +71,10 @@ class OfflineMapService {
         return file;
       }
 
-      final response = await http.get(Uri.parse(_generateTileUrl(x, y, z)));
+      final response = await http.get(
+        Uri.parse(_generateTileUrl(x, y, z)),
+        headers: tileHeaders,
+      );
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException(
           'Tile request failed with status ${response.statusCode}',
@@ -83,7 +107,8 @@ class OfflineMapService {
     required Map<String, double> bounds,
     required List<int> zoomLevels,
     void Function(int downloaded, int total)? onProgress,
-    int concurrency = 8,
+    // OSM's volunteer servers forbid heavy bulk downloading; keep this low.
+    int concurrency = 2,
   }) async {
     if (!_isInitialized) await initialize();
 

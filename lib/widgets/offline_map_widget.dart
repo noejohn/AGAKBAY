@@ -80,14 +80,17 @@ class _OfflineMapWidgetState extends State<OfflineMapWidget> {
         children: [
           TileLayer(
             urlTemplate: OfflineMapService.tileUrlTemplate,
-            userAgentPackageName: 'com.example.tunga',
+            userAgentPackageName: OfflineMapService.userAgentPackageName,
             tileProvider: _tileCacheDirectoryPath == null
                 ? widget.allowNetworkFallback
-                      ? NetworkTileProvider()
+                      ? NetworkTileProvider(
+                          headers: Map.of(OfflineMapService.tileHeaders),
+                        )
                       : BlankTileProvider()
                 : OfflineFirstTileProvider(
                     cacheDirectoryPath: _tileCacheDirectoryPath!,
                     allowNetworkFallback: widget.allowNetworkFallback,
+                    headers: Map.of(OfflineMapService.tileHeaders),
                   ),
             additionalOptions: const {
               'maxZoom': '19',
