@@ -29,6 +29,12 @@ class AdminColors {
   static const backgroundBottom = Color(0xFF070B09);
   static const accent = Color(0xFF1FA35C);
   static const accentDim = Color(0x331FA35C);
+  static const page = Color(0xFFF2F5F2);
+  static const surface = Color(0xFFFFFFFF);
+  static const surfaceSoft = Color(0xFFF8FAF8);
+  static const ink = Color(0xFF17231D);
+  static const muted = Color(0xFF6B7770);
+  static const border = Color(0xFFE3EAE5);
 }
 
 class AdminApp extends StatelessWidget {
@@ -38,7 +44,80 @@ class AdminApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'AGAKBAY Admin Dashboard',
-      theme: ThemeData(useMaterial3: true, colorSchemeSeed: AdminColors.accent),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: AdminColors.accent,
+          brightness: Brightness.light,
+          surface: AdminColors.surfaceSoft,
+        ),
+        scaffoldBackgroundColor: AdminColors.page,
+        cardTheme: CardThemeData(
+          color: AdminColors.surface,
+          surfaceTintColor: Colors.transparent,
+          elevation: 1,
+          shadowColor: const Color(0xFF173B34).withValues(alpha: 0.08),
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: AdminColors.border),
+          ),
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: AdminColors.surfaceSoft,
+          surfaceTintColor: Colors.transparent,
+          elevation: 8,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          titleTextStyle: const TextStyle(
+            color: AdminColors.ink,
+            fontSize: 23,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFFEFF3EE),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 15,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFFDCE4DE)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFFDCE4DE)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: AdminColors.accent, width: 1.6),
+          ),
+        ),
+        hoverColor: AdminColors.accent.withValues(alpha: 0.06),
+        listTileTheme: ListTileThemeData(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        textTheme: const TextTheme(
+          headlineMedium: TextStyle(
+            color: AdminColors.ink,
+            fontWeight: FontWeight.w700,
+            height: 1.2,
+          ),
+          titleLarge: TextStyle(
+            color: AdminColors.ink,
+            fontWeight: FontWeight.w700,
+          ),
+          titleMedium: TextStyle(
+            color: AdminColors.ink,
+            fontWeight: FontWeight.w600,
+          ),
+          bodyMedium: TextStyle(color: AdminColors.ink),
+          bodySmall: TextStyle(color: AdminColors.muted),
+        ),
+      ),
       home: const AdminLoginScreen(),
     );
   }

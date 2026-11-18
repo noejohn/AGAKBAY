@@ -30,7 +30,7 @@ exports.refreshAdminClaims = onCall(
       }
 
       const adminRole = profile.adminRole || "tourism_admin";
-      if (!["tourism_admin", "mountain_head"].includes(adminRole)) {
+      if (!["tourism_admin", "mountain_head", "barangay_official"].includes(adminRole)) {
         throw new HttpsError("failed-precondition", "Unsupported admin role.");
       }
 
@@ -42,6 +42,21 @@ exports.refreshAdminClaims = onCall(
           "failed-precondition",
           "This Mountain Head account has no assigned mountain.",
         );
+      }
+      const managedBarangayId = typeof profile.managedBarangayId === "string"
+        ? profile.managedBarangayId.trim() : "";
+      let managedBarangayName = "";
+      if (adminRole === "barangay_official") {
+        const barangayIdParts = managedBarangayId.split("|");
+        if (barangayIdParts.length < 3 || barangayIdParts.length > 4 ||
+            barangayIdParts.some((part) => !part || part.includes("/"))) {
+          throw new HttpsError("failed-precondition", "This Barangay Official account has no assigned barangay.");
+        }
+        const barangay = await admin.firestore().collection("barangays").doc(managedBarangayId).get();
+        if (!barangay.exists || barangay.data()?.active !== true) {
+          throw new HttpsError("failed-precondition", "The assigned barangay is not in the active directory.");
+        }
+        managedBarangayName = String(barangay.data()?.name || "");
       }
 
       phase = "read-auth-user";
@@ -59,10 +74,23 @@ exports.refreshAdminClaims = onCall(
       } else {
         delete claims.managedMountainName;
       }
+      if (adminRole === "barangay_official") {
+        claims.managedBarangayId = managedBarangayId;
+        claims.managedBarangayName = managedBarangayName;
+      } else {
+        delete claims.managedBarangayId;
+        delete claims.managedBarangayName;
+      }
       phase = "write-custom-claims";
       await auth.setCustomUserClaims(uid, claims);
 
-      return { adminRole, managedMountainName: managedMountainName || null };
+      return {
+        adminRole,
+        managedMountainName: managedMountainName || null,
+        ...(adminRole === "barangay_official"
+          ? { managedBarangayId, managedBarangayName }
+          : {}),
+      };
     } catch (error) {
       if (error instanceof HttpsError) throw error;
       console.error("refreshAdminClaims failed", {
@@ -481,7 +509,7 @@ exports.manageUserAccount = onCall(
       ].map((doc) => [doc.id, doc.data()]));
       const activeAdminsRemaining = [...admins.entries()].filter(
         ([adminUid, data]) => adminUid !== uid &&
-          data.adminRole !== "mountain_head" &&
+          !["mountain_head", "barangay_official"].includes(data.adminRole) &&
           data.accountSuspended !== true,
       ).length;
       if (activeAdminsRemaining === 0 && profile.accountSuspended !== true) {
@@ -511,12 +539,16 @@ exports.manageUserAccount = onCall(
       claims.admin = false;
       delete claims.adminRole;
       delete claims.managedMountainName;
+      delete claims.managedBarangayId;
+      delete claims.managedBarangayName;
       claims.role = profile.accountType && profile.accountType !== "admin"
         ? profile.accountType
         : "hiker";
       updates.adminAccess = false;
       updates.adminRole = admin.firestore.FieldValue.delete();
       updates.managedMountainName = admin.firestore.FieldValue.delete();
+      updates.managedBarangayId = admin.firestore.FieldValue.delete();
+      updates.managedBarangayName = admin.firestore.FieldValue.delete();
       updates.role = profile.accountType && profile.accountType !== "admin"
         ? profile.accountType
         : "hiker";
@@ -561,10 +593,10 @@ exports.createAdminAccount = onCall(
     assertTourismAdmin(request.auth);
 
     const adminRole = request.data?.adminRole;
-    if (!["tourism_admin", "mountain_head"].includes(adminRole)) {
+    if (!["tourism_admin", "mountain_head", "barangay_official"].includes(adminRole)) {
       throw new HttpsError(
         "invalid-argument",
-        "Choose either Tourism Admin or Mountain Head.",
+        "Choose either Tourism Admin, Mountain Head, or Barangay Official.",
       );
     }
     const requestedMountainName = request.data?.managedMountainName;
@@ -576,6 +608,20 @@ exports.createAdminAccount = onCall(
         "invalid-argument",
         "Choose a managed mountain from the Davao Region list.",
       );
+    }
+    const managedBarangayId = adminRole === "barangay_official"
+      ? String(request.data?.managedBarangayId || "").trim() : "";
+    const managedBarangayName = adminRole === "barangay_official"
+      ? String(request.data?.managedBarangayName || "").trim() : "";
+    if (adminRole === "barangay_official") {
+      if (!managedBarangayId || managedBarangayId.length > 320 || !managedBarangayId.includes("|")) {
+        throw new HttpsError("invalid-argument", "Choose a barangay from the directory.");
+      }
+      const barangay = await admin.firestore().collection("barangays").doc(managedBarangayId).get();
+      if (!barangay.exists || barangay.data()?.active !== true ||
+          barangay.data()?.name !== managedBarangayName) {
+        throw new HttpsError("failed-precondition", "The selected barangay is not in the active directory.");
+      }
     }
     const email = typeof request.data?.email === "string"
       ? request.data.email.trim().toLowerCase()
@@ -607,6 +653,7 @@ exports.createAdminAccount = onCall(
         accountType: "admin",
         adminRole,
         ...(adminRole === "mountain_head" ? { managedMountainName } : {}),
+        ...(adminRole === "barangay_official" ? { managedBarangayId, managedBarangayName } : {}),
         guideVerified: null,
       };
       await db.collection("users").doc(createdUser.uid).set({
@@ -619,6 +666,8 @@ exports.createAdminAccount = onCall(
         accountType: "admin",
         adminRole,
         ...(adminRole === "mountain_head" ? { managedMountainName } : {}),
+        ...(adminRole === "barangay_official" ? { managedBarangayId, managedBarangayName } : {}),
+        ...(adminRole === "barangay_official" ? { barangayId: managedBarangayId, barangayName: managedBarangayName } : {}),
         adminAccess: true,
         accountSuspended: false,
         guideVerified: null,
@@ -641,6 +690,7 @@ exports.createAdminAccount = onCall(
         fullName,
         adminRole,
         managedMountainName,
+        managedBarangayName,
         setupLink,
       });
       sendingEmail = false;
@@ -668,6 +718,8 @@ exports.createAdminAccount = onCall(
         managedMountainName: adminRole === "mountain_head"
           ? managedMountainName
           : null,
+        managedBarangayId: adminRole === "barangay_official" ? managedBarangayId : null,
+        managedBarangayName: adminRole === "barangay_official" ? managedBarangayName : null,
         emailSent: true,
       };
     } catch (error) {
@@ -692,5 +744,101 @@ exports.createAdminAccount = onCall(
       }
       throw new HttpsError("internal", "Could not create the admin account.");
     }
+  },
+);
+
+exports.saveBarangayDirectoryEntry = onCall(
+  { timeoutSeconds: 30, memory: "256MiB", region: ADMIN_FUNCTIONS_REGION },
+  async (request) => {
+    assertTourismAdmin(request.auth);
+    const requestedId = String(request.data?.id || "").trim();
+    const name = String(request.data?.name || "").trim();
+    const requestedDistrictName = String(request.data?.districtName || "").trim();
+    const municipality = String(request.data?.municipality || "").trim();
+    const province = String(request.data?.province || "").trim();
+    const active = request.data?.active !== false;
+    if (!name || !municipality || !province ||
+        name.length > 100 || requestedDistrictName.length > 100 || municipality.length > 100 || province.length > 100 ||
+        [name, requestedDistrictName, municipality, province].some((part) => part.includes("/") || part.includes("|"))) {
+      throw new HttpsError("invalid-argument", "Enter valid barangay, district, city/municipality, and province names without slash or pipe characters.");
+    }
+    const idParts = [name, ...(requestedDistrictName ? [requestedDistrictName] : []), municipality, province];
+    const generatedId = idParts
+      .map((part) => part.normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase())
+      .join("|");
+    const id = requestedId || generatedId;
+    if (id.length > 400 || id.includes("/")) {
+      throw new HttpsError("invalid-argument", "The barangay directory identifier is invalid.");
+    }
+    const db = admin.firestore();
+    const ref = db.collection("barangays").doc(id);
+    await db.runTransaction(async (transaction) => {
+      const existing = await transaction.get(ref);
+      if (requestedId && !existing.exists) {
+        throw new HttpsError("not-found", "The barangay directory entry no longer exists.");
+      }
+      if (requestedId && (
+        existing.data()?.name !== name ||
+        existing.data()?.municipality !== municipality ||
+        existing.data()?.province !== province
+      )) {
+        throw new HttpsError("failed-precondition", "The barangay entry changed. Refresh the directory and try again.");
+      }
+      const districtName = requestedDistrictName || String(existing.data()?.districtName || "");
+      const assignedUsers = await db.collection("users")
+        .where("adminRole", "==", "barangay_official")
+        .where("managedBarangayId", "==", id).get();
+      if (!active && !assignedUsers.empty) {
+        throw new HttpsError("failed-precondition", "Reassign or revoke officials before deactivating this barangay.");
+      }
+      transaction.set(ref, {
+        id, name, districtName, municipality, province, active,
+        createdAt: existing.exists ? existing.data()?.createdAt : admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedBy: request.auth.uid,
+      });
+    });
+    const saved = await ref.get();
+    return { id, name, districtName: saved.data()?.districtName || "", municipality, province, active };
+  },
+);
+
+exports.assignUserBarangay = onCall(
+  { timeoutSeconds: 30, memory: "256MiB", region: ADMIN_FUNCTIONS_REGION },
+  async (request) => {
+    assertTourismAdmin(request.auth);
+    const uid = String(request.data?.uid || "").trim();
+    const id = String(request.data?.id || "").trim();
+    if (!uid || !id || id.length > 320 || !id.includes("|") || id.includes("/")) throw new HttpsError("invalid-argument", "Choose a user and barangay.");
+    const db = admin.firestore();
+    const [user, barangay] = await Promise.all([
+      db.collection("users").doc(uid).get(),
+      db.collection("barangays").doc(id).get(),
+    ]);
+    if (!user.exists) throw new HttpsError("not-found", "User profile not found.");
+    if (!barangay.exists || barangay.data()?.active !== true) throw new HttpsError("failed-precondition", "The barangay is not active.");
+    const profile = user.data() || {};
+    const officialValues = profile.adminRole === "barangay_official"
+      ? { managedBarangayId: id, managedBarangayName: barangay.data().name }
+      : {};
+    const values = { barangayId: id, barangayName: barangay.data().name,
+      ...officialValues,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    await db.collection("users").doc(uid).update(values);
+    if (profile.adminRole === "barangay_official") {
+      const authUser = await admin.auth().getUser(uid);
+      await admin.auth().setCustomUserClaims(uid, {
+        ...(authUser.customClaims || {}),
+        managedBarangayId: id,
+        managedBarangayName: barangay.data().name,
+      });
+    }
+    await db.collection("admin_actions").add({
+      adminId: request.auth.uid, action: "assign_user_barangay", targetId: uid,
+      targetName: user.data()?.fullName || user.data()?.displayName || "",
+      barangayId: id, barangayName: barangay.data().name,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { uid, ...values, barangayName: barangay.data().name };
   },
 );

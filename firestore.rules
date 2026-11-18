@@ -30,6 +30,18 @@ service cloud.firestore {
         && request.auth.token.get('managedMountainName', '') != '';
     }
 
+    function isBarangayOfficial() {
+      return isAdmin()
+        && request.auth.token.get('adminRole', '') == 'barangay_official'
+        && request.auth.token.get('managedBarangayId', '') is string
+        && request.auth.token.get('managedBarangayId', '') != '';
+    }
+
+    function isAssignedBarangay(code) {
+      return isBarangayOfficial() && code is string
+        && code == request.auth.token.get('managedBarangayId', '');
+    }
+
     function assignedMountainNameVariants() {
       let assigned = request.auth.token.get('managedMountainName', '');
       return assigned == 'Mt. Apo' || assigned == 'Mt Apo' || assigned == 'Mount Apo'
@@ -124,6 +136,8 @@ service cloud.firestore {
             assignedMountainNameVariants()
           )) ||
         (!isAdmin() && resource.data.accountType == 'tour_guide') ||
+        (isBarangayOfficial()
+          && resource.data.get('barangayId', '') == request.auth.token.get('managedBarangayId', '')) ||
         isOwner(userId)
       );
 
@@ -145,6 +159,10 @@ service cloud.firestore {
         && request.resource.data.get('adminAccess', false) != true
         && request.resource.data.get('adminRole', null) == null
         && request.resource.data.get('managedMountainName', null) == null
+        && request.resource.data.get('managedBarangayId', null) == null
+        && request.resource.data.get('managedBarangayName', null) == null
+        && request.resource.data.get('barangayId', null) == null
+        && request.resource.data.get('barangayName', null) == null
         && request.resource.data.get('role', '') != 'tour_guide'
         && request.resource.data.get('accountType', '') != 'tour_guide';
 
@@ -159,6 +177,10 @@ service cloud.firestore {
             'adminRole',
             'adminAccess',
             'managedMountainName',
+            'managedBarangayId',
+            'managedBarangayName',
+            'barangayId',
+            'barangayName',
             'mountainName',
             'mountainNames',
             'mountainsHandled'
@@ -281,16 +303,23 @@ service cloud.firestore {
         && (
           !isAdmin() ||
           isTourismAdmin() ||
+          isAssignedBarangay(resource.data.get('barangayId', '')) ||
           isAssignedMountainName(resource.data.get('mountainName', ''))
         );
       allow create: if signedIn()
-        && request.resource.data.guideId == request.auth.uid;
+        && request.resource.data.guideId == request.auth.uid
+        && request.resource.data.get('barangayId', '') is string
+        && exists(/databases/$(database)/documents/barangays/$(request.resource.data.barangayId))
+        && get(/databases/$(database)/documents/barangays/$(request.resource.data.barangayId)).data.get('active', false) == true
+        && get(/databases/$(database)/documents/barangays/$(request.resource.data.barangayId)).data.get('name', '') == request.resource.data.get('barangayName', '');
       // The guide can edit room details and start the room. Ending is handled
       // by the endHikeRoom callable so participant memberships and user room
       // pointers are cleaned up together. A joining or leaving participant
       // only touches `updatedAt` on this room document.
       allow update: if signedIn() && (
         (resource.data.guideId == request.auth.uid
+          && request.resource.data.get('barangayId', '') == resource.data.get('barangayId', '')
+          && request.resource.data.get('barangayName', '') == resource.data.get('barangayName', '')
           && (request.resource.data.status != 'ended'
             || resource.data.status == 'ended')) ||
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['updatedAt'])
@@ -301,6 +330,9 @@ service cloud.firestore {
           && (
             !isAdmin() ||
             isTourismAdmin() ||
+            isAssignedBarangay(get(
+              /databases/$(database)/documents/hike_rooms/$(roomId)
+            ).data.get('barangayId', '')) ||
             (isAssignedMountainName(get(
               /databases/$(database)/documents/hike_rooms/$(roomId)
             ).data.get('mountainName', '')))
@@ -337,6 +369,7 @@ service cloud.firestore {
         allow read: if signedIn() && (
           isTourismAdmin() ||
           !isAdmin() ||
+          isAssignedBarangay(get(/databases/$(database)/documents/hike_rooms/$(roomId)).data.get('barangayId', '')) ||
           (isAssignedMountainName(resource.data.get('mountainName', '')) ||
             (isMountainHead() && isAssignedMountainName(get(
               /databases/$(database)/documents/hike_rooms/$(roomId)
@@ -369,6 +402,7 @@ service cloud.firestore {
     // collection-group query across every hike room.
     match /{path=**}/sos_events/{eventId} {
       allow read: if isTourismAdmin()
+        || isAssignedBarangay(resource.data.get('barangayId', ''))
         || isAssignedMountainName(resource.data.get('mountainName', ''));
     }
 
@@ -448,7 +482,10 @@ service cloud.firestore {
           && resource.data.get('type', '') in [
             'sos', 'trail_submission', 'incident_report'
           ]
-          && isAssignedMountainName(resource.data.get('mountainName', '')));
+          && isAssignedMountainName(resource.data.get('mountainName', '')))
+        || (isBarangayOfficial()
+          && resource.data.get('type', '') in ['incident_report', 'sos']
+          && isAssignedBarangay(resource.data.get('barangayId', '')));
 
       allow create: if false;
       allow delete: if false;
@@ -461,7 +498,10 @@ service cloud.firestore {
             && resource.data.get('type', '') in [
               'sos', 'trail_submission', 'incident_report'
             ]
-            && isAssignedMountainName(resource.data.get('mountainName', '')))
+            && isAssignedMountainName(resource.data.get('mountainName', ''))) ||
+          (isBarangayOfficial()
+            && resource.data.get('type', '') in ['incident_report', 'sos']
+            && isAssignedBarangay(resource.data.get('barangayId', '')))
         );
     }
 
@@ -490,6 +530,7 @@ service cloud.firestore {
       allow read: if signedIn() && (
         isTourismAdmin() ||
         resource.data.get('guideId', '') == request.auth.uid ||
+        isAssignedBarangay(resource.data.get('barangayId', '')) ||
         isAssignedMountainName(resource.data.get('mountainName', ''))
       );
       allow write: if false;
@@ -498,8 +539,16 @@ service cloud.firestore {
     match /hike_room_history/{roomId} {
       allow read: if signedIn() && (
         isTourismAdmin() ||
+        isAssignedBarangay(resource.data.get('barangayId', '')) ||
         isAssignedMountainName(resource.data.get('mountainName', ''))
       );
+      allow write: if false;
+    }
+
+    // Manually maintained PSGC directory. Changes go through the
+    // saveBarangayDirectoryEntry callable, which is Tourism Admin only.
+    match /barangays/{barangayId} {
+      allow read: if signedIn() && (resource.data.get('active', false) == true || isTourismAdmin());
       allow write: if false;
     }
 

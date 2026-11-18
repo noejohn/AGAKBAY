@@ -8,6 +8,7 @@
 // the stat cards and lists below are wired to live streams rather than
 // hardcoded demo numbers — anything without a backing collection yet
 // honestly shows "—" or an empty-state message instead of invented data.
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -15,9 +16,11 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
 
 import '../admin_main.dart' show AdminColors;
 import '../data/davao_mountains.dart';
+import '../data/davao_barangay_districts.dart';
 import 'incident_report_dialog.dart';
 
 /// Account-management Cloud Functions (manageUserAccount,
@@ -56,12 +59,16 @@ EdgeInsets _adminPagePadding(BuildContext context) {
 }
 
 class _AdminAccess {
-  const _AdminAccess({required this.isMountainHead, this.managedMountainName});
+  const _AdminAccess({required this.isMountainHead, this.isBarangayOfficial = false,
+    this.managedMountainName, this.managedBarangayId, this.managedBarangayName});
 
   final bool isMountainHead;
   final String? managedMountainName;
+  final bool isBarangayOfficial;
+  final String? managedBarangayId;
+  final String? managedBarangayName;
 
-  bool get isTourismAdmin => !isMountainHead;
+  bool get isTourismAdmin => !isMountainHead && !isBarangayOfficial;
 }
 
 List<String> _mountainNameVariants(String mountainName) {
@@ -125,6 +132,15 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
         managedMountainName: mountainName.trim(),
       );
     }
+    if (claims['adminRole'] == 'barangay_official') {
+      final barangayId = claims['managedBarangayId'];
+      final name = claims['managedBarangayName'];
+      if (barangayId is! String || barangayId.isEmpty || name is! String || name.trim().isEmpty) {
+        throw StateError('This Barangay Official account has no valid assigned barangay.');
+      }
+      return _AdminAccess(isMountainHead: false, isBarangayOfficial: true,
+        managedBarangayId: barangayId, managedBarangayName: name.trim());
+    }
     if (claims['adminRole'] != 'tourism_admin') {
       throw StateError('This account has an unsupported admin role.');
     }
@@ -133,6 +149,7 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
 
   void _navigateToPage(int index, _AdminAccess access) {
     if (access.isMountainHead && (index == 5 || index == 7)) return;
+    if (access.isBarangayOfficial && ![0, 3, 4, 6, 8].contains(index)) return;
     setState(() => _selected = index);
   }
 
@@ -177,11 +194,12 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
         _Sidebar(
           selected: _selected,
           isMountainHead: access.isMountainHead,
+          isBarangayOfficial: access.isBarangayOfficial,
           onSelect: (i) => _navigateToPage(i, access),
         ),
         Expanded(
           child: ColoredBox(
-            color: const Color(0xFFF4F6F5),
+            color: AdminColors.page,
             child: Column(
               children: [
                 Container(
@@ -190,7 +208,7 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                   decoration: const BoxDecoration(
                     color: Colors.white,
                     border: Border(
-                      bottom: BorderSide(color: Color(0xFFE5E7E6)),
+                      bottom: BorderSide(color: AdminColors.border),
                     ),
                   ),
                   child: LayoutBuilder(
@@ -410,16 +428,20 @@ class _Sidebar extends StatelessWidget {
   const _Sidebar({
     required this.selected,
     required this.isMountainHead,
+    required this.isBarangayOfficial,
     required this.onSelect,
   });
 
   final int selected;
   final bool isMountainHead;
+  final bool isBarangayOfficial;
   final ValueChanged<int> onSelect;
 
   @override
   Widget build(BuildContext context) {
-    final visibleIndices = isMountainHead
+    final visibleIndices = isBarangayOfficial
+        ? [0, 3, 4, 6, 8]
+        : isMountainHead
         ? [0, 1, 2, 3, 4, 6, 8]
         : List.generate(_navItems.length, (index) => index);
     final screenWidth = MediaQuery.sizeOf(context).width;
@@ -768,6 +790,9 @@ class _NotificationBellState extends State<_NotificationBell> {
             'mountainName',
             whereIn: _mountainNameVariants(widget.access.managedMountainName!),
           );
+    } else if (widget.access.isBarangayOfficial) {
+      query = query.where('type', whereIn: const ['incident_report', 'sos'])
+          .where('barangayId', isEqualTo: widget.access.managedBarangayId);
     }
     return query.orderBy('createdAt', descending: true).limit(50).snapshots();
   }
@@ -1269,6 +1294,18 @@ class _DashboardOverviewPage extends StatelessWidget {
     Query<Map<String, dynamic>> activeSosQuery = FirebaseFirestore.instance
         .collectionGroup('sos_events')
         .where('status', isEqualTo: 'sent');
+    if (access.isBarangayOfficial) {
+      return SingleChildScrollView(
+        padding: _adminPagePadding(context),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _DashboardWelcomeBanner(user: user),
+          const SizedBox(height: 20),
+          _OverviewQuickPanels(access: access, onNavigate: onNavigate),
+          const SizedBox(height: 20),
+          _OverviewIncidentReports(access: access, onNavigate: onNavigate),
+        ]),
+      );
+    }
     if (access.isMountainHead) {
       final mountainName = access.managedMountainName!;
       final mountainNames = _mountainNameVariants(mountainName);
@@ -1288,6 +1325,11 @@ class _DashboardOverviewPage extends StatelessWidget {
         'mountainName',
         whereIn: mountainNames,
       );
+    } else if (access.isBarangayOfficial) {
+      pendingGuidesQuery = pendingGuidesQuery.where('barangayId', isEqualTo: access.managedBarangayId);
+      pendingTrailsQuery = pendingTrailsQuery.where('barangayId', isEqualTo: access.managedBarangayId);
+      activeRoomsQuery = activeRoomsQuery.where('barangayId', isEqualTo: access.managedBarangayId);
+      activeSosQuery = activeSosQuery.where('barangayId', isEqualTo: access.managedBarangayId);
     }
     return SingleChildScrollView(
       padding: _adminPagePadding(context),
@@ -1663,6 +1705,9 @@ class _OverviewQuickPanels extends StatelessWidget {
       final mountainNames = _mountainNameVariants(access.managedMountainName!);
       rooms = rooms.where('mountainName', whereIn: mountainNames);
       sos = sos.where('mountainName', whereIn: mountainNames);
+    } else if (access.isBarangayOfficial) {
+      rooms = rooms.where('barangayId', isEqualTo: access.managedBarangayId);
+      sos = sos.where('barangayId', isEqualTo: access.managedBarangayId);
     }
     final roomsStream = rooms.snapshots();
     final sosStream = sos.snapshots();
@@ -1934,6 +1979,8 @@ class _OverviewIncidentReports extends StatelessWidget {
         'mountainName',
         whereIn: _mountainNameVariants(access.managedMountainName!),
       );
+    } else if (access.isBarangayOfficial) {
+      reports = reports.where('barangayId', isEqualTo: access.managedBarangayId);
     }
     reports = reports.orderBy('createdAt', descending: true).limit(4);
 
@@ -3418,15 +3465,23 @@ class _SectionCard extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
+        color: AdminColors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AdminColors.border),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF173B34).withValues(alpha: 0.045),
+            blurRadius: 18,
+            offset: const Offset(0, 5),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             title,
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 12),
           child,
@@ -3552,6 +3607,8 @@ class _IncidentReportsPageState extends State<_IncidentReportsPage> {
         'mountainName',
         whereIn: _mountainNameVariants(widget.access.managedMountainName!),
       );
+    } else if (widget.access.isBarangayOfficial) {
+      reports = reports.where('barangayId', isEqualTo: widget.access.managedBarangayId);
     }
     reports = reports.orderBy('createdAt', descending: true);
     final pageCursor = _pageCursors[_pageIndex];
@@ -3602,30 +3659,54 @@ class _IncidentReportsPageState extends State<_IncidentReportsPage> {
                   )
                   .toList(growable: false);
 
-        return Container(
-          color: const Color(0xFFFFF6E5),
-          child: ListView(
+        return ListView(
             key: ValueKey(_pageIndex),
             padding: _adminPagePadding(context),
             children: [
-            Text(
-              'Incident Reports',
-              style: Theme.of(
-                context,
-              ).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              widget.access.isMountainHead
-                  ? 'Acknowledge each report, mark when responders are sent, then mark it responded once resolved.'
-                  : 'Monitor hike incident reports across all mountains.',
-              style: const TextStyle(color: Colors.black54),
-            ),
-            const SizedBox(height: 18),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
+              Row(
+                children: [
+                  Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      color: AdminColors.accent.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: const Icon(
+                      Icons.assignment_late_outlined,
+                      color: AdminColors.accent,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Incident Reports',
+                          style: Theme.of(context).textTheme.headlineMedium,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          widget.access.isBarangayOfficial
+                              ? 'Local reports for ${widget.access.managedBarangayName}. Acknowledge, dispatch responders, then mark resolved.'
+                              : widget.access.isMountainHead
+                              ? 'Review reports for your mountain and track response progress.'
+                              : 'Monitor incident reports across all mountains.',
+                          style: const TextStyle(color: AdminColors.muted),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              _SectionCard(
+                title: 'Filter by status',
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
                 _IncidentReportCount(
                   label: 'All',
                   count: reportDocs.length,
@@ -3662,21 +3743,24 @@ class _IncidentReportsPageState extends State<_IncidentReportsPage> {
                   selected: _selectedStatus == 'responded',
                   onTap: () => setState(() => _selectedStatus = 'responded'),
                 ),
-              ],
-            ),
-            const SizedBox(height: 16),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
             if (reportDocs.isEmpty)
-              const _EmptyRow('No incident reports have been filed.')
+              const _IncidentReportsEmptyState(
+                message: 'No incident reports have been filed.',
+              )
             else if (visibleReportDocs.isEmpty)
-              _EmptyRow(
-                'No ${_incidentStatusLabel(_selectedStatus).toLowerCase()} reports on this page.',
+              _IncidentReportsEmptyState(
+                message: 'No ${_incidentStatusLabel(_selectedStatus).toLowerCase()} reports on this page.',
               )
             else
               for (final reportDoc in visibleReportDocs)
                 _IncidentReportListCard(
                   reportId: reportDoc.id,
                   data: reportDoc.data(),
-                  canRespond: widget.access.isMountainHead,
+                  canRespond: widget.access.isMountainHead || widget.access.isBarangayOfficial,
                 ),
             const SizedBox(height: 8),
             Row(
@@ -3711,7 +3795,6 @@ class _IncidentReportsPageState extends State<_IncidentReportsPage> {
             ),
             const SizedBox(height: 12),
             ],
-          ),
         );
       },
     );
@@ -3760,23 +3843,43 @@ class _IncidentReportCount extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(8),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          borderRadius: BorderRadius.circular(12),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: color.withValues(alpha: selected ? 0.20 : 0.08),
+              color: selected ? AdminColors.backgroundTop : AdminColors.surface,
               border: Border.all(
-                color: color.withValues(alpha: selected ? 0.85 : 0.40),
-                width: selected ? 1.5 : 1,
+                color: selected ? AdminColors.backgroundTop : AdminColors.border,
               ),
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: selected
+                  ? [
+                      BoxShadow(
+                        color: AdminColors.backgroundTop.withValues(alpha: 0.14),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ]
+                  : const [],
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.circle, size: 11, color: color),
-                const SizedBox(width: 10),
-                Text('$label: $count', style: const TextStyle(fontSize: 14)),
+                Icon(
+                  Icons.circle,
+                  size: 9,
+                  color: selected ? Colors.white : color,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '$label  $count',
+                  style: TextStyle(
+                    color: selected ? Colors.white : AdminColors.ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
               ],
             ),
           ),
@@ -3784,6 +3887,42 @@ class _IncidentReportCount extends StatelessWidget {
       ),
     );
   }
+}
+
+class _IncidentReportsEmptyState extends StatelessWidget {
+  const _IncidentReportsEmptyState({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: AdminColors.accent.withValues(alpha: 0.09),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: const Icon(
+              Icons.inbox_outlined,
+              color: AdminColors.accent,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(color: AdminColors.muted),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _IncidentReportListCard extends StatelessWidget {
@@ -3816,12 +3955,6 @@ class _IncidentReportListCard extends StatelessWidget {
         '${created.isEmpty ? '' : ' · $created'}';
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
-      color: const Color(0xFFFFFDF2),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: const BorderSide(color: Color(0xFFE8DCC1)),
-      ),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final reportDetails = Row(
@@ -3882,8 +4015,8 @@ class _IncidentReportListCard extends StatelessWidget {
             icon: const Icon(Icons.visibility_outlined, size: 18),
             label: const Text('Review report'),
             style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF356B3C),
-              side: const BorderSide(color: Color(0xFF9C947E)),
+              foregroundColor: AdminColors.backgroundTop,
+              side: const BorderSide(color: AdminColors.border),
               shape: const StadiumBorder(),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             ),
@@ -3953,6 +4086,11 @@ class _HikeRoomMonitoringPage extends StatelessWidget {
           )
           .orderBy('endedAt', descending: true)
           .limit(50);
+    } else if (access.isBarangayOfficial) {
+      currentRoomsQuery = currentRoomsQuery.where('barangayId', isEqualTo: access.managedBarangayId);
+      historyQuery = FirebaseFirestore.instance.collection('hike_room_history')
+          .where('barangayId', isEqualTo: access.managedBarangayId)
+          .orderBy('endedAt', descending: true).limit(50);
     }
 
     return SingleChildScrollView(
@@ -4851,6 +4989,8 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
         'mountainName',
         whereIn: _mountainNameVariants(widget.access.managedMountainName!),
       );
+    } else if (widget.access.isBarangayOfficial) {
+      query = query.where('barangayId', isEqualTo: widget.access.managedBarangayId);
     }
     query = query
         .orderBy('createdAt', descending: true)
@@ -6169,6 +6309,8 @@ class _UserManagementPageState extends State<_UserManagementPage> {
         data['accountType'] == 'admin') {
       return data['adminRole'] == 'mountain_head'
           ? 'mountain_head'
+          : data['adminRole'] == 'barangay_official'
+          ? 'barangay_official'
           : 'tourism_admin';
     }
     final accountType = data['accountType']?.toString();
@@ -6190,6 +6332,38 @@ class _UserManagementPageState extends State<_UserManagementPage> {
     );
   }
 
+  Future<void> _assignUserBarangay(BuildContext context, String uid) async {
+    final entries = await FirebaseFirestore.instance.collection('barangays')
+        .where('active', isEqualTo: true).get();
+    if (!context.mounted) return;
+    final selected = await showDialog<QueryDocumentSnapshot<Map<String, dynamic>>>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('Assign user to barangay'),
+        children: [for (final doc in entries.docs)
+          SimpleDialogOption(onPressed: () => Navigator.of(dialogContext).pop(doc),
+            child: Text('${doc.data()['name']}${(doc.data()['districtName']?.toString() ?? '').isNotEmpty ? ' · District ${doc.data()['districtName']}' : ''}, ${doc.data()['municipality']}, ${doc.data()['province']}'))],
+      ),
+    );
+    if (selected == null || !context.mounted) return;
+    try {
+      await _adminFunctions.httpsCallable('assignUserBarangay').call({
+        'uid': uid, 'id': selected.id,
+      });
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('User assigned to ${selected.data()['name']}.')),
+        );
+      }
+    } on FirebaseFunctionsException catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.message ?? 'Could not assign barangay.')),
+        );
+      }
+    }
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -6209,6 +6383,8 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                 ),
               )
               .orderBy('email')
+        : widget.access.isBarangayOfficial
+        ? usersCollection.where('barangayId', isEqualTo: widget.access.managedBarangayId).orderBy('email')
         : usersCollection.orderBy('email');
 
     return SingleChildScrollView(
@@ -6224,10 +6400,17 @@ class _UserManagementPageState extends State<_UserManagementPage> {
           Text(
             widget.access.isMountainHead
                 ? 'Tour guides assigned to ${widget.access.managedMountainName}.'
+                : widget.access.isBarangayOfficial
+                ? 'Users and tour guides assigned to ${widget.access.managedBarangayName}.'
                 : 'View and manage AGAKBAY user and admin accounts.',
             style: const TextStyle(color: Colors.black54),
           ),
           const SizedBox(height: 20),
+
+          if (widget.access.isTourismAdmin) ...[
+            const _BarangayDirectorySection(),
+            const SizedBox(height: 18),
+          ],
 
           if (widget.access.isTourismAdmin) ...[
             Align(
@@ -6289,6 +6472,7 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                     value: 'mountain_head',
                     child: Text('Mountain Head'),
                   ),
+                  DropdownMenuItem(value: 'barangay_official', child: Text('Barangay Official')),
                 ],
                 onChanged: (value) {
                   if (value != null) {
@@ -6416,6 +6600,7 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                               'tour_guide' => 'Tour Guide',
                               'tourism_admin' => 'Tourism Admin',
                               'mountain_head' => 'Mountain Head',
+                              'barangay_official' => 'Barangay Official',
                               _ => 'Hiker',
                             }),
                           ),
@@ -6630,6 +6815,8 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                       label: 'Admin Role',
                       value: data['adminRole'] == 'mountain_head'
                           ? 'Mountain Head'
+                          : data['adminRole'] == 'barangay_official'
+                          ? 'Barangay Official'
                           : data['adminRole'] == 'tourism_admin'
                           ? 'Tourism Admin'
                           : 'Unassigned (legacy Tourism Admin)',
@@ -6641,12 +6828,15 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                             data['managedMountainName']?.toString() ??
                             'Not assigned',
                       ),
+                    if (data['adminRole'] == 'barangay_official')
+                      _UserDetailRow(label: 'Managed Barangay', value: data['managedBarangayName']?.toString() ?? 'Not assigned'),
                   ],
                   _UserDetailRow(
                     label: 'Account Status',
                     value: isSuspended ? 'Suspended' : 'Active',
                   ),
                   _UserDetailRow(label: 'Role', value: role),
+                  _UserDetailRow(label: 'Barangay', value: data['barangayName']?.toString() ?? 'Not assigned'),
                   _UserDetailRow(
                     label: 'Email Verified',
                     value: emailVerified ? 'Verified' : 'Not Verified',
@@ -6696,6 +6886,11 @@ class _UserManagementPageState extends State<_UserManagementPage> {
               ),
             if (widget.access.isTourismAdmin) ...[
               TextButton.icon(
+                onPressed: () => _assignUserBarangay(dialogContext, userId),
+                icon: const Icon(Icons.location_city_outlined),
+                label: const Text('Assign Barangay'),
+              ),
+              TextButton.icon(
                 onPressed: () => _manageUserAccount(
                   dialogContext,
                   userId,
@@ -6731,6 +6926,489 @@ class _UserManagementPageState extends State<_UserManagementPage> {
   }
 }
 
+class _BarangayDirectorySection extends StatelessWidget {
+  const _BarangayDirectorySection();
+
+  Future<void> _setActive(BuildContext context, Map<String, dynamic> data, bool active) async {
+    try {
+      await _adminFunctions.httpsCallable('saveBarangayDirectoryEntry').call({
+        'id': data['id'],
+        'name': data['name'],
+        'districtName': data['districtName'] ?? '',
+        'municipality': data['municipality'], 'province': data['province'],
+        'active': active,
+      });
+    } on FirebaseFunctionsException catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.message ?? 'Could not update the barangay.')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: AdminColors.accent.withValues(alpha: 0.09),
+              borderRadius: BorderRadius.circular(13),
+            ),
+            child: const Icon(Icons.location_city_rounded, color: Color(0xFF12805A)),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Barangay Directory', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17)),
+            SizedBox(height: 3),
+            Text('Maintain barangay names and their optional district, city, or province.', style: TextStyle(color: Colors.black54)),
+          ])),
+          FilledButton.icon(onPressed: () => showDialog<void>(context: context, builder: (_) => const _BarangayEntryDialog()),
+            icon: const Icon(Icons.add_rounded), label: const Text('Add barangay')),
+        ]),
+        const SizedBox(height: 16),
+        const Divider(height: 1, color: Color(0xFFE9EEEA)),
+        const SizedBox(height: 8),
+        StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: FirebaseFirestore.instance.collection('barangays').snapshots(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) return _StreamErrorRow(snapshot.error);
+            if (!snapshot.hasData) return const LinearProgressIndicator();
+            if (snapshot.data!.docs.isEmpty) return const Text('No barangays added yet.');
+            return Column(children: [for (final doc in snapshot.data!.docs)
+              ListTile(dense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                leading: const Icon(Icons.place_outlined, color: Color(0xFF537365)),
+                title: Text('${doc.data()['name']}, ${doc.data()['municipality']}'),
+                subtitle: Text([
+                  if ((doc.data()['districtName']?.toString() ?? '').isNotEmpty)
+                    'District ${doc.data()['districtName']}',
+                  if ((doc.data()['province']?.toString() ?? '').isNotEmpty)
+                    doc.data()['province'].toString(),
+                ].join(' · ')),
+                trailing: Switch(value: doc.data()['active'] == true,
+                  onChanged: (value) => _setActive(context, doc.data(), value)),
+              ),
+            ]);
+          },
+        ),
+      ]),
+    ),
+  );
+}
+
+class _BarangayEntryDialog extends StatefulWidget {
+  const _BarangayEntryDialog();
+  @override
+  State<_BarangayEntryDialog> createState() => _BarangayEntryDialogState();
+}
+
+class _BarangayEntryDialogState extends State<_BarangayEntryDialog> {
+  final _formKey = GlobalKey<FormState>();
+  final _name = TextEditingController();
+  final _districtName = TextEditingController();
+  final _municipality = TextEditingController();
+  final _province = TextEditingController();
+  List<_AreaChoice> _provinceOptions = const [];
+  List<_AreaChoice> _allCities = const [];
+  List<String> _allBarangayOptions = const [];
+  List<String> _barangayOptions = const [];
+  _AreaChoice? _selectedProvince;
+  _AreaChoice? _selectedCity;
+  bool _loadingLocationOptions = true;
+  String? _locationOptionsError;
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLocationOptions();
+  }
+
+  @override
+  void dispose() { _name.dispose(); _districtName.dispose(); _municipality.dispose(); _province.dispose(); super.dispose(); }
+
+  Future<List<Map<String, dynamic>>> _fetchPsgcList(String path) async {
+    final response = await http.get(
+      Uri.parse('https://psgc.billyjamesramos.com/api/v1/$path'),
+    ).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw StateError('The location list service returned ${response.statusCode}.');
+    }
+    final payload = jsonDecode(response.body);
+    if (payload is! Map<String, dynamic> || payload['data'] is! List) {
+      throw const FormatException('The location list response is invalid.');
+    }
+    return (payload['data'] as List)
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+  }
+
+  Future<void> _loadLocationOptions() async {
+    try {
+      final results = await Future.wait([
+        _fetchPsgcList('provinces?limit=100'),
+        _fetchPsgcList('cities-municipalities?limit=2000'),
+        _fetchPsgcList('regions?limit=100'),
+      ]);
+      final provinceRows = results[0];
+      final cityRows = results[1];
+      final regionNames = {
+        for (final row in results[2]) row['code']?.toString(): row['name']?.toString(),
+      };
+      final provinces = provinceRows.map(_AreaChoice.fromJson).toList();
+      final unprovincedRegionCodes = cityRows
+          .where((row) => row['provinceCode'] == null)
+          .map((row) => row['regionCode']?.toString())
+          .whereType<String>()
+          .toSet();
+      for (final code in unprovincedRegionCodes) {
+        provinces.add(_AreaChoice(
+          code: code,
+          name: regionNames[code] ?? 'Other area ($code)',
+          regionCode: code,
+          isRegion: true,
+        ));
+      }
+      if (!mounted) return;
+      setState(() {
+        _provinceOptions = provinces..sort((a, b) => a.name.compareTo(b.name));
+        _allCities = cityRows.map(_AreaChoice.fromJson).toList(growable: false);
+        _loadingLocationOptions = false;
+        _locationOptionsError = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loadingLocationOptions = false;
+        _locationOptionsError = 'Online location suggestions are unavailable. You can still enter names manually.';
+      });
+    }
+  }
+
+  void _selectProvince(String name) {
+    _selectedProvince = _provinceOptions.where((option) => option.name == name).firstOrNull;
+    _selectedCity = null;
+    _municipality.clear();
+    _districtName.clear();
+    _barangayOptions = const [];
+    _allBarangayOptions = const [];
+    _name.clear();
+    setState(() {});
+  }
+
+  void _typeProvince(String name) {
+    final matchingOption = _provinceOptions
+        .where((option) => option.name.toLowerCase() == name.trim().toLowerCase())
+        .firstOrNull;
+    if (matchingOption != null) {
+      if (_selectedProvince?.code != matchingOption.code) {
+        _selectProvince(matchingOption.name);
+      }
+      return;
+    }
+    if (_selectedProvince == null && _selectedCity == null) return;
+    _selectedProvince = null;
+    _selectedCity = null;
+    _municipality.clear();
+    _districtName.clear();
+    _barangayOptions = const [];
+    _allBarangayOptions = const [];
+    _name.clear();
+    setState(() {});
+  }
+
+  bool get _isDavaoCitySelection {
+    final city = _selectedCity;
+    final province = _selectedProvince;
+    return city?.code == '1130700000' && province != null &&
+        (province.code == city!.geographicProvinceCode ||
+            province.code == city.regionCode);
+  }
+
+  List<String> get _districtOptions => _isDavaoCitySelection
+      ? davaoAdministrativeDistrictBarangays.keys.toList(growable: false)
+      : const [];
+
+  String _normalizeLocationName(String value) => value
+      .trim()
+      .toLowerCase()
+      .replaceFirst(RegExp(r'^barangay\s+'), '')
+      .replaceAll('ñ', 'n')
+      .replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+  _AreaChoice? _matchingCityOption(String value) {
+    final normalized = _normalizeLocationName(value);
+    return _cityOptions.where((option) {
+      final optionName = _normalizeLocationName(option.name);
+      return optionName == normalized ||
+          (option.code == '1130700000' && normalized == 'davaocity');
+    }).firstOrNull;
+  }
+
+  void _setBarangaysForDistrict() {
+    final districtKey = davaoAdministrativeDistrictBarangays.keys
+        .where((district) =>
+            _normalizeLocationName(district) ==
+            _normalizeLocationName(_districtName.text))
+        .firstOrNull;
+    if (!_isDavaoCitySelection || districtKey == null) {
+      _barangayOptions = _allBarangayOptions;
+    } else {
+      final acceptedNames = davaoAdministrativeDistrictBarangays[districtKey]!
+          .map(_normalizeLocationName)
+          .toSet();
+      _barangayOptions = _allBarangayOptions
+          .where((name) => acceptedNames.contains(_normalizeLocationName(name)))
+          .toList(growable: false);
+    }
+    if (!_barangayOptions.any((name) =>
+        _normalizeLocationName(name) == _normalizeLocationName(_name.text))) {
+      _name.clear();
+    }
+  }
+
+  void _applyDistrictFilter(String _) {
+    _setBarangaysForDistrict();
+    setState(() {});
+  }
+
+  List<_AreaChoice> get _cityOptions {
+    final province = _selectedProvince;
+    if (province == null) return const [];
+    if (province.isRegion) {
+      return _allCities.where((city) => city.regionCode == province.code && city.provinceCode == null).toList();
+    }
+    return _allCities.where((city) =>
+      city.provinceCode == province.code || city.geographicProvinceCode == province.code
+    ).toList();
+  }
+
+  Future<void> _selectCity(String name) async {
+    _selectedCity = _cityOptions.where((option) => option.name == name).firstOrNull;
+    _name.clear();
+    _districtName.clear();
+    final selectedCity = _selectedCity;
+    if (selectedCity == null) {
+      _barangayOptions = const [];
+      _allBarangayOptions = const [];
+      setState(() {});
+      return;
+    }
+    setState(() {
+      _barangayOptions = const [];
+      _allBarangayOptions = const [];
+    });
+    try {
+      final rows = await _fetchPsgcList(
+        'cities-municipalities/${Uri.encodeComponent(selectedCity.code)}/barangays?limit=1000',
+      );
+      if (!mounted || _selectedCity?.code != selectedCity.code) return;
+      final names = rows
+          .map((row) => row['name']?.toString() ?? '')
+          .where((name) => name.isNotEmpty)
+          .toSet()
+          .toList()..sort();
+      setState(() {
+        _allBarangayOptions = names;
+        _setBarangaysForDistrict();
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _locationOptionsError = 'Barangay suggestions could not be loaded. You can still enter the name manually.');
+    }
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() { _saving = true; _error = null; });
+    try {
+      await _adminFunctions.httpsCallable('saveBarangayDirectoryEntry').call({
+        'name': _name.text.trim(),
+        'districtName': _districtName.text.trim(),
+        'municipality': _municipality.text.trim(), 'province': _province.text.trim(),
+        'active': true,
+      });
+      if (mounted) Navigator.of(context).pop();
+    } on FirebaseFunctionsException catch (error) {
+      if (mounted) setState(() => _error = error.message ?? 'Could not save barangay.');
+    } finally { if (mounted) setState(() => _saving = false); }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Add Barangay'),
+    content: SizedBox(width: 440, child: Form(key: _formKey, child: Column(mainAxisSize: MainAxisSize.min, children: [
+      _SuggestionTextFormField(
+        controller: _province,
+        label: 'Province or region',
+        icon: Icons.map_outlined,
+        suggestions: _provinceOptions.map((option) => option.name).toList(),
+        validator: _required,
+        onChanged: _typeProvince,
+        onSelected: _selectProvince,
+      ),
+      const SizedBox(height: 12),
+      _SuggestionTextFormField(
+        controller: _municipality,
+        label: 'City or municipality',
+        icon: Icons.location_city_outlined,
+        suggestions: _cityOptions.map((option) => option.name).toList(),
+        validator: _required,
+        onChanged: (value) {
+          final matchingOption = _matchingCityOption(value);
+          if (matchingOption != null) {
+            if (_selectedCity?.code != matchingOption.code) {
+              unawaited(_selectCity(matchingOption.name));
+            }
+          } else if (_selectedCity != null) {
+            _selectedCity = null;
+            _barangayOptions = const [];
+            _allBarangayOptions = const [];
+            _name.clear();
+            _districtName.clear();
+            setState(() {});
+          }
+        },
+        onSelected: _selectCity,
+      ),
+      const SizedBox(height: 12),
+      _SuggestionTextFormField(
+        controller: _districtName,
+        label: 'District name (optional)',
+        icon: Icons.grid_view_rounded,
+        suggestions: _districtOptions,
+        onChanged: _applyDistrictFilter,
+        onSelected: _applyDistrictFilter,
+      ),
+      const SizedBox(height: 12),
+      _SuggestionTextFormField(
+        controller: _name,
+        label: 'Barangay name',
+        icon: Icons.place_outlined,
+        suggestions: _barangayOptions,
+        validator: _required,
+      ),
+      if (_loadingLocationOptions)
+        const Padding(
+          padding: EdgeInsets.only(top: 8),
+          child: LinearProgressIndicator(minHeight: 2),
+        ),
+      if (_locationOptionsError != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              _locationOptionsError!,
+              style: const TextStyle(color: Colors.black54, fontSize: 12),
+            ),
+          ),
+        ),
+      if (_error != null) Padding(padding: const EdgeInsets.only(top: 10), child: Text(_error!, style: const TextStyle(color: Colors.red))),
+    ]))),
+    actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
+    actions: [TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
+      FilledButton.icon(onPressed: _saving ? null : _save,
+        icon: _saving ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.check_rounded),
+        label: Text(_saving ? 'Saving' : 'Save barangay'))],
+  );
+
+  String? _required(String? value) => value == null || value.trim().isEmpty ? 'Required.' : null;
+}
+
+class _AreaChoice {
+  const _AreaChoice({
+    required this.code,
+    required this.name,
+    required this.regionCode,
+    this.provinceCode,
+    this.geographicProvinceCode,
+    this.isRegion = false,
+  });
+
+  factory _AreaChoice.fromJson(Map<String, dynamic> json) => _AreaChoice(
+    code: json['code']?.toString() ?? '',
+    name: json['name']?.toString() ?? '',
+    regionCode: json['regionCode']?.toString() ?? '',
+    provinceCode: json['provinceCode']?.toString(),
+    geographicProvinceCode: json['geographicProvinceCode']?.toString(),
+  );
+
+  final String code;
+  final String name;
+  final String regionCode;
+  final String? provinceCode;
+  final String? geographicProvinceCode;
+  final bool isRegion;
+}
+
+class _SuggestionTextFormField extends StatelessWidget {
+  const _SuggestionTextFormField({
+    required this.controller,
+    required this.label,
+    required this.icon,
+    required this.suggestions,
+    this.validator,
+    this.onChanged,
+    this.onSelected,
+  });
+
+  final TextEditingController controller;
+  final String label;
+  final IconData icon;
+  final List<String> suggestions;
+  final FormFieldValidator<String>? validator;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onSelected;
+
+  @override
+  Widget build(BuildContext context) => Autocomplete<String>(
+    initialValue: TextEditingValue(text: controller.text),
+    optionsBuilder: (value) {
+      final query = value.text.trim().toLowerCase();
+      final filtered = suggestions.where((option) =>
+        query.isEmpty || option.toLowerCase().contains(query)
+      );
+      return filtered.take(60);
+    },
+    onSelected: (value) {
+      controller.text = value;
+      onSelected?.call(value);
+    },
+    fieldViewBuilder: (context, textController, focusNode, onFieldSubmitted) {
+      if (textController.text != controller.text) {
+        textController.value = TextEditingValue(
+          text: controller.text,
+          selection: TextSelection.collapsed(offset: controller.text.length),
+        );
+      }
+      return TextFormField(
+        controller: textController,
+        focusNode: focusNode,
+        validator: validator,
+        textCapitalization: TextCapitalization.words,
+        decoration: InputDecoration(
+          labelText: label,
+          prefixIcon: Icon(icon),
+          suffixIcon: const Icon(Icons.arrow_drop_down_rounded),
+          hintText: 'Choose a suggestion or type a name',
+        ),
+        onChanged: (value) {
+          controller.text = value;
+          onChanged?.call(value);
+        },
+        onFieldSubmitted: (_) => onFieldSubmitted(),
+      );
+    },
+  );
+}
+
 class _CreateAdminAccountDialog extends StatefulWidget {
   const _CreateAdminAccountDialog();
 
@@ -6754,6 +7432,9 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
   String? _createdMountainName;
 
   String? _managedMountainName;
+  String? _managedBarangayId;
+  String? _managedBarangayName;
+  String? _managedBarangayLabel;
 
   @override
   void dispose() {
@@ -6777,12 +7458,18 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
             'adminRole': _adminRole,
             if (_adminRole == 'mountain_head')
               'managedMountainName': _managedMountainName,
+            if (_adminRole == 'barangay_official') ...{
+              'managedBarangayId': _managedBarangayId,
+              'managedBarangayName': _managedBarangayName,
+            },
           });
       final createdRole = result.data['adminRole'];
       final createdMountain = result.data['managedMountainName'];
       if (createdRole != _adminRole ||
           (_adminRole == 'mountain_head' &&
-              createdMountain != _managedMountainName)) {
+              createdMountain != _managedMountainName) ||
+          (_adminRole == 'barangay_official' &&
+              result.data['managedBarangayId'] != _managedBarangayId)) {
         throw StateError(
           'Firebase did not confirm the selected admin role and mountain. '
           'The account may have been created with different access. '
@@ -6843,11 +7530,13 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'Assigned role: ${_createdAdminRole == 'mountain_head' ? 'Mountain Head' : 'Tourism Admin'}',
+                    'Assigned role: ${_createdAdminRole == 'mountain_head' ? 'Mountain Head' : _createdAdminRole == 'barangay_official' ? 'Barangay Official' : 'Tourism Admin'}',
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
                   if (_createdAdminRole == 'mountain_head')
                     Text('Managed mountain: $_createdMountainName'),
+                  if (_createdAdminRole == 'barangay_official')
+                    Text('Managed barangay: ${_managedBarangayLabel ?? _managedBarangayName ?? ''}'),
                   const SizedBox(height: 12),
                   Text(
                     'Not in their inbox? Ask them to check Spam. If the link '
@@ -6897,6 +7586,10 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                           value: 'mountain_head',
                           child: Text('Mountain Head — assigned mountain'),
                         ),
+                        DropdownMenuItem(
+                          value: 'barangay_official',
+                          child: Text('Barangay Official — assigned barangay'),
+                        ),
                       ],
                       onChanged: _creating
                           ? null
@@ -6906,6 +7599,11 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                                   _adminRole = value;
                                   if (value != 'mountain_head') {
                                     _managedMountainName = null;
+                                  }
+                                  if (value != 'barangay_official') {
+                                    _managedBarangayId = null;
+                                    _managedBarangayName = null;
+                                    _managedBarangayLabel = null;
                                   }
                                 });
                               }
@@ -6934,6 +7632,33 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                             return 'Choose the managed mountain.';
                           }
                           return null;
+                        },
+                      ),
+                    if (_adminRole == 'barangay_official')
+                      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: FirebaseFirestore.instance.collection('barangays')
+                            .where('active', isEqualTo: true).snapshots(),
+                        builder: (context, snapshot) {
+                          final docs = snapshot.data?.docs ?? const [];
+                          return DropdownButtonFormField<String>(
+                            initialValue: _managedBarangayId,
+                            decoration: const InputDecoration(labelText: 'Assigned barangay'),
+                            items: docs.map((doc) => DropdownMenuItem<String>(
+                              value: doc.id,
+                              child: Text('${doc.data()['name']}${(doc.data()['districtName']?.toString() ?? '').isNotEmpty ? ' · District ${doc.data()['districtName']}' : ''}, ${doc.data()['municipality']}, ${doc.data()['province']}'),
+                            )).toList(),
+                            onChanged: _creating ? null : (code) {
+                              final selected = docs.where((doc) => doc.id == code).firstOrNull;
+                              setState(() {
+                                _managedBarangayId = code;
+                                _managedBarangayName = selected?.data()['name']?.toString();
+                                _managedBarangayLabel = selected == null ? null :
+                                  '${selected.data()['name']}${(selected.data()['districtName']?.toString() ?? '').isNotEmpty ? ', District ${selected.data()['districtName']}' : ''}, ${selected.data()['municipality']}, ${selected.data()['province']}';
+                              });
+                            },
+                            validator: (value) => _adminRole == 'barangay_official' && value == null
+                                ? 'Add and choose an active barangay first.' : null,
+                          );
                         },
                       ),
                     if (_error != null) ...[

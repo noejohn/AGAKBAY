@@ -16,6 +16,8 @@ const {
 const {
   manageUserAccount,
   createAdminAccount,
+  saveBarangayDirectoryEntry,
+  assignUserBarangay,
   refreshAdminClaims,
   cleanupOrphanedSosEvents,
   getDeletedSosSenderIds,
@@ -37,7 +39,7 @@ const {
   requestAdminPasswordReset,
   confirmAdminPasswordReset,
 } = require("./adminPasswordReset");
-const { assertMountainHead } = require("./adminAuthorization");
+const { assertMountainHead, assertBarangayOfficial } = require("./adminAuthorization");
 const {
   canonicalizeDavaoMountainName,
   normalizeMountainName,
@@ -50,6 +52,8 @@ exports.reviewTourGuideApplication = reviewTourGuideApplication;
 exports.recommendAdminReview = recommendAdminReview;
 exports.manageUserAccount = manageUserAccount;
 exports.createAdminAccount = createAdminAccount;
+exports.saveBarangayDirectoryEntry = saveBarangayDirectoryEntry;
+exports.assignUserBarangay = assignUserBarangay;
 exports.refreshAdminClaims = refreshAdminClaims;
 exports.cleanupOrphanedSosEvents = cleanupOrphanedSosEvents;
 exports.getDeletedSosSenderIds = getDeletedSosSenderIds;
@@ -78,6 +82,8 @@ function buildHikeRoomHistoryRecord({ roomId, before, after, participants }) {
     roomId,
     roomCode: String(after.roomCode || ""),
     mountainName: String(after.mountainName || "Unnamed hike"),
+    barangayId: String(after.barangayId || ""),
+    barangayName: String(after.barangayName || ""),
     mountainPlaceId: String(after.mountainPlaceId || ""),
     routeName: String(after.routeName || ""),
     guideId: String(after.guideId || ""),
@@ -139,7 +145,9 @@ exports.recordCompletedHikeRoom = onDocumentUpdated(
 exports.updateIncidentReportStatus = onCall(
   { timeoutSeconds: 30, memory: "256MiB" },
   async (request) => {
-    const mountainName = assertMountainHead(request.auth);
+    const isBarangay = request.auth?.token?.adminRole === "barangay_official";
+    const barangayId = isBarangay ? assertBarangayOfficial(request.auth) : null;
+    const mountainName = isBarangay ? null : assertMountainHead(request.auth);
     const reportId = String(request.data?.reportId ?? "").trim();
     const action = String(request.data?.action ?? "").trim();
     if (!/^incident_[A-Za-z0-9_-]{1,100}$/.test(reportId)) {
@@ -156,7 +164,7 @@ exports.updateIncidentReportStatus = onCall(
     }
 
     const reportRef = db.collection("incident_reports").doc(reportId);
-    const headName = String(request.auth.token.name ?? "Mountain Head");
+    const headName = String(request.auth.token.name ?? (isBarangay ? "Barangay Official" : "Mountain Head"));
     const now = admin.firestore.FieldValue.serverTimestamp();
     let resultingStatus;
     await db.runTransaction(async (transaction) => {
@@ -169,13 +177,13 @@ exports.updateIncidentReportStatus = onCall(
       // "Mt. Apo"), while the head's custom claim may use an equivalent
       // spelling (for example "Mount Apo"). Compare normalized names so a
       // head assigned to that mountain can perform the status transitions.
-      if (
-        normalizeMountainName(String(report.mountainName ?? "")) !==
-        normalizeMountainName(mountainName)
-      ) {
+      const inScope = isBarangay
+        ? report.barangayId === barangayId
+        : normalizeMountainName(String(report.mountainName ?? "")) === normalizeMountainName(mountainName);
+      if (!inScope) {
         throw new HttpsError(
           "permission-denied",
-          "This incident report belongs to another mountain.",
+          "This incident report is outside your assigned area.",
         );
       }
       if (report.status === transition.to) {
@@ -517,6 +525,8 @@ exports.sendSosEvent = onCall(
       roomId,
       roomCode: room?.roomCode ?? "",
       mountainName: room?.mountainName ?? "",
+      barangayId: room?.barangayId ?? "",
+      barangayName: room?.barangayName ?? "",
       senderId: uid,
       senderName,
       latitude,
@@ -651,11 +661,17 @@ exports.submitIncidentReport = onCall(
       normalizeMountainName(head.data().managedMountainName || "") ===
         normalizeMountainName(mountainName)
     );
+    const barangayOfficials = room.barangayId
+      ? await db.collection("users").where("adminRole", "==", "barangay_official")
+        .where("managedBarangayId", "==", room.barangayId).get()
+      : { docs: [] };
     const reportRef = db.collection("incident_reports").doc(reportId);
     const reportData = {
       roomId,
       roomCode: String(room.roomCode ?? ""),
       mountainName,
+      barangayId: String(room.barangayId || ""),
+      barangayName: String(room.barangayName || ""),
       source: source === "lora" ? "lora_relay_unverified" : "firestore_sos",
       eventId: eventId || null,
       category: reason,
@@ -706,8 +722,23 @@ exports.submitIncidentReport = onCall(
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         });
       }
+      for (const official of barangayOfficials.docs) {
+        const notificationRef = db.collection("notifications").doc(`incident_${reportId}_${official.id}`);
+        transaction.create(notificationRef, {
+          type: "incident_report", title: "New Local Incident Report",
+          message: `${reportData.guideName} filed an incident in ${reportData.barangayName || "your barangay"}.`,
+          reportId, roomId, roomCode: reportData.roomCode,
+          mountainName, barangayId: reportData.barangayId,
+          barangayName: reportData.barangayName,
+          category: reason, hikerName: reportData.hikerName,
+          latitude: reportData.latitude, longitude: reportData.longitude,
+          guideName: reportData.guideName, guideNotes,
+          source: reportData.source, isRead: false,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
     });
-    return { sent: true, mountainHeadsNotified: heads.length };
+    return { sent: true, mountainHeadsNotified: heads.length, barangayOfficialsNotified: barangayOfficials.docs.length };
   },
 );
 
@@ -759,6 +790,8 @@ exports.onSosEventCreated = onDocumentCreated(
         roomId,
         eventId,
         mountainName: String(currentEvent.mountainName || data.mountainName || ""),
+        barangayId: String(currentEvent.barangayId || data.barangayId || ""),
+        barangayName: String(currentEvent.barangayName || data.barangayName || ""),
         senderId: String(data.senderId || ""),
         senderName,
         latitude: Number(data.latitude),

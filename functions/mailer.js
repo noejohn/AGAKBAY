@@ -1,4 +1,3 @@
-const nodemailer = require("nodemailer");
 const { HttpsError } = require("firebase-functions/v2/https");
 
 // Admin emails (new-account welcome, password reset codes) go out through
@@ -22,6 +21,10 @@ function adminWebUrl() {
 let transporter = null;
 
 function getTransporter() {
+  // Load lazily so Firebase CLI can discover and deploy non-email callables
+  // even when the local functions/node_modules cache is incomplete. The
+  // deployed Functions runtime installs nodemailer from package.json.
+  const nodemailer = require("nodemailer");
   const user = process.env.GMAIL_USER;
   const pass = process.env.GMAIL_APP_PASSWORD;
   if (!user || !pass) {
@@ -97,11 +100,14 @@ async function sendAdminWelcomeEmail({
   fullName,
   adminRole,
   managedMountainName,
+  managedBarangayName,
   setupLink,
 }) {
   const roleLabel = adminRole === "mountain_head"
     ? `Mountain Head — ${managedMountainName}`
-    : "Tourism Admin";
+    : adminRole === "barangay_official"
+      ? `Barangay Official — ${managedBarangayName}`
+      : "Tourism Admin";
   const signInUrl = adminWebUrl();
   const html = emailLayout("Your Agakbay admin account is ready", `
     <p style="margin:0 0 12px">Hi ${escapeHtml(fullName)},</p>

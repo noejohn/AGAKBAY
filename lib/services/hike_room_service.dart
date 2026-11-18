@@ -367,6 +367,8 @@ class HikeRoomService {
 
   Future<HikeRoom> createRoom({
     required String mountainName,
+    required String barangayId,
+    required String barangayName,
     required String mountainPlaceId,
     required double mountainLatitude,
     required double mountainLongitude,
@@ -388,6 +390,9 @@ class HikeRoomService {
     if (cleanMountain.isEmpty) {
       throw ArgumentError('Enter the mountain or hike name.');
     }
+    if (barangayId.trim().isEmpty || barangayName.trim().isEmpty) {
+      throw ArgumentError('Choose the barangay for this hike room.');
+    }
     if (routePoints.length < 2) {
       throw ArgumentError(
         'Select a mapped trail route before creating a room.',
@@ -400,6 +405,8 @@ class HikeRoomService {
     batch.set(roomRef, {
       'roomCode': code,
       'mountainName': cleanMountain,
+      'barangayId': barangayId,
+      'barangayName': barangayName.trim(),
       'mountainPlaceId': mountainPlaceId,
       'mountainLatitude': mountainLatitude,
       'mountainLongitude': mountainLongitude,

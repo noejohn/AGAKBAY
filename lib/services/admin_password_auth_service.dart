@@ -60,7 +60,7 @@ class AdminPasswordAuthService {
       );
     }
     final adminRole = claims?['adminRole'];
-    if (adminRole != 'tourism_admin' && adminRole != 'mountain_head') {
+    if (adminRole != 'tourism_admin' && adminRole != 'mountain_head' && adminRole != 'barangay_official') {
       await _firebaseAuth.signOut();
       throw FirebaseAuthException(
         code: 'invalid-admin-role',
@@ -82,6 +82,23 @@ class AdminPasswordAuthService {
       throw FirebaseAuthException(
         code: 'missing-managed-mountain',
         message: 'This Mountain Head account has no assigned mountain.',
+      );
+    }
+    if (adminRole == 'barangay_official' &&
+        (claims?['managedBarangayId'] is! String ||
+            (claims?['managedBarangayId'] as String).isEmpty)) {
+      await _firebaseAuth.signOut();
+      throw FirebaseAuthException(
+        code: 'missing-managed-barangay',
+        message: 'This Barangay Official account has no valid assigned barangay.',
+      );
+    }
+    if (adminRole == 'barangay_official' &&
+        claims?['managedBarangayId'] != refreshedAccess['managedBarangayId']) {
+      await _firebaseAuth.signOut();
+      throw FirebaseAuthException(
+        code: 'admin-barangay-mismatch',
+        message: 'The barangay assignment in the sign-in token does not match the admin profile. Sign in again to refresh access.',
       );
     }
     if (adminRole == 'mountain_head' &&

@@ -5453,9 +5453,44 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
       return;
     }
+    final barangays = await FirebaseFirestore.instance
+        .collection('barangays')
+        .where('active', isEqualTo: true)
+        .get();
+    if (!mounted) return;
+    if (barangays.docs.isEmpty) {
+      _showDashboardSnackBar('The Tourism Admin must add barangays to the directory before hike rooms can be created.');
+      return;
+    }
+    final selectedBarangay = await showDialog<QueryDocumentSnapshot<Map<String, dynamic>>>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Choose hike barangay'),
+        content: SizedBox(
+          width: 420,
+          height: 400,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final barangay in barangays.docs)
+                ListTile(
+                  title: Text(barangay.data()['name']?.toString() ?? 'Barangay'),
+                  subtitle: Text('${barangay.data()['municipality'] ?? ''}, ${barangay.data()['province'] ?? ''}'),
+                  onTap: () => Navigator.of(dialogContext).pop(barangay),
+                ),
+            ],
+          ),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel'))],
+      ),
+    );
+    if (selectedBarangay == null || !mounted) return;
+    final barangayData = selectedBarangay.data();
     try {
       await _hikeRoomService.createRoom(
         mountainName: _canonicalDavaoMountainName(trail.name),
+        barangayId: selectedBarangay.id,
+        barangayName: barangayData['name']?.toString() ?? '',
         mountainPlaceId: trail.placeId,
         mountainLatitude: trail.location.latitude,
         mountainLongitude: trail.location.longitude,

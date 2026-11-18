@@ -40,7 +40,7 @@ it("requires an explicit admin role when creating an admin account", async () =>
     }),
   ).rejects.toMatchObject({
     code: "invalid-argument",
-    message: "Choose either Tourism Admin or Mountain Head.",
+    message: "Choose either Tourism Admin, Mountain Head, or Barangay Official.",
   });
 });
 

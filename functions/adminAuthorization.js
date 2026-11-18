@@ -29,6 +29,17 @@ function assertMountainHead(auth) {
   return mountainName.trim();
 }
 
+function assertBarangayOfficial(auth) {
+  const barangayId = auth?.token?.managedBarangayId;
+  if (auth?.token?.admin !== true || auth.token.adminRole !== "barangay_official" ||
+      typeof barangayId !== "string" || !barangayId || barangayId.length > 320 ||
+      !barangayId.includes("|") || barangayId.includes("/")) {
+    throw new HttpsError("permission-denied", "Barangay Official access for an assigned barangay is required.");
+  }
+  return barangayId;
+}
+
+
 function normalizeMountainNames(value) {
   if (Array.isArray(value)) {
     return value
@@ -45,6 +56,7 @@ function normalizeMountainNames(value) {
 
 module.exports = {
   assertMountainHead,
+  assertBarangayOfficial,
   assertTourismAdmin,
   isTourismAdmin,
   normalizeMountainNames,
