@@ -432,7 +432,18 @@ class HikeRoomService {
       'joinedAt': FieldValue.serverTimestamp(),
     });
     batch.update(_userRef(user.uid), {'activeHikeRoomId': roomRef.id});
-    await batch.commit();
+    try {
+      await batch.commit();
+    } on FirebaseException catch (error) {
+      if (error.code != 'permission-denied') rethrow;
+      // Keep the failure actionable. Room creation depends on the published
+      // Firestore rules permitting the room, guide participant, and profile
+      // pointer writes as one batch.
+      throw StateError(
+        'Firestore denied room creation. Check that the selected barangay '
+        'is active and that the latest firestore.rules have been deployed.',
+      );
+    }
     final snapshot = await roomRef.get();
     return HikeRoom.fromSnapshot(snapshot);
   }
