@@ -6385,7 +6385,10 @@ class _UserManagementPageState extends State<_UserManagementPage> {
               .orderBy('email')
         : widget.access.isBarangayOfficial
         ? usersCollection.where('barangayId', isEqualTo: widget.access.managedBarangayId).orderBy('email')
-        : usersCollection.orderBy('email');
+        // No orderBy here: Firestore's orderBy silently drops every doc that
+        // lacks the field, so profiles saved without `email` never showed
+        // up. Sorted client-side below instead.
+        : usersCollection;
 
     return SingleChildScrollView(
       padding: _adminPagePadding(context),
@@ -6518,7 +6521,18 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                     _accountTypeFilter == 'all' ||
                     accountType == _accountTypeFilter;
                 return matchesSearch && matchesType;
-              }).toList();
+              }).toList()
+                ..sort((a, b) {
+                  // Users without an email sort last instead of vanishing.
+                  final emailA =
+                      a.data()['email']?.toString().toLowerCase() ?? '';
+                  final emailB =
+                      b.data()['email']?.toString().toLowerCase() ?? '';
+                  if (emailA.isEmpty != emailB.isEmpty) {
+                    return emailA.isEmpty ? 1 : -1;
+                  }
+                  return emailA.compareTo(emailB);
+                });
 
               if (users.isEmpty) {
                 final hasSearch = _searchController.text.trim().isNotEmpty;

@@ -55,7 +55,9 @@
 // (firmware/agakbay_heltec_lora_test) — keep this in sync with whatever
 // frequency that test actually used on both boards.
 #define RF_FREQUENCY 915000000 // Hz
-#define TX_OUTPUT_POWER 14 // dBm
+// SX1262 maximum. Only run this with the 915 MHz LoRa antenna attached —
+// transmitting into no antenna can damage the radio.
+#define TX_OUTPUT_POWER 22 // dBm
 #define LORA_BANDWIDTH 0 // 0: 125 kHz
 #define LORA_SPREADING_FACTOR 12
 #define LORA_CODINGRATE 1 // 1: 4/5
@@ -66,6 +68,15 @@
 #define RX_TIMEOUT_VALUE 0
 #define TX_TIMEOUT_VALUE 10000 // ms; allow long SF12 SOS packets to finish
 #define LORA_BUFFER_SIZE 96
+
+// One lost packet must not mean a lost SOS: every SOS goes out this many
+// times, with a random gap between sends (so two hikers' repeats don't keep
+// colliding). Receivers drop identical packets seen within
+// DUPLICATE_WINDOW_MS, so the guide still gets one alert, not three.
+#define SOS_SEND_COUNT 3
+#define SOS_RETRY_GAP_MIN_MS 2000
+#define SOS_RETRY_GAP_MAX_MS 4000
+#define DUPLICATE_WINDOW_MS 60000
 
 static SSD1306Wire display(0x3c, 500000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
@@ -120,6 +131,15 @@ bool pendingSosHasFix = false;
 // reason picker — empty for a write from an older app build.
 String pendingSosReason = "";
 
+// The SOS currently being repeated (see SOS_SEND_COUNT).
+char sosRepeatBuffer[LORA_BUFFER_SIZE];
+int sosSendsRemaining = 0;
+unsigned long nextSosSendMs = 0;
+
+// Last packet handled, for dropping the repeats of the same SOS.
+String lastHandledPacket = "";
+unsigned long lastHandledPacketMs = 0;
+
 String lastRelayHikerName = "";
 String lastRelayReason = "";
 bool lastRelayHasFix = false;
@@ -158,24 +178,59 @@ void VextOn() {
   digitalWrite(Vext, LOW);
 }
 
-void buzzSOS() {
-  // Continuous buzzer for 10 seconds
+// --- Non-blocking buzzer ---
+// The buzzer used to run on delay(), and the 10 s SOS buzz blocked the
+// whole loop with the radio asleep — the guide's board was deaf to any
+// other LoRa packet (e.g. a second hiker's SOS) the entire time. Now a
+// pattern is started here and stepped from loop() by updateBuzzer().
+enum BuzzPriority { BUZZ_NONE = 0, BUZZ_INFO = 1, BUZZ_SOS = 2 };
+int buzzerPulsesLeft = 0;
+unsigned long buzzerOnMs = 0;
+unsigned long buzzerOffMs = 0;
+bool buzzerIsOn = false;
+unsigned long buzzerNextToggleMs = 0;
+BuzzPriority buzzerPriority = BUZZ_NONE;
+
+void startBuzz(int pulses, unsigned long onMs, unsigned long offMs,
+               BuzzPriority priority) {
+  // A gentle beep must never cut short a still-sounding SOS alarm.
+  if (buzzerPulsesLeft > 0 && priority < buzzerPriority) return;
+  buzzerPulsesLeft = pulses;
+  buzzerOnMs = onMs;
+  buzzerOffMs = offMs;
+  buzzerPriority = priority;
+  buzzerIsOn = true;
   digitalWrite(BUZZER_PIN, HIGH);
-  delay(10000);
-  digitalWrite(BUZZER_PIN, LOW);
+  buzzerNextToggleMs = millis() + onMs;
 }
+
+void updateBuzzer() {
+  if (buzzerPulsesLeft <= 0 || (long)(millis() - buzzerNextToggleMs) < 0) {
+    return;
+  }
+  if (buzzerIsOn) {
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerIsOn = false;
+    buzzerPulsesLeft--;
+    if (buzzerPulsesLeft <= 0) {
+      buzzerPriority = BUZZ_NONE;
+      return;
+    }
+    buzzerNextToggleMs = millis() + buzzerOffMs;
+  } else {
+    digitalWrite(BUZZER_PIN, HIGH);
+    buzzerIsOn = true;
+    buzzerNextToggleMs = millis() + buzzerOnMs;
+  }
+}
+
+// Continuous buzzer for 10 seconds.
+void buzzSOS() { startBuzz(1, 10000, 0, BUZZ_SOS); }
 
 // Two short beeps — deliberately much gentler than buzzSOS(), since this
 // fires for "a hiker stopped, not an emergency," not a real SOS. The guide
 // should notice it, not be startled by it.
-void buzzStop() {
-  for (int i = 0; i < 2; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(200);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(150);
-  }
-}
+void buzzStop() { startBuzz(2, 200, 150, BUZZ_INFO); }
 
 // Heltec WiFi LoRa 32 V3 battery sense uses GPIO1 through a 390k/100k
 // divider, enabled by driving GPIO37 high. This percentage is an estimate
@@ -227,12 +282,7 @@ void queueButtonSos() {
   Serial.printf("SOS triggered by BOOT button: fix=%s at %.6f,%.6f\n",
                 pendingSosHasFix ? "yes" : "NO", pendingSosLat, pendingSosLng);
   // Brief feedback that works even when no phone is connected.
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(100);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(100);
-  }
+  startBuzz(3, 100, 100, BUZZ_INFO);
 }
 
 // Redraws the whole screen from current state. Called on every state change
@@ -474,15 +524,29 @@ class StopAckCallbacks : public BLECharacteristicCallbacks {
 // between listening (RADIO_RX, the normal resting state) and a brief
 // transmit window only when an SOS is actually pending.
 
+// The next SOS repeat waits a random gap counted from when this send
+// finished, so two boards repeating at once drift apart instead of
+// colliding on every attempt.
+void scheduleNextSosRepeat() {
+  if (sosSendsRemaining > 0) {
+    nextSosSendMs =
+        millis() + random(SOS_RETRY_GAP_MIN_MS, SOS_RETRY_GAP_MAX_MS + 1);
+  }
+}
+
 void onLoraTxDone() {
-  Serial.println("LoRa: SOS sent.");
+  Serial.println("LoRa: packet sent.");
+  scheduleNextSosRepeat();
   radioState = RADIO_RX;
   Radio.Rx(RX_TIMEOUT_VALUE);
 }
 
 void onLoraTxTimeout() {
-  Serial.println("LoRa: SOS send timed out, will retry on next loop.");
+  // Counts as one of the SOS_SEND_COUNT attempts; the remaining repeats
+  // still go out.
+  Serial.println("LoRa: send timed out.");
   Radio.Sleep();
+  scheduleNextSosRepeat();
   radioState = RADIO_RX;
   Radio.Rx(RX_TIMEOUT_VALUE);
 }
@@ -572,12 +636,20 @@ void handleReceivedLoraAckPacket(const String &packet, int16_t rssi) {
   updateDisplay();
 
   // One short, gentle beep — this is reassurance, not an alert.
-  digitalWrite(BUZZER_PIN, HIGH);
-  delay(150);
-  digitalWrite(BUZZER_PIN, LOW);
+  startBuzz(1, 150, 0, BUZZ_INFO);
 }
 
 void handleReceivedLoraPacket(const String &packet, int16_t rssi) {
+  // Each SOS arrives up to SOS_SEND_COUNT times; act on the first copy
+  // only, so the guide gets one alert/notification rather than three.
+  if (packet == lastHandledPacket &&
+      millis() - lastHandledPacketMs < DUPLICATE_WINDOW_MS) {
+    Serial.printf("LoRa: duplicate ignored (RSSI %d)\n", rssi);
+    return;
+  }
+  lastHandledPacket = packet;
+  lastHandledPacketMs = millis();
+
   if (packet.startsWith("SOS|")) {
     handleReceivedLoraSosPacket(packet, rssi);
   } else if (packet.startsWith("STOP|")) {
@@ -814,18 +886,32 @@ void loop() {
     // reason goes last so snprintf's truncation (if name + reason are ever
     // too long for loraTxBuffer) can only clip the reason, never the
     // coordinates.
-    snprintf(loraTxBuffer, LORA_BUFFER_SIZE, "SOS|%s|%d|%.6f|%.6f|%s",
+    // Built once into sosRepeatBuffer and sent SOS_SEND_COUNT times by the
+    // branch below — byte-identical copies, which is what lets receivers
+    // recognise and drop the repeats. A newer SOS replaces one still
+    // repeating.
+    snprintf(sosRepeatBuffer, LORA_BUFFER_SIZE, "SOS|%s|%d|%.6f|%.6f|%s",
              pendingSosName.c_str(), pendingSosHasFix ? 1 : 0, pendingSosLat,
              pendingSosLng, pendingSosReason.c_str());
-    Serial.print("LoRa: sending SOS -> ");
-    Serial.println(loraTxBuffer);
     if (!pendingSosHasFix) {
       Serial.println("LoRa: WARNING - no location from phone, sending without one.");
     }
+    sosSendsRemaining = SOS_SEND_COUNT;
+    nextSosSendMs = millis();
+  }
+
+  if (sosSendsRemaining > 0 && radioState == RADIO_RX &&
+      (long)(millis() - nextSosSendMs) >= 0) {
+    strncpy(loraTxBuffer, sosRepeatBuffer, LORA_BUFFER_SIZE);
+    Serial.printf("LoRa: sending SOS (%d/%d) -> %s\n",
+                  SOS_SEND_COUNT - sosSendsRemaining + 1, SOS_SEND_COUNT,
+                  loraTxBuffer);
+    sosSendsRemaining--;
     Radio.Sleep();
     Radio.Send((uint8_t *)loraTxBuffer, strlen(loraTxBuffer));
     radioState = RADIO_TX;
-  } else if (stopPending && radioState == RADIO_RX) {
+  } else if (sosSendsRemaining == 0 && stopPending &&
+             radioState == RADIO_RX) {
     // SOS always wins the radio if both happen to be pending at once —
     // checked above as an "else if" so a real emergency is never delayed
     // behind a routine "can't continue" message.
@@ -840,7 +926,8 @@ void loop() {
     Radio.Sleep();
     Radio.Send((uint8_t *)loraTxBuffer, strlen(loraTxBuffer));
     radioState = RADIO_TX;
-  } else if (stopAckPending && radioState == RADIO_RX) {
+  } else if (sosSendsRemaining == 0 && stopAckPending &&
+             radioState == RADIO_RX) {
     // Lowest priority of the three — SOS and STOP both go first.
     stopAckPending = false;
     snprintf(loraTxBuffer, LORA_BUFFER_SIZE, "ACK|%s",
@@ -852,5 +939,6 @@ void loop() {
     radioState = RADIO_TX;
   }
 
+  updateBuzzer();
   Radio.IrqProcess();
 }
