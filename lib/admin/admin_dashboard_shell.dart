@@ -58,6 +58,11 @@ EdgeInsets _adminPagePadding(BuildContext context) {
   );
 }
 
+double _adminDialogContentWidth(BuildContext context, double maxWidth) =>
+    (MediaQuery.sizeOf(context).width - 128)
+        .clamp(0.0, maxWidth)
+        .toDouble();
+
 class _AdminAccess {
   const _AdminAccess({required this.isMountainHead, this.isBarangayOfficial = false,
     this.managedMountainName, this.managedBarangayId, this.managedBarangayName});
@@ -153,6 +158,52 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
     setState(() => _selected = index);
   }
 
+  void _showMobileNavigation(BuildContext context, _AdminAccess access) {
+    final visibleIndices = access.isBarangayOfficial
+        ? [0, 3, 4, 6, 8]
+        : access.isMountainHead
+        ? [0, 1, 2, 3, 4, 6, 8]
+        : List.generate(_navItems.length, (index) => index);
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) => ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.8,
+        ),
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(12, 4, 12, 12),
+              child: Text(
+                'AGAKBAY Dashboard',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+              ),
+            ),
+            for (final index in visibleIndices)
+              ListTile(
+                leading: Icon(_navItems[index].icon),
+                title: Text(_navItems[index].label),
+                selected: _selected == index,
+                selectedColor: AdminColors.accent,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  _navigateToPage(index, access);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<_AdminAccess>(
@@ -188,15 +239,17 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
   }
 
   Widget _buildDashboard(_AdminAccess access) {
+    final useMobileNavigation = MediaQuery.sizeOf(context).width < 760;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Sidebar(
-          selected: _selected,
-          isMountainHead: access.isMountainHead,
-          isBarangayOfficial: access.isBarangayOfficial,
-          onSelect: (i) => _navigateToPage(i, access),
-        ),
+        if (!useMobileNavigation)
+          _Sidebar(
+            selected: _selected,
+            isMountainHead: access.isMountainHead,
+            isBarangayOfficial: access.isBarangayOfficial,
+            onSelect: (i) => _navigateToPage(i, access),
+          ),
         Expanded(
           child: ColoredBox(
             color: AdminColors.page,
@@ -204,7 +257,9 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
               children: [
                 Container(
                   height: 72,
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  padding: EdgeInsets.symmetric(
+                    horizontal: useMobileNavigation ? 12 : 24,
+                  ),
                   decoration: const BoxDecoration(
                     color: Colors.white,
                     border: Border(
@@ -214,9 +269,15 @@ class _AdminDashboardShellState extends State<AdminDashboardShell> {
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       final headerWidth = constraints.maxWidth;
-                      final showTitle = headerWidth >= 700;
+                      final showTitle = headerWidth >= 520;
                       return Row(
                         children: [
+                          if (useMobileNavigation)
+                            IconButton(
+                              tooltip: 'Open navigation menu',
+                              onPressed: () => _showMobileNavigation(context, access),
+                              icon: const Icon(Icons.menu_rounded),
+                            ),
                           if (showTitle)
                             SizedBox(
                               width: 190,
@@ -1534,11 +1595,7 @@ class _DashboardWelcomeBanner extends StatelessWidget {
     final width = MediaQuery.sizeOf(context).width;
     return Container(
       width: double.infinity,
-      height: width < 520
-          ? 184
-          : width < 700
-          ? 174
-          : 170,
+      height: width < 900 ? 208 : 170,
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(borderRadius: BorderRadius.circular(18)),
       child: Stack(
@@ -1560,15 +1617,20 @@ class _DashboardWelcomeBanner extends StatelessWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 22),
+            padding: EdgeInsets.symmetric(
+              horizontal: width < 600 ? 18 : 26,
+              vertical: 18,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
                   '$greeting, $adminName 👋',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontSize: width < 700 ? 23 : 30,
+                    fontSize: width < 1000 ? 23 : 30,
                     fontWeight: FontWeight.w800,
                     color: const Color(0xFF092F27),
                   ),
@@ -1576,6 +1638,8 @@ class _DashboardWelcomeBanner extends StatelessWidget {
                 const SizedBox(height: 6),
                 const Text(
                   "Here's what's happening across the AGAKBAY platform today.",
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 15, color: Color(0xFF496A70)),
                 ),
                 const SizedBox(height: 12),
@@ -1711,7 +1775,6 @@ class _OverviewQuickPanels extends StatelessWidget {
     }
     final roomsStream = rooms.snapshots();
     final sosStream = sos.snapshots();
-    final width = MediaQuery.sizeOf(context).width;
     final roomCard = GestureDetector(
       onTap: () => onNavigate(3),
       child: _SectionCard(
@@ -1947,16 +2010,20 @@ class _OverviewQuickPanels extends StatelessWidget {
         ),
       ),
     );
-    if (width < 900) {
-      return Column(children: [roomCard, const SizedBox(height: 16), sosCard]);
-    }
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(flex: 6, child: roomCard),
-        const SizedBox(width: 16),
-        Expanded(flex: 4, child: sosCard),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 900) {
+          return Column(children: [roomCard, const SizedBox(height: 16), sosCard]);
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(flex: 6, child: roomCard),
+            const SizedBox(width: 16),
+            Expanded(flex: 4, child: sosCard),
+          ],
+        );
+      },
     );
   }
 }
@@ -2251,7 +2318,7 @@ void _showGuideReviewDialog(
     builder: (dialogContext) => AlertDialog(
       title: const Text('Review Tour Guide Application'),
       content: SizedBox(
-        width: 680,
+        width: _adminDialogContentWidth(dialogContext, 680),
         child: SingleChildScrollView(
           child: _GuideApplicationCard(
             applicationId: applicationId,
@@ -2518,7 +2585,7 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('ID & Certificate'),
         content: SizedBox(
-          width: 480,
+          width: _adminDialogContentWidth(dialogContext, 480),
           child: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -3359,32 +3426,26 @@ class _StatGrid extends StatelessWidget {
         4,
       ),
     ];
-    final width = MediaQuery.sizeOf(context).width;
-    return GridView.count(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisCount: width > 1250
-          ? 4
-          : width > 720
-          ? 2
-          : 1,
-      mainAxisSpacing: 14,
-      crossAxisSpacing: 14,
-      // Keep enough vertical room for the label and value at narrow widths,
-      // where the dashboard content is reduced by the navigation sidebar.
-      childAspectRatio: width > 1250
-          ? 2.05
-          : width > 720
-          ? 2.2
-          : 2.6,
-      children: cards
-          .map(
-            (card) => _StatCard(
-              data: card,
-              onTap: () => onNavigate(card.destination),
-            ),
-          )
-          .toList(),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        return GridView.count(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisCount: width >= 1000 ? 4 : width >= 600 ? 2 : 1,
+          mainAxisSpacing: 14,
+          crossAxisSpacing: 14,
+          childAspectRatio: width >= 1000 ? 2.05 : width >= 600 ? 2.2 : 2.6,
+          children: cards
+              .map(
+                (card) => _StatCard(
+                  data: card,
+                  onTap: () => onNavigate(card.destination),
+                ),
+              )
+              .toList(),
+        );
+      },
     );
   }
 }
@@ -4175,8 +4236,8 @@ Future<void> _showHikeHistoryDialog(
     builder: (dialogContext) => AlertDialog(
       title: const Text('Hike History'),
       content: SizedBox(
-        width: size.width < 700 ? size.width * 0.9 : 720,
-        height: size.height * 0.68,
+        width: _adminDialogContentWidth(dialogContext, 720),
+        height: (size.height * 0.62).clamp(220.0, 620.0).toDouble(),
         child: SingleChildScrollView(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -4841,7 +4902,7 @@ class _SosMonitoringPageState extends State<_SosMonitoringPage> {
             return AlertDialog(
               title: const Text('Filter SOS alerts'),
               content: SizedBox(
-                width: 340,
+                width: _adminDialogContentWidth(dialogContext, 340),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -5793,7 +5854,57 @@ class _BluetoothDevicesPage extends StatelessWidget {
                 'Devices will appear after they connect to the app for the first time.',
               );
             }
-            return Card(
+            return LayoutBuilder(
+              builder: (context, constraints) {
+                if (constraints.maxWidth < 760) {
+                  return Column(
+                    children: devices.map((device) {
+                      final data = device.data();
+                      final deviceId = data['deviceId']?.toString() ?? '';
+                      final advertisedName = data['deviceName']?.toString().trim() ?? '';
+                      final adminLabel = data['displayName']?.toString().trim() ?? '';
+                      final name = advertisedName.isNotEmpty
+                          ? advertisedName
+                          : adminLabel.isNotEmpty
+                          ? adminLabel
+                          : 'Heltec device';
+                      final lastActivity = data['lastActivityAt'];
+                      final activityDate = lastActivity is Timestamp
+                          ? lastActivity.toDate()
+                          : null;
+                      final recent = activityDate != null &&
+                          DateTime.now().difference(activityDate).inMinutes < 5;
+                      final connected = data['lastStatus'] == 'connected' && recent;
+                      final connection = connected
+                          ? 'Connected'
+                          : data['lastStatus'] == 'connected'
+                          ? 'Last connected (stale)'
+                          : data['lastStatus'] == 'disconnected'
+                          ? 'Disconnected'
+                          : 'Unknown';
+                      return _BluetoothDeviceCard(
+                        name: name,
+                        deviceId: deviceId,
+                        data: data,
+                        lastActivity: lastActivity,
+                        connection: connection,
+                        connected: connected,
+                        onHistory: () => _showBluetoothConnectivityHistory(
+                          context,
+                          deviceId: deviceId,
+                          deviceName: name,
+                        ),
+                        onRename: () => _renameBluetoothDevice(
+                          context,
+                          deviceId: deviceId,
+                          deviceData: data,
+                        ),
+                      );
+                    }).toList(growable: false),
+                  );
+                }
+
+                return Card(
               clipBehavior: Clip.antiAlias,
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
@@ -5918,12 +6029,106 @@ class _BluetoothDevicesPage extends StatelessWidget {
                   }).toList(),
                 ),
               ),
+                );
+              },
             );
           },
         ),
       ],
     );
   }
+}
+
+class _BluetoothDeviceCard extends StatelessWidget {
+  const _BluetoothDeviceCard({
+    required this.name,
+    required this.deviceId,
+    required this.data,
+    required this.lastActivity,
+    required this.connection,
+    required this.connected,
+    required this.onHistory,
+    required this.onRename,
+  });
+
+  final String name;
+  final String deviceId;
+  final Map<String, dynamic> data;
+  final dynamic lastActivity;
+  final String connection;
+  final bool connected;
+  final VoidCallback onHistory;
+  final VoidCallback onRename;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    margin: const EdgeInsets.only(bottom: 12),
+    padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      border: Border.all(color: AdminColors.border),
+      borderRadius: BorderRadius.circular(14),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              connected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+              size: 18,
+              color: connected ? Colors.green : Colors.grey,
+            ),
+            const SizedBox(width: 5),
+            Flexible(child: Text(connection, textAlign: TextAlign.end)),
+          ],
+        ),
+        const SizedBox(height: 10),
+        const Text('Hardware ID', style: TextStyle(fontSize: 12, color: Colors.black54)),
+        SelectableText(deviceId.isEmpty ? 'Unavailable' : deviceId),
+        const SizedBox(height: 10),
+        const Text('Assignment', style: TextStyle(fontSize: 12, color: Colors.black54)),
+        _BluetoothDeviceAssignmentCell(
+          roomId: data['lastRoomId']?.toString(),
+          participantId: data['lastParticipantId']?.toString(),
+          roomCode: data['lastRoomCode']?.toString(),
+          deviceId: deviceId,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Last seen: ${_formatBluetoothTimestamp(lastActivity)}',
+          style: const TextStyle(fontSize: 12, color: Colors.black54),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: [
+            TextButton.icon(
+              onPressed: onHistory,
+              icon: const Icon(Icons.history, size: 18),
+              label: const Text('History'),
+            ),
+            TextButton.icon(
+              onPressed: onRename,
+              icon: const Icon(Icons.edit_outlined, size: 18),
+              label: const Text('Set label'),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
 }
 
 class _BluetoothDeviceAssignmentCell extends StatelessWidget {
@@ -6025,8 +6230,10 @@ void _showBluetoothConnectivityHistory(
     builder: (context) => AlertDialog(
       title: Text('$deviceName Connectivity History'),
       content: SizedBox(
-        width: 560,
-        height: 480,
+        width: _adminDialogContentWidth(context, 560),
+        height: (MediaQuery.sizeOf(context).height * 0.62)
+            .clamp(240.0, 480.0)
+            .toDouble(),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -6364,6 +6571,129 @@ class _UserManagementPageState extends State<_UserManagementPage> {
     }
   }
 
+  Widget _buildCompactUserCard(
+    BuildContext context,
+    QueryDocumentSnapshot<Map<String, dynamic>> user,
+  ) {
+    final data = user.data();
+    final accountType = _effectiveAccountType(data);
+    final displayName = _userDisplayName(data);
+    final email = data['email']?.toString() ?? 'No email';
+    final emailVerified = data['emailVerified'] == true;
+    final guideVerified = data['guideVerified'] == true;
+    final isMountainHead = data['adminRole'] == 'mountain_head';
+
+    Widget badge(String label, Color color) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: AdminColors.border),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      displayName,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      email,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12, color: Colors.black54),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'View user details',
+                onPressed: () => _showUserDetails(context, data, user.id),
+                icon: const Icon(Icons.visibility_outlined),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 7,
+            runSpacing: 7,
+            children: [
+              badge(switch (accountType) {
+                'tour_guide' => 'Tour Guide',
+                'tourism_admin' => 'Tourism Admin',
+                'mountain_head' => 'Mountain Head',
+                'barangay_official' => 'Barangay Official',
+                _ => 'Hiker',
+              }, const Color(0xFF355D4D)),
+              badge(
+                emailVerified ? 'Email verified' : 'Email not verified',
+                emailVerified ? Colors.green.shade700 : Colors.orange.shade800,
+              ),
+              if (accountType == 'tour_guide')
+                badge(
+                  guideVerified ? 'Guide verified' : 'Guide pending',
+                  guideVerified ? Colors.green.shade700 : Colors.orange.shade800,
+                ),
+            ],
+          ),
+          if (widget.access.isBarangayOfficial && isMountainHead) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                const Icon(Icons.terrain_rounded, size: 16, color: Color(0xFF0B7654)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    data['managedMountainName']?.toString() ?? 'Mountain not assigned',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF0B7654),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 8),
+          Text(
+            'Joined ${data['createdAt'] != null ? _formatUserDate(data['createdAt']) : 'Unknown'}',
+            style: const TextStyle(fontSize: 12, color: Colors.black45),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -6445,7 +6775,9 @@ class _UserManagementPageState extends State<_UserManagementPage> {
 
           if (widget.access.isTourismAdmin)
             SizedBox(
-              width: 240,
+              width: MediaQuery.sizeOf(context).width < 760
+                  ? double.infinity
+                  : 240,
               child: DropdownButtonFormField<String>(
                 initialValue: _accountTypeFilter,
                 decoration: const InputDecoration(
@@ -6544,7 +6876,17 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                 );
               }
 
-              return Container(
+              return LayoutBuilder(
+                builder: (context, constraints) {
+                  if (constraints.maxWidth < 760) {
+                    return Column(
+                      children: users
+                          .map((user) => _buildCompactUserCard(context, user))
+                          .toList(growable: false),
+                    );
+                  }
+
+                  return Container(
                 width: double.infinity,
                 decoration: BoxDecoration(
                   color: Colors.white,
@@ -6596,13 +6938,30 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                             ),
                           ),
                           DataCell(
-                            Text(switch (accountType) {
-                              'tour_guide' => 'Tour Guide',
-                              'tourism_admin' => 'Tourism Admin',
-                              'mountain_head' => 'Mountain Head',
-                              'barangay_official' => 'Barangay Official',
-                              _ => 'Hiker',
-                            }),
+                            Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(switch (accountType) {
+                                  'tour_guide' => 'Tour Guide',
+                                  'tourism_admin' => 'Tourism Admin',
+                                  'mountain_head' => 'Mountain Head',
+                                  'barangay_official' => 'Barangay Official',
+                                  _ => 'Hiker',
+                                }),
+                                if (widget.access.isBarangayOfficial && data['adminRole'] == 'mountain_head')
+                                  Text(
+                                    data['managedMountainName']?.toString() ?? 'Mountain not assigned',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF0B7654),
+                                    ),
+                                  ),
+                              ],
+                            ),
                           ),
                           DataCell(
                             Text(
@@ -6655,6 +7014,8 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                     }).toList(),
                   ),
                 ),
+                  );
+                },
               );
             },
           ),
@@ -6772,8 +7133,6 @@ class _UserManagementPageState extends State<_UserManagementPage> {
 
         final accountType = data['accountType']?.toString() ?? 'Not provided';
 
-        final role = data['role']?.toString() ?? 'Not provided';
-
         final emailVerified = data['emailVerified'] == true;
 
         final accountConfirmed = data['accountTypeConfirmed'] == true;
@@ -6794,23 +7153,63 @@ class _UserManagementPageState extends State<_UserManagementPage> {
             data['accountType'] == 'admin';
         final isSuspended = data['accountSuspended'] == true;
 
+        final theme = Theme.of(dialogContext);
         return AlertDialog(
-          title: const Text('User Details'),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          titlePadding: const EdgeInsets.fromLTRB(24, 22, 16, 12),
+          contentPadding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+          actionsPadding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
+          title: Row(
+            children: [
+              CircleAvatar(
+                radius: 23,
+                backgroundColor: const Color(0xFFE4F3ED),
+                child: Text(
+                  fullName.isEmpty ? '?' : fullName.substring(0, 1).toUpperCase(),
+                  style: const TextStyle(color: Color(0xFF0B563F), fontWeight: FontWeight.w700),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('User details', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 2),
+                    Text(fullName, maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(color: Colors.black54)),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Close',
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ],
+          ),
           content: SizedBox(
-            width: 500,
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _UserDetailRow(label: 'Full Name', value: fullName),
+            width: (MediaQuery.sizeOf(dialogContext).width - 96)
+                .clamp(0.0, 560.0)
+                .toDouble(),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: (MediaQuery.sizeOf(dialogContext).height - 220)
+                    .clamp(200.0, 580.0)
+                    .toDouble(),
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _userDetailSection('PROFILE', [
                   _UserDetailRow(label: 'Username', value: username),
                   _UserDetailRow(label: 'Email', value: email),
-                  _UserDetailRow(label: 'Account Type', value: accountType),
-                  _UserDetailRow(
-                    label: 'Admin Access',
-                    value: hasAdminAccess ? 'Granted' : 'Not granted',
-                  ),
-                  if (hasAdminAccess) ...[
+                  if (!hasAdminAccess)
+                    _UserDetailRow(label: 'Account Type', value: accountType),
+                    ]),
+                    if (hasAdminAccess) _userDetailSection('ADMIN ASSIGNMENT', [
                     _UserDetailRow(
                       label: 'Admin Role',
                       value: data['adminRole'] == 'mountain_head'
@@ -6828,15 +7227,21 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                             data['managedMountainName']?.toString() ??
                             'Not assigned',
                       ),
+                    if (data['adminRole'] == 'mountain_head')
+                      _UserDetailRow(
+                        label: 'Managed Barangay',
+                        value: data['managedBarangayName']?.toString() ?? 'Not assigned',
+                      ),
                     if (data['adminRole'] == 'barangay_official')
                       _UserDetailRow(label: 'Managed Barangay', value: data['managedBarangayName']?.toString() ?? 'Not assigned'),
-                  ],
+                    ]),
+                    _userDetailSection('ACCOUNT STATUS', [
                   _UserDetailRow(
                     label: 'Account Status',
                     value: isSuspended ? 'Suspended' : 'Active',
                   ),
-                  _UserDetailRow(label: 'Role', value: role),
-                  _UserDetailRow(label: 'Barangay', value: data['barangayName']?.toString() ?? 'Not assigned'),
+                  if (!hasAdminAccess)
+                    _UserDetailRow(label: 'Barangay', value: data['barangayName']?.toString() ?? 'Not assigned'),
                   _UserDetailRow(
                     label: 'Email Verified',
                     value: emailVerified ? 'Verified' : 'Not Verified',
@@ -6872,25 +7277,27 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                         ? activeHikeRoomId
                         : 'None',
                   ),
-                ],
+                    ]),
+                  ],
+                ),
               ),
             ),
           ),
           actions: [
             if (widget.access.isTourismAdmin && hasAdminAccess)
-              TextButton.icon(
+              OutlinedButton.icon(
                 onPressed: () =>
                     _manageUserAccount(dialogContext, userId, 'revoke_admin'),
                 icon: const Icon(Icons.admin_panel_settings_outlined),
                 label: const Text('Revoke Admin'),
               ),
             if (widget.access.isTourismAdmin) ...[
-              TextButton.icon(
+              OutlinedButton.icon(
                 onPressed: () => _assignUserBarangay(dialogContext, userId),
                 icon: const Icon(Icons.location_city_outlined),
                 label: const Text('Assign Barangay'),
               ),
-              TextButton.icon(
+              OutlinedButton.icon(
                 onPressed: () => _manageUserAccount(
                   dialogContext,
                   userId,
@@ -6903,7 +7310,7 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                   isSuspended ? 'Restore Account' : 'Suspend Account',
                 ),
               ),
-              TextButton.icon(
+              OutlinedButton.icon(
                 onPressed: () =>
                     _manageUserAccount(dialogContext, userId, 'delete'),
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
@@ -6913,7 +7320,7 @@ class _UserManagementPageState extends State<_UserManagementPage> {
                 ),
               ),
             ],
-            TextButton(
+            FilledButton.tonal(
               onPressed: () {
                 Navigator.of(dialogContext).pop();
               },
@@ -6952,25 +7359,56 @@ class _BarangayDirectorySection extends StatelessWidget {
     child: Padding(
       padding: const EdgeInsets.all(20),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: AdminColors.accent.withValues(alpha: 0.09),
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: const Icon(Icons.location_city_rounded, color: Color(0xFF12805A)),
-          ),
-          const SizedBox(width: 12),
-          const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Barangay Directory', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17)),
-            SizedBox(height: 3),
-            Text('Maintain barangay names and their optional district, city, or province.', style: TextStyle(color: Colors.black54)),
-          ])),
-          FilledButton.icon(onPressed: () => showDialog<void>(context: context, builder: (_) => const _BarangayEntryDialog()),
-            icon: const Icon(Icons.add_rounded), label: const Text('Add barangay')),
-        ]),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final title = Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: AdminColors.accent.withValues(alpha: 0.09),
+                    borderRadius: BorderRadius.circular(13),
+                  ),
+                  child: const Icon(Icons.location_city_rounded, color: Color(0xFF12805A)),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Barangay Directory', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 17)),
+                      SizedBox(height: 3),
+                      Text('Maintain barangay names and their optional district, city, or province.', style: TextStyle(color: Colors.black54)),
+                    ],
+                  ),
+                ),
+              ],
+            );
+            final addButton = FilledButton.icon(
+              onPressed: () => showDialog<void>(context: context, builder: (_) => const _BarangayEntryDialog()),
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('Add barangay'),
+            );
+            if (constraints.maxWidth < 560) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  title,
+                  const SizedBox(height: 12),
+                  Align(alignment: Alignment.centerRight, child: addButton),
+                ],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: title),
+                const SizedBox(width: 12),
+                addButton,
+              ],
+            );
+          },
+        ),
         const SizedBox(height: 16),
         const Divider(height: 1, color: Color(0xFFE9EEEA)),
         const SizedBox(height: 8),
@@ -7243,80 +7681,113 @@ class _BarangayEntryDialogState extends State<_BarangayEntryDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: const Text('Add Barangay'),
-    content: SizedBox(width: 440, child: Form(key: _formKey, child: Column(mainAxisSize: MainAxisSize.min, children: [
-      _SuggestionTextFormField(
-        controller: _province,
-        label: 'Province or region',
-        icon: Icons.map_outlined,
-        suggestions: _provinceOptions.map((option) => option.name).toList(),
-        validator: _required,
-        onChanged: _typeProvince,
-        onSelected: _selectProvince,
-      ),
-      const SizedBox(height: 12),
-      _SuggestionTextFormField(
-        controller: _municipality,
-        label: 'City or municipality',
-        icon: Icons.location_city_outlined,
-        suggestions: _cityOptions.map((option) => option.name).toList(),
-        validator: _required,
-        onChanged: (value) {
-          final matchingOption = _matchingCityOption(value);
-          if (matchingOption != null) {
-            if (_selectedCity?.code != matchingOption.code) {
-              unawaited(_selectCity(matchingOption.name));
-            }
-          } else if (_selectedCity != null) {
-            _selectedCity = null;
-            _barangayOptions = const [];
-            _allBarangayOptions = const [];
-            _name.clear();
-            _districtName.clear();
-            setState(() {});
-          }
-        },
-        onSelected: _selectCity,
-      ),
-      const SizedBox(height: 12),
-      _SuggestionTextFormField(
-        controller: _districtName,
-        label: 'District name (optional)',
-        icon: Icons.grid_view_rounded,
-        suggestions: _districtOptions,
-        onChanged: _applyDistrictFilter,
-        onSelected: _applyDistrictFilter,
-      ),
-      const SizedBox(height: 12),
-      _SuggestionTextFormField(
-        controller: _name,
-        label: 'Barangay name',
-        icon: Icons.place_outlined,
-        suggestions: _barangayOptions,
-        validator: _required,
-      ),
-      if (_loadingLocationOptions)
-        const Padding(
-          padding: EdgeInsets.only(top: 8),
-          child: LinearProgressIndicator(minHeight: 2),
+    content: SizedBox(
+      width: _adminDialogContentWidth(context, 440),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.55,
         ),
-      if (_locationOptionsError != null)
-        Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              _locationOptionsError!,
-              style: const TextStyle(color: Colors.black54, fontSize: 12),
+        child: SingleChildScrollView(
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _SuggestionTextFormField(
+                  controller: _province,
+                  label: 'Province or region',
+                  icon: Icons.map_outlined,
+                  suggestions: _provinceOptions.map((option) => option.name).toList(),
+                  validator: _required,
+                  onChanged: _typeProvince,
+                  onSelected: _selectProvince,
+                ),
+                const SizedBox(height: 12),
+                _SuggestionTextFormField(
+                  controller: _municipality,
+                  label: 'City or municipality',
+                  icon: Icons.location_city_outlined,
+                  suggestions: _cityOptions.map((option) => option.name).toList(),
+                  validator: _required,
+                  onChanged: (value) {
+                    final matchingOption = _matchingCityOption(value);
+                    if (matchingOption != null) {
+                      if (_selectedCity?.code != matchingOption.code) {
+                        unawaited(_selectCity(matchingOption.name));
+                      }
+                    } else if (_selectedCity != null) {
+                      _selectedCity = null;
+                      _barangayOptions = const [];
+                      _allBarangayOptions = const [];
+                      _name.clear();
+                      _districtName.clear();
+                      setState(() {});
+                    }
+                  },
+                  onSelected: _selectCity,
+                ),
+                const SizedBox(height: 12),
+                _SuggestionTextFormField(
+                  controller: _districtName,
+                  label: 'District name (optional)',
+                  icon: Icons.grid_view_rounded,
+                  suggestions: _districtOptions,
+                  onChanged: _applyDistrictFilter,
+                  onSelected: _applyDistrictFilter,
+                ),
+                const SizedBox(height: 12),
+                _SuggestionTextFormField(
+                  controller: _name,
+                  label: 'Barangay name',
+                  icon: Icons.place_outlined,
+                  suggestions: _barangayOptions,
+                  validator: _required,
+                ),
+                if (_loadingLocationOptions)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 8),
+                    child: LinearProgressIndicator(minHeight: 2),
+                  ),
+                if (_locationOptionsError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        _locationOptionsError!,
+                        style: const TextStyle(color: Colors.black54, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                if (_error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Text(_error!, style: const TextStyle(color: Colors.red)),
+                  ),
+              ],
             ),
           ),
         ),
-      if (_error != null) Padding(padding: const EdgeInsets.only(top: 10), child: Text(_error!, style: const TextStyle(color: Colors.red))),
-    ]))),
+      ),
+    ),
     actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-    actions: [TextButton(onPressed: _saving ? null : () => Navigator.of(context).pop(), child: const Text('Cancel')),
-      FilledButton.icon(onPressed: _saving ? null : _save,
-        icon: _saving ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.check_rounded),
-        label: Text(_saving ? 'Saving' : 'Save barangay'))],
+    actions: [
+      TextButton(
+        onPressed: _saving ? null : () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton.icon(
+        onPressed: _saving ? null : _save,
+        icon: _saving
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.check_rounded),
+        label: Text(_saving ? 'Saving' : 'Save barangay'),
+      ),
+    ],
   );
 
   String? _required(String? value) => value == null || value.trim().isEmpty ? 'Required.' : null;
@@ -7457,7 +7928,11 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
             'email': _emailController.text.trim(),
             'adminRole': _adminRole,
             if (_adminRole == 'mountain_head')
-              'managedMountainName': _managedMountainName,
+              ...{
+                'managedMountainName': _managedMountainName,
+                'managedBarangayId': _managedBarangayId,
+                'managedBarangayName': _managedBarangayName,
+              },
             if (_adminRole == 'barangay_official') ...{
               'managedBarangayId': _managedBarangayId,
               'managedBarangayName': _managedBarangayName,
@@ -7469,7 +7944,10 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
           (_adminRole == 'mountain_head' &&
               createdMountain != _managedMountainName) ||
           (_adminRole == 'barangay_official' &&
-              result.data['managedBarangayId'] != _managedBarangayId)) {
+              result.data['managedBarangayId'] != _managedBarangayId) ||
+          (_adminRole == 'mountain_head' &&
+              (result.data['managedBarangayId'] != _managedBarangayId ||
+               result.data['managedBarangayName'] != _managedBarangayName))) {
         throw StateError(
           'Firebase did not confirm the selected admin role and mountain. '
           'The account may have been created with different access. '
@@ -7499,8 +7977,13 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
     return AlertDialog(
       title: Text(created ? 'Admin Account Created' : 'Create Admin Account'),
       content: SizedBox(
-        width: 480,
-        child: created
+        width: _adminDialogContentWidth(context, 480),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.55,
+          ),
+          child: SingleChildScrollView(
+            child: created
             ? Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -7580,15 +8063,15 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                       items: const [
                         DropdownMenuItem(
                           value: 'tourism_admin',
-                          child: Text('Tourism Admin — full access'),
+                          child: Text('Tourism Admin', maxLines: 1, overflow: TextOverflow.ellipsis),
                         ),
                         DropdownMenuItem(
                           value: 'mountain_head',
-                          child: Text('Mountain Head — assigned mountain'),
+                          child: Text('Mountain Head', maxLines: 1, overflow: TextOverflow.ellipsis),
                         ),
                         DropdownMenuItem(
                           value: 'barangay_official',
-                          child: Text('Barangay Official — assigned barangay'),
+                          child: Text('Barangay Official', maxLines: 1, overflow: TextOverflow.ellipsis),
                         ),
                       ],
                       onChanged: _creating
@@ -7600,7 +8083,7 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                                   if (value != 'mountain_head') {
                                     _managedMountainName = null;
                                   }
-                                  if (value != 'barangay_official') {
+                                  if (value != 'barangay_official' && value != 'mountain_head') {
                                     _managedBarangayId = null;
                                     _managedBarangayName = null;
                                     _managedBarangayLabel = null;
@@ -7619,7 +8102,11 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                             .map(
                               (mountain) => DropdownMenuItem(
                                 value: mountain.name,
-                                child: Text(mountain.label),
+                                child: Text(
+                                  mountain.label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                               ),
                             )
                             .toList(),
@@ -7634,7 +8121,7 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                           return null;
                         },
                       ),
-                    if (_adminRole == 'barangay_official')
+                    if (_adminRole == 'barangay_official' || _adminRole == 'mountain_head')
                       StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                         stream: FirebaseFirestore.instance.collection('barangays')
                             .where('active', isEqualTo: true).snapshots(),
@@ -7642,10 +8129,14 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                           final docs = snapshot.data?.docs ?? const [];
                           return DropdownButtonFormField<String>(
                             initialValue: _managedBarangayId,
-                            decoration: const InputDecoration(labelText: 'Assigned barangay'),
+                            decoration: InputDecoration(labelText: _adminRole == 'mountain_head' ? 'Barangay this mountain head serves' : 'Assigned barangay'),
                             items: docs.map((doc) => DropdownMenuItem<String>(
                               value: doc.id,
-                              child: Text('${doc.data()['name']}${(doc.data()['districtName']?.toString() ?? '').isNotEmpty ? ' · District ${doc.data()['districtName']}' : ''}, ${doc.data()['municipality']}, ${doc.data()['province']}'),
+                              child: Text(
+                                '${doc.data()['name']}${(doc.data()['districtName']?.toString() ?? '').isNotEmpty ? ' · District ${doc.data()['districtName']}' : ''}, ${doc.data()['municipality']}, ${doc.data()['province']}',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             )).toList(),
                             onChanged: _creating ? null : (code) {
                               final selected = docs.where((doc) => doc.id == code).firstOrNull;
@@ -7656,7 +8147,7 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                                   '${selected.data()['name']}${(selected.data()['districtName']?.toString() ?? '').isNotEmpty ? ', District ${selected.data()['districtName']}' : ''}, ${selected.data()['municipality']}, ${selected.data()['province']}';
                               });
                             },
-                            validator: (value) => _adminRole == 'barangay_official' && value == null
+                            validator: (value) => (_adminRole == 'barangay_official' || _adminRole == 'mountain_head') && value == null
                                 ? 'Add and choose an active barangay first.' : null,
                           );
                         },
@@ -7668,6 +8159,8 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
                   ],
                 ),
               ),
+          ),
+        ),
       ),
       actions: [
         if (created)
@@ -7696,6 +8189,37 @@ class _CreateAdminAccountDialogState extends State<_CreateAdminAccountDialog> {
   }
 }
 
+Widget _userDetailSection(String title, List<Widget> children) {
+  return Container(
+    width: double.infinity,
+    margin: const EdgeInsets.only(top: 10),
+    padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+    decoration: BoxDecoration(
+      color: const Color(0xFFF7F9F8),
+      border: Border.all(color: const Color(0xFFE7ECE9)),
+      borderRadius: BorderRadius.circular(16),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 5),
+          child: Text(
+            title,
+            style: const TextStyle(
+              fontSize: 11,
+              letterSpacing: 0.8,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF63736B),
+            ),
+          ),
+        ),
+        ...children,
+      ],
+    ),
+  );
+}
+
 class _UserDetailRow extends StatelessWidget {
   const _UserDetailRow({required this.label, required this.value});
 
@@ -7705,21 +8229,30 @@ class _UserDetailRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 150,
+            width: MediaQuery.sizeOf(context).width < 420
+                ? 82
+                : MediaQuery.sizeOf(context).width < 600
+                ? 120
+                : 150,
             child: Text(
               label,
               style: const TextStyle(
-                fontWeight: FontWeight.w600,
-                color: Colors.black54,
+                fontWeight: FontWeight.w500,
+                color: Color(0xFF68736D),
               ),
             ),
           ),
-          Expanded(child: Text(value)),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontWeight: FontWeight.w500, height: 1.3),
+            ),
+          ),
         ],
       ),
     );
@@ -7869,7 +8402,7 @@ class _AuditLogsPageState extends State<_AuditLogsPage> {
       builder: (context) => AlertDialog(
         title: Text(_actionVerb(action)),
         content: SizedBox(
-          width: 480,
+          width: _adminDialogContentWidth(context, 480),
           child: SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

@@ -609,19 +609,23 @@ exports.createAdminAccount = onCall(
         "Choose a managed mountain from the Davao Region list.",
       );
     }
-    const managedBarangayId = adminRole === "barangay_official"
+    const assignsBarangay = adminRole === "barangay_official" ||
+      (adminRole === "mountain_head" && request.data?.managedBarangayId);
+    const managedBarangayId = assignsBarangay
       ? String(request.data?.managedBarangayId || "").trim() : "";
-    const managedBarangayName = adminRole === "barangay_official"
+    const requestedBarangayName = assignsBarangay
       ? String(request.data?.managedBarangayName || "").trim() : "";
-    if (adminRole === "barangay_official") {
+    let managedBarangayName = "";
+    if (assignsBarangay) {
       if (!managedBarangayId || managedBarangayId.length > 320 || !managedBarangayId.includes("|")) {
         throw new HttpsError("invalid-argument", "Choose a barangay from the directory.");
       }
       const barangay = await admin.firestore().collection("barangays").doc(managedBarangayId).get();
       if (!barangay.exists || barangay.data()?.active !== true ||
-          barangay.data()?.name !== managedBarangayName) {
+          barangay.data()?.name !== requestedBarangayName) {
         throw new HttpsError("failed-precondition", "The selected barangay is not in the active directory.");
       }
+      managedBarangayName = String(barangay.data().name);
     }
     const email = typeof request.data?.email === "string"
       ? request.data.email.trim().toLowerCase()
@@ -653,7 +657,7 @@ exports.createAdminAccount = onCall(
         accountType: "admin",
         adminRole,
         ...(adminRole === "mountain_head" ? { managedMountainName } : {}),
-        ...(adminRole === "barangay_official" ? { managedBarangayId, managedBarangayName } : {}),
+        ...(assignsBarangay ? { managedBarangayId, managedBarangayName } : {}),
         guideVerified: null,
       };
       await db.collection("users").doc(createdUser.uid).set({
@@ -666,8 +670,7 @@ exports.createAdminAccount = onCall(
         accountType: "admin",
         adminRole,
         ...(adminRole === "mountain_head" ? { managedMountainName } : {}),
-        ...(adminRole === "barangay_official" ? { managedBarangayId, managedBarangayName } : {}),
-        ...(adminRole === "barangay_official" ? { barangayId: managedBarangayId, barangayName: managedBarangayName } : {}),
+        ...(assignsBarangay ? { managedBarangayId, managedBarangayName, barangayId: managedBarangayId, barangayName: managedBarangayName } : {}),
         adminAccess: true,
         accountSuspended: false,
         guideVerified: null,
@@ -718,8 +721,8 @@ exports.createAdminAccount = onCall(
         managedMountainName: adminRole === "mountain_head"
           ? managedMountainName
           : null,
-        managedBarangayId: adminRole === "barangay_official" ? managedBarangayId : null,
-        managedBarangayName: adminRole === "barangay_official" ? managedBarangayName : null,
+        managedBarangayId: assignsBarangay ? managedBarangayId : null,
+        managedBarangayName: assignsBarangay ? managedBarangayName : null,
         emailSent: true,
       };
     } catch (error) {
@@ -804,7 +807,12 @@ exports.saveBarangayDirectoryEntry = onCall(
 );
 
 exports.assignUserBarangay = onCall(
-  { timeoutSeconds: 30, memory: "256MiB", region: ADMIN_FUNCTIONS_REGION },
+  {
+    timeoutSeconds: 30,
+    memory: "256MiB",
+    region: ADMIN_FUNCTIONS_REGION,
+    invoker: "public",
+  },
   async (request) => {
     assertTourismAdmin(request.auth);
     const uid = String(request.data?.uid || "").trim();
@@ -818,13 +826,16 @@ exports.assignUserBarangay = onCall(
     if (!user.exists) throw new HttpsError("not-found", "User profile not found.");
     if (!barangay.exists || barangay.data()?.active !== true) throw new HttpsError("failed-precondition", "The barangay is not active.");
     const profile = user.data() || {};
-    const officialValues = profile.adminRole === "barangay_official"
+    const officialValues = ["barangay_official", "mountain_head"].includes(profile.adminRole)
       ? { managedBarangayId: id, managedBarangayName: barangay.data().name }
       : {};
     const values = { barangayId: id, barangayName: barangay.data().name,
       ...officialValues,
       updatedAt: admin.firestore.FieldValue.serverTimestamp() };
     await db.collection("users").doc(uid).update(values);
+    // Barangay Officials use these custom claims to scope their session.
+    // Mountain Head visibility is scoped from the Firestore profile's
+    // barangayId, so changing their claims here is unnecessary.
     if (profile.adminRole === "barangay_official") {
       const authUser = await admin.auth().getUser(uid);
       await admin.auth().setCustomUserClaims(uid, {
@@ -833,12 +844,19 @@ exports.assignUserBarangay = onCall(
         managedBarangayName: barangay.data().name,
       });
     }
-    await db.collection("admin_actions").add({
-      adminId: request.auth.uid, action: "assign_user_barangay", targetId: uid,
-      targetName: user.data()?.fullName || user.data()?.displayName || "",
-      barangayId: id, barangayName: barangay.data().name,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    try {
+      await db.collection("admin_actions").add({
+        adminId: request.auth.uid, action: "assign_user_barangay", targetId: uid,
+        targetName: user.data()?.fullName || user.data()?.displayName || "",
+        barangayId: id, barangayName: barangay.data().name,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch (error) {
+      console.error("assignUserBarangay: audit log write failed", {
+        uid, barangayId: id, code: error?.code || null,
+        message: error?.message || String(error),
+      });
+    }
     return { uid, ...values, barangayName: barangay.data().name };
   },
 );
