@@ -32,15 +32,31 @@
   -->
   <script src="maps_config.js"></script>
   <script>
+    // Start Flutter only after the Maps JS API has loaded (or failed), so
+    // a GoogleMap widget never builds before `google.maps` exists — that
+    // race renders as a blank gray box in release builds.
+    window.agakbayStartFlutter = function () {
+      if (window.__agakbayFlutterStarted) return;
+      window.__agakbayFlutterStarted = true;
+      var b = document.createElement("script");
+      b.src = "flutter_bootstrap.js";
+      b.async = true;
+      document.body.appendChild(b);
+    };
     (function () {
       var key = window.AGAKBAY_MAPS_API_KEY;
       if (!key) {
-        console.warn("Google Maps key missing: create web/maps_config.js (see maps_config.example.js).");
+        console.warn("Google Maps key missing: create web/maps_config.js (see maps_config.example.js). Maps will show as gray boxes.");
+        window.__agakbayMapsReady = true;
         return;
       }
       var s = document.createElement("script");
       s.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key);
-      s.defer = true;
+      s.async = true;
+      s.onload = s.onerror = function () {
+        window.__agakbayMapsReady = true;
+        if (document.body) window.agakbayStartFlutter();
+      };
       document.head.appendChild(s);
     })();
   </script>
@@ -66,6 +82,8 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
-  <script src="flutter_bootstrap.js" async></script>
+  <script>
+    if (window.__agakbayMapsReady) window.agakbayStartFlutter();
+  </script>
 </body>
 </html>
