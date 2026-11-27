@@ -2,12 +2,14 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
-    function isTourismAdmin() {
+    function isApplicationReviewer() {
       return request.auth != null
         && request.auth.token.admin == true
         && (
-          request.auth.token.adminRole == null ||
-          request.auth.token.adminRole == 'tourism_admin'
+          request.auth.token.adminRole == null
+          || request.auth.token.adminRole == 'tourism_admin'
+          || request.auth.token.adminRole == 'mountain_head'
+          || request.auth.token.adminRole == 'barangay_official'
         );
     }
 
@@ -34,7 +36,7 @@ service firebase.storage {
     // the download URLs on applications their Firestore rules expose.
     match /tour_guide_applications/{userId}/{fileName} {
       allow read: if request.auth != null
-        && (request.auth.uid == userId || isTourismAdmin());
+        && (request.auth.uid == userId || isApplicationReviewer());
       allow write: if request.auth != null
         && request.auth.uid == userId
         && request.resource.size < 8 * 1024 * 1024

@@ -69,6 +69,49 @@ exports.sendNearbySos = sendNearbySos;
 exports.requestAdminPasswordReset = requestAdminPasswordReset;
 exports.confirmAdminPasswordReset = confirmAdminPasswordReset;
 
+exports.getTourGuideDocumentImage = onCall(
+  { region: "asia-southeast1", timeoutSeconds: 30, memory: "256MiB" },
+  async (request) => {
+    const token = request.auth?.token;
+    const role = token?.adminRole;
+    const isReviewer = token?.admin === true && (
+      role == null || role === "tourism_admin" ||
+      role === "mountain_head" || role === "barangay_official"
+    );
+    if (!isReviewer) {
+      throw new HttpsError("permission-denied", "Admin access required.");
+    }
+
+    const rawUrl = String(request.data?.url ?? "").trim();
+    if (!rawUrl) throw new HttpsError("invalid-argument", "Image URL is required.");
+
+    let objectPath;
+    try {
+      const parsed = new URL(rawUrl);
+      const marker = "/o/";
+      const markerIndex = parsed.pathname.indexOf(marker);
+      if (markerIndex < 0) throw new Error("Invalid Storage URL.");
+      objectPath = decodeURIComponent(parsed.pathname.slice(markerIndex + marker.length));
+    } catch (error) {
+      throw new HttpsError("invalid-argument", "Invalid Firebase Storage URL.");
+    }
+
+    const parts = objectPath.split("/");
+    if (parts.length !== 3 || parts[0] !== "tour_guide_applications") {
+      throw new HttpsError("invalid-argument", "Invalid application document path.");
+    }
+
+    const [contents] = await admin.storage().bucket().file(objectPath).download();
+    if (contents.length > 8 * 1024 * 1024) {
+      throw new HttpsError("failed-precondition", "Document is too large.");
+    }
+
+    const fileName = parts[2].toLowerCase();
+    const contentType = fileName.endsWith(".png") ? "image/png" : "image/jpeg";
+    return { base64: contents.toString("base64"), contentType };
+  },
+);
+
 function buildHikeRoomHistoryRecord({ roomId, before, after, participants }) {
   if (before?.status !== "active" || after?.status !== "ended") return null;
   const startedAt = before.startedAt || after.startedAt || null;

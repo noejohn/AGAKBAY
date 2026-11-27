@@ -21,14 +21,11 @@
   <meta name="description" content="AGAKBAY Tourism Admin Dashboard.">
 
   <!--
-    Required for google_maps_flutter's web implementation (used by the
-    Trail Route Verification page). The key is NOT committed: copy
-    web/maps_config.example.js to web/maps_config.js (gitignored) and put
-    a web Maps key there. Flutter copies it into build/web, so it ships
-    with the Vercel deploy. Restrict that key in Google Cloud Console
-    (APIs & Services > Credentials) by HTTP referrer
-    (https://agakbay.vercel.app/*, http://localhost:3000/*) and to the
-    Maps JavaScript API only.
+    Optional Google Maps support for web builds that use GoogleMap widgets.
+    The admin dashboard uses OpenStreetMap for its web maps, so it does not
+    require this key. Other web builds can copy
+    web/maps_config.example.js to web/maps_config.js (gitignored) and provide
+    a browser Maps key restricted to their allowed HTTP referrers.
   -->
   <script src="maps_config.js"></script>
   <script>
@@ -46,7 +43,7 @@
     (function () {
       var key = window.AGAKBAY_MAPS_API_KEY;
       if (!key) {
-        console.warn("Google Maps key missing: create web/maps_config.js (see maps_config.example.js). Maps will show as gray boxes.");
+        console.info("Google Maps key missing; GoogleMap widgets are unavailable. Admin dashboard maps use OpenStreetMap.");
         window.__agakbayMapsReady = true;
         return;
       }

@@ -14,13 +14,18 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart' as fm;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:latlong2/latlong.dart' as ll;
+import 'package:url_launcher/url_launcher.dart';
 
 import '../admin_main.dart' show AdminColors;
 import '../data/davao_mountains.dart';
 import '../data/davao_barangay_districts.dart';
+import '../services/offline_map_service.dart';
 import 'incident_report_dialog.dart';
 
 /// Account-management Cloud Functions (manageUserAccount,
@@ -2771,74 +2776,104 @@ class _GuideApplicationCardState extends State<_GuideApplicationCard> {
 /// is exactly what made these look "not submitted" even when they were.
 /// This surfaces the actual error and a copyable link as a fallback the
 /// admin can open directly in a new tab.
-class _DocumentImage extends StatelessWidget {
+class _DocumentImage extends StatefulWidget {
   const _DocumentImage({required this.url});
 
   final String? url;
 
   @override
+  State<_DocumentImage> createState() => _DocumentImageState();
+}
+
+class _DocumentImageState extends State<_DocumentImage> {
+  late final Future<Uint8List> _imageFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _imageFuture = _loadImage();
+  }
+
+  Future<Uint8List> _loadImage() async {
+    final result = await FirebaseFunctions.instanceFor(region: 'asia-southeast1')
+        .httpsCallable('getTourGuideDocumentImage')
+        .call<Map<String, dynamic>>({'url': widget.url});
+    final base64Image = result.data['base64']?.toString();
+    if (base64Image == null || base64Image.isEmpty) {
+      throw StateError('The server did not return image data.');
+    }
+    return base64Decode(base64Image);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final url = this.url;
+    final url = widget.url;
     if (url == null || url.isEmpty) {
       return const Text(
         'Not provided.',
         style: TextStyle(color: Colors.black45),
       );
     }
-    final thumbnail = ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 320),
-      child: Image.network(
-        url,
-        fit: BoxFit.contain,
-        loadingBuilder: (context, child, progress) {
-          if (progress == null) return child;
-          return const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Center(child: CircularProgressIndicator()),
+
+    final thumbnail = FutureBuilder<Uint8List>(
+      future: _imageFuture,
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          return ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 320),
+            child: Image.memory(snapshot.data!, fit: BoxFit.contain),
           );
-        },
-        // Kept only as a fallback — storage.setCorsConfiguration (see
-        // scripts/setStorageCors.js) should make this the rare path now,
-        // not the normal one. Without it, a failed load used to render as
-        // nothing at all, which read as "the applicant submitted nothing."
-        errorBuilder: (context, error, stackTrace) => Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Colors.red.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Could not load this image here (likely a browser CORS or '
-                'permission restriction on the admin web dashboard).',
-                style: TextStyle(color: Colors.red),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Open directly instead:',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 4),
-              SelectableText(url, style: const TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-      ),
+        }
+        if (snapshot.hasError) {
+          return Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.red.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Could not load this image through the admin service.',
+                  style: TextStyle(color: Colors.red),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () => launchUrl(
+                    Uri.parse(url),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                  icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                  label: const Text('Open image in a new tab'),
+                ),
+              ],
+            ),
+          );
+        }
+        return const Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(child: CircularProgressIndicator()),
+        );
+      },
     );
+
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
-        onTap: () => _showFullImageView(context, url),
+        onTap: () => _showFullImageView(context, url, _imageFuture),
         child: thumbnail,
       ),
     );
   }
 }
 
-void _showFullImageView(BuildContext context, String url) {
+void _showFullImageView(
+  BuildContext context,
+  String url,
+  Future<Uint8List> imageFuture,
+) {
   showDialog<void>(
     context: context,
     barrierColor: Colors.black87,
@@ -2858,7 +2893,27 @@ void _showFullImageView(BuildContext context, String url) {
                   // closes the viewer — otherwise pinch/pan gestures on the
                   // image would also trigger the dismiss-on-tap above.
                   onTap: () {},
-                  child: Image.network(url, fit: BoxFit.contain),
+                  child: FutureBuilder<Uint8List>(
+                    future: imageFuture,
+                    builder: (context, snapshot) {
+                      if (snapshot.hasData) {
+                        return Image.memory(snapshot.data!, fit: BoxFit.contain);
+                      }
+                      if (snapshot.hasError) {
+                        return Center(
+                          child: ElevatedButton.icon(
+                            onPressed: () => launchUrl(
+                              Uri.parse(url),
+                              mode: LaunchMode.externalApplication,
+                            ),
+                            icon: const Icon(Icons.open_in_new_rounded),
+                            label: const Text('Open image in a new tab'),
+                          ),
+                        );
+                      }
+                      return const CircularProgressIndicator();
+                    },
+                  ),
                 ),
               ),
             ),
@@ -2917,6 +2972,48 @@ CameraPosition _routeCameraPosition(List<LatLng> points) {
       ? 15.0
       : (14 - (spanDegrees * 100)).clamp(9.0, 15.0);
   return CameraPosition(target: center, zoom: zoom, tilt: 45);
+}
+
+Widget _adminOpenStreetMap({
+  required ll.LatLng initialCenter,
+  required double initialZoom,
+  fm.CameraFit? initialCameraFit,
+  List<fm.Marker> markers = const [],
+  List<fm.Polyline> polylines = const [],
+  Key? key,
+}) {
+  return fm.FlutterMap(
+    key: key,
+    options: fm.MapOptions(
+      initialCenter: initialCenter,
+      initialZoom: initialZoom,
+      initialCameraFit: initialCameraFit,
+      minZoom: 3,
+      maxZoom: 18,
+      interactionOptions: const fm.InteractionOptions(
+        flags: fm.InteractiveFlag.all,
+      ),
+    ),
+    children: [
+      fm.TileLayer(
+        urlTemplate: OfflineMapService.tileUrlTemplate,
+        userAgentPackageName: OfflineMapService.userAgentPackageName,
+      ),
+      if (polylines.isNotEmpty) fm.PolylineLayer(polylines: polylines),
+      if (markers.isNotEmpty) fm.MarkerLayer(markers: markers),
+      fm.RichAttributionWidget(
+        attributions: [
+          fm.TextSourceAttribution(
+            'OpenStreetMap contributors',
+            onTap: () => launchUrl(
+              Uri.https('www.openstreetmap.org', '/copyright'),
+              mode: LaunchMode.externalApplication,
+            ),
+          ),
+        ],
+      ),
+    ],
+  );
 }
 
 class _TrailVerificationPage extends StatelessWidget {
@@ -3042,48 +3139,95 @@ class _TrailMapPreview extends StatelessWidget {
         ),
       );
     }
+    final cameraPosition = _routeCameraPosition(points);
+    final osmPoints = points
+        .map((point) => ll.LatLng(point.latitude, point.longitude))
+        .toList(growable: false);
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
         height: 260,
-        child: GoogleMap(
-          initialCameraPosition: _routeCameraPosition(points),
-          polylines: {
-            Polyline(
-              polylineId: const PolylineId('route'),
-              points: points,
-              color: AdminColors.accent,
-              width: 4,
-              patterns: [PatternItem.dash(20), PatternItem.gap(10)],
-            ),
-          },
-          markers: {
-            Marker(
-              markerId: const MarkerId('start'),
-              position: points.first,
-              icon: BitmapDescriptor.defaultMarkerWithHue(
-                BitmapDescriptor.hueGreen,
+        child: kIsWeb
+            ? _adminOpenStreetMap(
+                initialCenter: ll.LatLng(
+                  cameraPosition.target.latitude,
+                  cameraPosition.target.longitude,
+                ),
+                initialZoom: cameraPosition.zoom,
+                polylines: [
+                  fm.Polyline(
+                    points: osmPoints,
+                    color: AdminColors.accent,
+                    strokeWidth: 4,
+                  ),
+                ],
+                markers: [
+                  fm.Marker(
+                    point: osmPoints.first,
+                    width: 40,
+                    height: 40,
+                    child: const Tooltip(
+                      message: 'Start',
+                      child: Icon(
+                        Icons.trip_origin_rounded,
+                        color: Colors.green,
+                        size: 32,
+                      ),
+                    ),
+                  ),
+                  fm.Marker(
+                    point: osmPoints.last,
+                    width: 40,
+                    height: 40,
+                    child: const Tooltip(
+                      message: 'End',
+                      child: Icon(
+                        Icons.flag_rounded,
+                        color: Colors.red,
+                        size: 32,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            : GoogleMap(
+                initialCameraPosition: cameraPosition,
+                polylines: {
+                  Polyline(
+                    polylineId: const PolylineId('route'),
+                    points: points,
+                    color: AdminColors.accent,
+                    width: 4,
+                    patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+                  ),
+                },
+                markers: {
+                  Marker(
+                    markerId: const MarkerId('start'),
+                    position: points.first,
+                    icon: BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueGreen,
+                    ),
+                    infoWindow: const InfoWindow(title: 'Start'),
+                  ),
+                  Marker(
+                    markerId: const MarkerId('end'),
+                    position: points.last,
+                    icon: BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueRed,
+                    ),
+                    infoWindow: const InfoWindow(title: 'End'),
+                  ),
+                },
+                // These four are what make the preview tiltable/rotatable/
+                // zoomable by the admin, not just a static picture of the route.
+                tiltGesturesEnabled: true,
+                rotateGesturesEnabled: true,
+                zoomGesturesEnabled: true,
+                scrollGesturesEnabled: true,
+                myLocationButtonEnabled: false,
+                zoomControlsEnabled: false,
               ),
-              infoWindow: const InfoWindow(title: 'Start'),
-            ),
-            Marker(
-              markerId: const MarkerId('end'),
-              position: points.last,
-              icon: BitmapDescriptor.defaultMarkerWithHue(
-                BitmapDescriptor.hueRed,
-              ),
-              infoWindow: const InfoWindow(title: 'End'),
-            ),
-          },
-          // These four are what make the preview tiltable/rotatable/
-          // zoomable by the admin, not just a static picture of the route.
-          tiltGesturesEnabled: true,
-          rotateGesturesEnabled: true,
-          zoomGesturesEnabled: true,
-          scrollGesturesEnabled: true,
-          myLocationButtonEnabled: false,
-          zoomControlsEnabled: false,
-        ),
       ),
     );
   }
@@ -4773,6 +4917,30 @@ class _ParticipantLocationMap extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final position = _initialPosition();
+    final osmMarkers = markers
+        .map(
+          (marker) => fm.Marker(
+            point: ll.LatLng(
+              marker.position.latitude,
+              marker.position.longitude,
+            ),
+            width: 40,
+            height: 44,
+            child: Tooltip(
+              message: [
+                marker.infoWindow.title,
+                marker.infoWindow.snippet,
+              ].whereType<String>().where((text) => text.isNotEmpty).join('\n'),
+              child: const Icon(
+                Icons.location_on_rounded,
+                color: AdminColors.accent,
+                size: 38,
+              ),
+            ),
+          ),
+        )
+        .toList(growable: false);
     return Container(
       width: double.infinity,
       height: 320,
@@ -4783,30 +4951,31 @@ class _ParticipantLocationMap extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: Stack(
         children: [
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: _initialPosition(),
-              zoom: 14,
+          if (kIsWeb)
+            _adminOpenStreetMap(
+              initialCenter: ll.LatLng(
+                position.latitude,
+                position.longitude,
+              ),
+              initialZoom: 14,
+              markers: osmMarkers,
+            )
+          else
+            GoogleMap(
+              initialCameraPosition: CameraPosition(
+                target: position,
+                zoom: 14,
+              ),
+              markers: markers,
+              zoomControlsEnabled: true,
+              myLocationButtonEnabled: false,
+              mapToolbarEnabled: false,
+              compassEnabled: true,
+              zoomGesturesEnabled: true,
+              scrollGesturesEnabled: true,
+              rotateGesturesEnabled: true,
+              tiltGesturesEnabled: false,
             ),
-
-            markers: markers,
-
-            zoomControlsEnabled: true,
-
-            myLocationButtonEnabled: false,
-
-            mapToolbarEnabled: false,
-
-            compassEnabled: true,
-
-            zoomGesturesEnabled: true,
-
-            scrollGesturesEnabled: true,
-
-            rotateGesturesEnabled: true,
-
-            tiltGesturesEnabled: false,
-          ),
 
           // ============================================================
           // MAP LABEL
@@ -5551,6 +5720,30 @@ class _SosRoomMapState extends State<_SosRoomMap> {
   @override
   Widget build(BuildContext context) {
     final firstPoint = widget.points.firstOrNull;
+    final osmCoordinates = widget.points
+        .map((point) => ll.LatLng(point.latitude, point.longitude))
+        .toList(growable: false);
+    final osmMarkers = widget.showMarkers
+        ? widget.points
+              .map(
+                (point) => fm.Marker(
+                  point: ll.LatLng(point.latitude, point.longitude),
+                  width: 42,
+                  height: 46,
+                  child: Tooltip(
+                    message: point.senderName.isEmpty
+                        ? 'SOS alert'
+                        : 'SOS: ${point.senderName}',
+                    child: const Icon(
+                      Icons.location_on_rounded,
+                      color: Colors.red,
+                      size: 40,
+                    ),
+                  ),
+                ),
+              )
+              .toList(growable: false)
+        : const <fm.Marker>[];
     final markers = widget.showMarkers
         ? widget.points.map((point) {
             return Marker(
@@ -5576,25 +5769,45 @@ class _SosRoomMapState extends State<_SosRoomMap> {
       width: double.infinity,
       decoration: BoxDecoration(borderRadius: BorderRadius.circular(14)),
       clipBehavior: Clip.antiAlias,
-      child: GoogleMap(
-        initialCameraPosition: CameraPosition(
-          target: firstPoint == null
-              ? const LatLng(7.0731, 125.6128)
-              : LatLng(firstPoint.latitude, firstPoint.longitude),
-          zoom: firstPoint == null ? 11 : 14,
-        ),
-        markers: markers,
-        onMapCreated: (controller) {
-          _controller = controller;
-          _fitAlertLocations();
-        },
-        tiltGesturesEnabled: true,
-        rotateGesturesEnabled: true,
-        zoomGesturesEnabled: true,
-        scrollGesturesEnabled: true,
-        myLocationButtonEnabled: false,
-        zoomControlsEnabled: false,
-      ),
+      child: kIsWeb
+          ? _adminOpenStreetMap(
+              key: ValueKey(
+                osmCoordinates
+                    .map((point) => '${point.latitude},${point.longitude}')
+                    .join(';'),
+              ),
+              initialCenter: firstPoint == null
+                  ? const ll.LatLng(7.0731, 125.6128)
+                  : osmCoordinates.first,
+              initialZoom: firstPoint == null ? 11 : 14,
+              initialCameraFit: osmCoordinates.length > 1
+                  ? fm.CameraFit.coordinates(
+                      coordinates: osmCoordinates,
+                      padding: const EdgeInsets.all(56),
+                      maxZoom: 14,
+                    )
+                  : null,
+              markers: osmMarkers,
+            )
+          : GoogleMap(
+              initialCameraPosition: CameraPosition(
+                target: firstPoint == null
+                    ? const LatLng(7.0731, 125.6128)
+                    : LatLng(firstPoint.latitude, firstPoint.longitude),
+                zoom: firstPoint == null ? 11 : 14,
+              ),
+              markers: markers,
+              onMapCreated: (controller) {
+                _controller = controller;
+                _fitAlertLocations();
+              },
+              tiltGesturesEnabled: true,
+              rotateGesturesEnabled: true,
+              zoomGesturesEnabled: true,
+              scrollGesturesEnabled: true,
+              myLocationButtonEnabled: false,
+              zoomControlsEnabled: false,
+            ),
     );
   }
 }

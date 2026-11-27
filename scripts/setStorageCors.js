@@ -21,6 +21,7 @@ const admin = require("firebase-admin");
 // Add any other origin the admin dashboard is actually served from (a
 // custom domain, a different local dev port, etc.).
 const ALLOWED_ORIGINS = [
+  "https://agakbay.vercel.app",
   "https://tunga-app-2026.web.app",
   "https://tunga-app-2026.firebaseapp.com",
   "http://localhost:3000",
